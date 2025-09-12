@@ -5,7 +5,6 @@ import pandas as pd
 
 from .yahoo_client import resolve_isin_one, get_series, get_info
 from .metrics import compute_metrics_from_series, compute_sharpe_ratio
-from .io_csv import upsert_results_csv
 from .trackingdiff_client import fetch_tracking_difference
 from .etf_info import get_etf_extended_info, fetch_ter_justetf, fallback_ter_from_yahoo_info
 
@@ -106,16 +105,5 @@ def compute_etf_over_periods(
             "benchmark_name": bench_name or "", "tracking_diff_pct": td_val,
             "sharpe_ratio": sharpe, "calmar_ratio": calmar
         })
-
-    # 6. Salva i risultati se richiesto
-    if csv_path:
-        try:
-            df_to_save = pd.DataFrame(rows).round(6)
-            for col in df_to_save.columns:
-                if 'pct' in col or 'ratio' in col:
-                    df_to_save[col] = df_to_save[col].astype(object).where(pd.notna(df_to_save[col]), None)
-            upsert_results_csv(csv_path, df_to_save.to_dict('records'))
-        except Exception as e:
-            print(f"Errore nel salvataggio CSV: {e}")
 
     return info_out, rows, aligned_frames

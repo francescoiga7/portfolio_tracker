@@ -11,7 +11,6 @@ from typing import Dict, List, Optional
 from datetime import date
 import streamlit as st
 from .yahoo_client import get_series, resolve_isin_one
-import logger
 
 logger = logging.getLogger(__name__)
 
