@@ -41,7 +41,6 @@ class JustETFClient(BaseFinancialClient):
             else:
                 del self.cache[isin]
         return None
-
     def _cache_data(self, isin: str, data: str) -> None:
         """Salva dati nella cache."""
         self.cache[isin] = (data, datetime.now())
@@ -106,33 +105,15 @@ class JustETFClient(BaseFinancialClient):
         }
 
 
-# Istanza globale del client
-_justetf_client = JustETFClient()
-
-
-def fetch_justetf_page(isin: str, timeout: int = 12) -> Optional[str]:
-    """
-    Fetches the JustETF page for a given ISIN in multiple languages.
-    Backward compatibility wrapper for the new client.
-    """
-    return _justetf_client.fetch_etf_page(isin, timeout=timeout)
-
-
+# --- helpers HTML parsing (invariati) ---
 def _strip_tags(html: str) -> str:
-    """
-    Strips HTML tags and normalizes whitespace.
-    """
     html = re.sub(r"(?is)\<(script|style).*?\>.*?\</\1\>", " ", html)
     text = re.sub(r"(?s)\<[^\>]+\>", " ", html)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
-# --- NEW: robust label-value extraction with BeautifulSoup ---
 def _find_value_by_labels_soup(soup: BeautifulSoup, labels: List[str]) -> Optional[str]:
-    """
-    Cerca un valore su JustETF. Per il benchmark, cerca prima un link per ottenere un nome pulito.
-    """
     label_norm = [l.strip().lower() for l in labels]
     is_benchmark_search = any(l in ["indice", "benchmark"] for l in label_norm)
     for lab_div in soup.select("div.vallabel"):
@@ -140,14 +121,11 @@ def _find_value_by_labels_soup(soup: BeautifulSoup, labels: List[str]) -> Option
         if text in label_norm:
             val_div = lab_div.find_next_sibling("div", class_="val")
             if val_div:
-                # Se stiamo cercando il benchmark, il nome pulito è quasi sempre in un link
                 if is_benchmark_search:
                     link = val_div.find("a")
                     if link and link.get_text(strip=True):
                         return link.get_text(strip=True)
-                # Fallback per tutti i campi: prendi il testo completo
                 full_text = val_div.get_text(" ", strip=True)
-                # Se è il benchmark, tronca la descrizione
                 if is_benchmark_search and ". " in full_text:
                     return full_text.split(". ", 1)[0]
                 return full_text
@@ -155,9 +133,6 @@ def _find_value_by_labels_soup(soup: BeautifulSoup, labels: List[str]) -> Option
 
 
 def parse_ter_from_html(html: str) -> Optional[float]:
-    """
-    Parses the Total Expense Ratio (TER) from HTML content.
-    """
     patterns = [
         r"(?:TER|Total\s*expense\s*ratio|Ongoing\s*charges|Costi\s*correnti)[^%0-9]{0,60}([0-9]+(?:[.,][0-9]+)?)\s*%",
         r"Kostenquote[^%0-9]{0,60}([0-9]+(?:[.,][0-9]+)?)\s*%",
@@ -189,9 +164,6 @@ def parse_ter_from_html(html: str) -> Optional[float]:
 
 
 def parse_benchmark_name_from_html(html: str) -> Optional[str]:
-    """
-    Parses the benchmark name from HTML content using the robust soup helper.
-    """
     name = None
     try:
         soup = BeautifulSoup(html, "html.parser")
@@ -212,13 +184,9 @@ def parse_benchmark_name_from_html(html: str) -> Optional[str]:
 
 
 def parse_etf_details_from_html(html: str) -> dict:
-    """
-    Parses various ETF details from HTML content using BeautifulSoup first, then fallback regex.
-    """
     details: Dict[str, str] = {}
     try:
         soup = BeautifulSoup(html, "html.parser")
-        # Primary extraction via soup
         details_map = {
             "benchmark_name": ["Indice", "Benchmark", "Index", "Reference index"],
             "category": ["Focus di investimento", "Investment focus", "Category"],
@@ -233,7 +201,7 @@ def parse_etf_details_from_html(html: str) -> dict:
                 details[key] = val.strip()
     except Exception:
         pass
-    # Fallback regex on stripped text (con etichette italiane incluse)
+
     text_fallback = _strip_tags(html)
     patterns = {
         "benchmark_name": r"(?:Indice|Reference index|Benchmark|Index)\s*[:\-]?\s*(.+?)(?:\s*(?:Focus di investimento|Fund size|Dimensione del fondo|$))",
@@ -249,7 +217,25 @@ def parse_etf_details_from_html(html: str) -> dict:
             if m_text:
                 details[key] = m_text.group(1).strip()
 
-    # Keep original strings; normalizza solo spazi NBSP su fund_size
     if "fund_size" in details and details["fund_size"]:
         details["fund_size"] = details["fund_size"].replace("\xa0", " ").strip()
     return details
+
+
+# ---- Lazy singleton + wrapper per retro‑compatibilità ----
+_JEC: Optional[JustETFClient] = None
+
+
+def _get_justetf_client() -> JustETFClient:
+    global _JEC
+    if _JEC is None:
+        _JEC = JustETFClient()
+    return _JEC
+
+
+def fetch_justetf_page(isin: str, timeout: int = 12) -> Optional[str]:
+    """
+    Fetches the JustETF page for a given ISIN in multiple languages.
+    Backward compatibility wrapper for the new client.
+    """
+    return _get_justetf_client().fetch_etf_page(isin, timeout=timeout)

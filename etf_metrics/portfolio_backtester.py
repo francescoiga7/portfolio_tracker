@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 import logging
 from typing import Dict, Optional, List
-
 import pandas as pd
-import streamlit as st
 
 from .yahoo_client import resolve_isin_one, get_series
 from .base_client import DataValidator
@@ -42,7 +40,8 @@ def _load_series_and_mapping(portfolio_def: Dict[str, float], period: str):
         return None, {}
 
     return df, asset_to_ticker
-@st.cache_data(show_spinner=False, ttl=60 * 60)
+
+
 def get_portfolio_series(portfolio_def: Dict[str, float], period: str = "max") -> Optional[pd.Series]:
     """
     Costruisce la serie storica di un portafoglio basato sui suoi componenti e pesi.
@@ -104,7 +103,6 @@ def simulate_pac_investment(
         # Serie degli acquisti mappata sull'intero indice di df (tutto il periodo)
         purchases = pd.Series(0.0, index=df.index)
         purchases.loc[purchase_prices.index] = purchases_shares.values
-
         # Quote cumulate e valore dell'investimento per asset
         cumulative_shares = purchases.cumsum()
         monthly_investments[asset] = cumulative_shares * series
@@ -121,6 +119,7 @@ def parse_portfolio_input(text_input: str) -> Optional[Dict[str, float]]:
     """
     Estrae la definizione del portafoglio da un input testuale.
     Formato: ISIN:PESO% (es. IE00BK5BQT80: 80)
+    Ritorna un dict {ISIN: peso_normalizzato(0..1)} oppure None se input invalido.
     """
     portfolio: Dict[str, float] = {}
     lines = text_input.strip().split('\n')
@@ -131,13 +130,12 @@ def parse_portfolio_input(text_input: str) -> Optional[Dict[str, float]]:
             continue
         parts = [p.strip() for p in line.split(':')]
         if len(parts) != 2:
-            st.error(f"Riga mal formattata: '{line}'. Usare il formato 'ISIN: PESO'.")
+            logger.error("Riga mal formattata: '%s'. Formato atteso 'ISIN: PESO'.", line)
             return None
-
         isin, weight_str = parts
         isin = isin.upper()
         if not DataValidator.validate_isin(isin):
-            st.error(f"ISIN non valido: '{isin}'.")
+            logger.error("ISIN non valido: '%s'.", isin)
             return None
         try:
             weight = float(weight_str.replace('%', ''))
@@ -146,15 +144,15 @@ def parse_portfolio_input(text_input: str) -> Optional[Dict[str, float]]:
             portfolio[isin] = weight
             total_weight += weight
         except ValueError:
-            st.error(f"Peso non valido per {isin}: '{weight_str}'. Inserire un numero positivo.")
+            logger.error("Peso non valido per %s: '%s'. Inserire un numero positivo.", isin, weight_str)
             return None
 
     if not portfolio:
-        st.info("Inserisci almeno un ISIN con un peso per definire il portafoglio.")
+        logger.info("Nessun ISIN con peso valido fornito.")
         return None
 
     if abs(total_weight - 100.0) > 0.01:
-        st.warning(f"La somma dei pesi è {total_weight:.2f}%, non 100%. I pesi verranno normalizzati.")
+        logger.warning("La somma dei pesi è %.2f%% (non 100%%). I pesi verranno normalizzati.", total_weight)
 
     # Normalizza i pesi a 1
     return {k: v / total_weight for k, v in portfolio.items()}

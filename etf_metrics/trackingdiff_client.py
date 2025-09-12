@@ -18,7 +18,6 @@ class TrackingDifferencesClient(BaseFinancialClient):
     def __init__(self):
         super().__init__("TrackingDifferences", base_timeout=10)
         self.base_url = "https://www.trackingdifferences.com"
-        # Compilo i pattern una sola volta (semplici e robusti)
         self._patterns = [
             re.compile(r"Tracking\s*Difference[^\<]{0,200}?(-?\d+(?:[.,]\d+)?)\s*%", re.IGNORECASE),
             re.compile(r"\bTD\b[^\<]{0,120}?(-?\d+(?:[.,]\d+)?)\s*%", re.IGNORECASE),
@@ -29,10 +28,6 @@ class TrackingDifferencesClient(BaseFinancialClient):
         return DataValidator.validate_isin(isin)
 
     def _parse_value(self, html: str) -> Optional[float]:
-        """
-        Estrae il valore percentuale dai pattern.
-        Restituisce punti percentuali (es. 0.50 per 0,50%).
-        """
         if not html:
             return None
         for pat in self._patterns:
@@ -41,7 +36,6 @@ class TrackingDifferencesClient(BaseFinancialClient):
                 raw = m.group(1).strip().replace(",", ".")
                 try:
                     val = float(raw)
-                    # Sanity check: TD ragionevoli in (-50%, +50%)
                     if -50.0 <= val <= 50.0:
                         return val
                     logger.debug(f"Valore TD fuori range plausibile: {val}")
@@ -50,10 +44,6 @@ class TrackingDifferencesClient(BaseFinancialClient):
         return None
 
     def fetch_tracking_difference(self, isin: str) -> Optional[float]:
-        """
-        Recupera la tracking difference per un ISIN da trackingdifferences.com.
-        Ritorna il valore in punti percentuali (es. -0.42 per -0,42%).
-        """
         if not self.validate_input(isin):
             logger.error(f"ISIN non valido: {isin!r}")
             return None
@@ -67,12 +57,19 @@ class TrackingDifferencesClient(BaseFinancialClient):
         return value
 
 
-# ---- Istanza singleton + wrapper per retro‑compatibilità ----
-_td_client = TrackingDifferencesClient()
+# ---- Lazy singleton + wrapper per retro‑compatibilità ----
+_TD: Optional[TrackingDifferencesClient] = None
+
+
+def _get_td_client() -> TrackingDifferencesClient:
+    global _TD
+    if _TD is None:
+        _TD = TrackingDifferencesClient()
+    return _TD
 
 
 def fetch_tracking_difference(isin: str) -> Optional[float]:
     """
     Wrapper retro-compatibile: stessa firma della versione precedente.
     """
-    return _td_client.fetch_tracking_difference(isin)
+    return _get_td_client().fetch_tracking_difference(isin)

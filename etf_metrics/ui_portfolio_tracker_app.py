@@ -326,7 +326,7 @@ def display_pnl_results():
             famous_selection = st.multiselect(
                 "Confronta con portafogli modello",
                 famous_all,
-                default=(["Classic 60/40"] if "Classic 60/40" in famous_all else []),
+                default=(["Classic 60/<40"] if "Classic 60/40" in famous_all else []),
                 key="tracker_bt_famous_selection"
             )
 

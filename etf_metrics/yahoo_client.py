@@ -130,25 +130,32 @@ class YahooClient(BaseFinancialClient):
             return {}
 
 
-# ---- Istanza singleton + wrapper per retro-compatibilità ----
-_yahoo_client = YahooClient()
+# ---- Lazy singleton + wrapper per retro-compatibilità ----
+_YC: Optional[YahooClient] = None
+
+
+def _get_yahoo_client() -> YahooClient:
+    global _YC
+    if _YC is None:
+        _YC = YahooClient()
+    return _YC
 
 
 def yahoo_search(query: str, quotes_count: int = 40) -> List[Dict]:
-    return _yahoo_client.search(query, quotes_count)
+    return _get_yahoo_client().search(query, quotes_count)
 
 
 def resolve_isin_one(isin: str) -> Optional[str]:
-    return _yahoo_client.resolve_isin_one(isin)
+    return _get_yahoo_client().resolve_isin_one(isin)
 
 
 def get_series(ticker: str, period: str) -> Optional[pd.Series]:
-    return _yahoo_client.get_series(ticker, period)
+    return _get_yahoo_client().get_series(ticker, period)
 
 
 def get_info(isin: Optional[str] = None, ticker: Optional[str] = None) -> Dict:
-    return _yahoo_client.get_info(isin=isin, ticker=ticker)
+    return _get_yahoo_client().get_info(isin=isin, ticker=ticker)
 
 
 def get_info_fallback(isin: str) -> Dict:
-    return _yahoo_client.get_info_fallback(isin)
+    return _get_yahoo_client().get_info_fallback(isin)

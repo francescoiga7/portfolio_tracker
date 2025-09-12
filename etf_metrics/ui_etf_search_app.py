@@ -4,6 +4,27 @@ import streamlit as st
 from .etf_search_engine import search_etfs_universal, format_results_for_display
 
 
+@st.cache_data(show_spinner=True, ttl=60 * 30)
+def _cached_search_universal(
+    period: str,
+    risk_free_pct: float,
+    quotes_per_query: int,
+    limit_universe: int,
+    max_results: int,
+    sort_by: str,
+    ascending: bool,
+):
+    return search_etfs_universal(
+        period=period,
+        risk_free_rate_pct=risk_free_pct,
+        quotes_per_query=quotes_per_query,
+        limit_universe=limit_universe,
+        max_results=max_results,
+        sort_by=sort_by,
+        ascending=ascending,
+    )
+
+
 def render_etf_search_ui():
     """UI Streamlit per ricerca universale ETF UCITS (default periodo 1Y)."""
     st.title("🔎 ETF Search Engine (Universale • UCITS)")
@@ -28,9 +49,9 @@ def render_etf_search_ui():
     if st.sidebar.button("Esegui ricerca universale"):
         st.subheader("Risultati ricerca ETF (UCITS)")
         with st.spinner("Scopro l'universo ETF UCITS e calcolo le metriche..."):
-            df = search_etfs_universal(
+            df = _cached_search_universal(
                 period=period,
-                risk_free_rate_pct=risk_free_pct,  # in %
+                risk_free_pct=risk_free_pct,
                 quotes_per_query=quotes_per_query,
                 limit_universe=limit_universe,
                 max_results=max_results,
