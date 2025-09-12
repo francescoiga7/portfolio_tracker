@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 from typing import List, Optional
 import pandas as pd
+
 from .config import PREFERRED_SUFFIXES
 
+
 def _suffix(symbol: str) -> str:
-    return symbol[symbol.find("."):] if "." in symbol else ""
+    return symbol[symbol.find(".") :] if "." in symbol else ""
 
 
 def pick_preferred_symbol(candidates: List[str], preferred_suffixes=None) -> Optional[str]:
@@ -21,4 +23,14 @@ def pick_preferred_symbol(candidates: List[str], preferred_suffixes=None) -> Opt
 
 
 def to_percent_index(s: pd.Series) -> pd.Series:
-    return (s / s.iloc[0] - 1.0) * 100.0
+    """
+    Converte una serie di prezzi in indice % dal primo valore.
+    Restituisce (s / s.iloc[0] - 1) * 100, evitando errori su serie vuote/zero.
+    """
+    if s is None or len(s) == 0:
+        return s
+    base = s.iloc[0]
+    if base == 0:
+        # Evita divisione per zero: restituisce la serie originale
+        return s
+    return (s / base - 1.0) * 100.0
