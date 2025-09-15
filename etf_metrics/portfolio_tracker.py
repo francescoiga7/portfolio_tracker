@@ -119,69 +119,53 @@ class PortfolioTracker:
         if not transactions:
             return defaultdict(float, {'open_positions': [], 'aggregated_positions': [], 'capital_gains': []})
 
-        # Strutture dati per il calcolo
-        positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0, 'realized_pnl': 0})
-        realized_pnl = 0
-        net_invested = 0
-
-        # Ordina le transazioni per data
-        sorted_trans = sorted(transactions, key=lambda x: x['date'])
-
-        for t in sorted_trans:
+        # --- 1. Calcolo posizioni aperte e P&L non realizzato ---
+        positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0})
+        for t in sorted(transactions, key=lambda x: x['date']):
             isin = t['isin']
             qty = float(t['quantity'])
             price = float(t['price'])
-
             if t['type'] == 'buy':
                 positions[isin]['quantity'] += qty
                 positions[isin]['total_cost'] += qty * price
-                net_invested += qty * price
-
             elif t['type'] == 'sell':
-                if positions[isin]['quantity'] < qty:
-                    logger.warning(f"Vendita allo scoperto non supportata per {isin}.")
-                    continue
+                if positions[isin]['quantity'] > 0:
+                    avg_buy_price = positions[isin]['total_cost'] / positions[isin]['quantity']
+                    cost_of_sold_shares = qty * avg_buy_price
+                    positions[isin]['quantity'] -= qty
+                    positions[isin]['total_cost'] -= cost_of_sold_shares
 
-                avg_buy_price = positions[isin]['total_cost'] / positions[isin]['quantity']
-                cost_of_sold_shares = qty * avg_buy_price
-
-                sale_pnl = (qty * price) - cost_of_sold_shares
-                realized_pnl += sale_pnl
-
-                positions[isin]['quantity'] -= qty
-                positions[isin]['total_cost'] -= cost_of_sold_shares
-                net_invested -= qty * price  # Il capitale ritorna dalla vendita
-
-        # Calcolo P&L non realizzato sulle posizioni aperte
         open_positions_details = []
-        current_total_value = 0
-
         for isin, data in positions.items():
-            if data['quantity'] > 0.001:  # Tolleranza per floating point
+            if data['quantity'] > 0.0000001:
                 ticker = resolve_isin_one(isin)
                 series = get_series(ticker, "1mo") if ticker else None
                 current_price = series.iloc[-1] if (series is not None and not series.empty) else 0
-
                 current_amount = data['quantity'] * current_price
                 invested_amount = data['total_cost']
                 unrealized_pnl = current_amount - invested_amount
-
                 open_positions_details.append({
-                    'isin': isin,
-                    'quantity': data['quantity'],
-                    'avg_buy_price': invested_amount / data['quantity'],
-                    'current_price': current_price,
-                    'invested_amount': invested_amount,
-                    'current_amount': current_amount,
-                    'unrealized_pnl': unrealized_pnl,
+                    'isin': isin, 'quantity': data['quantity'],
+                    'avg_buy_price': invested_amount / data['quantity'] if data['quantity'] > 0 else 0,
+                    'current_price': current_price, 'invested_amount': invested_amount,
+                    'current_amount': current_amount, 'unrealized_pnl': unrealized_pnl,
                     'unrealized_pnl_pct': (unrealized_pnl / invested_amount * 100) if invested_amount > 0 else 0
                 })
-                current_total_value += current_amount
 
-        total_pnl = realized_pnl + sum(p['unrealized_pnl'] for p in open_positions_details)
-        initial_investment = sum(t['quantity'] * t['price'] for t in sorted_trans if t['type'] == 'buy')
+        # --- 2. Calcolo P&L realizzato dal Cassetto Fiscale ---
+        capital_gains = PortfolioTracker.calculate_capital_gains(transactions, commission, tax_rate)
+        realized_pnl_net = sum(cg['net_pnl'] for cg in capital_gains)
 
-        # Calcolo posizioni aggregate
+        # --- 3. Calcolo metriche di riepilogo secondo la nuova logica ---
+        invested_net_open = sum(p['invested_amount'] for p in open_positions_details)
+        current_value_open = sum(p['current_amount'] for p in open_positions_details)
+        unrealized_pnl_open = sum(p['unrealized_pnl'] for p in open_positions_details)
+
+        total_pnl = unrealized_pnl_open + realized_pnl_net
+
+        total_capital_invested = sum(t['quantity'] * t['price'] for t in transactions if t['type'] == 'buy')
+
+        # --- 4. Calcolo posizioni aggregate (mantiene la logica precedente per la tabella di dettaglio) ---
         aggregated_positions = []
         all_isins = set(t['isin'] for t in transactions)
         for isin in all_isins:
@@ -191,45 +175,27 @@ class PortfolioTracker:
             total_sold_qty = sum(t['quantity'] for t in transactions if t['isin'] == isin and t['type'] == 'sell')
             total_sold_value = sum(
                 t['quantity'] * t['price'] for t in transactions if t['isin'] == isin and t['type'] == 'sell')
+            avg_buy_price = total_bought_value / total_bought_qty if total_bought_qty > 0 else 0
+            current_pos = next((p for p in open_positions_details if p['isin'] == isin), None)
 
-            if total_bought_qty > 0:
-                avg_buy_price = total_bought_value / total_bought_qty
-            else:
-                avg_buy_price = 0
-
-            current_position = next((p for p in open_positions_details if p['isin'] == isin), None)
-
-            if current_position:
-                current_qty = current_position['quantity']
-                current_value = current_position['current_amount']
-                unrealized_pnl = current_position['unrealized_pnl']
-            else:
-                current_qty = 0
-                current_value = 0
-                unrealized_pnl = 0
-
-            realized_pnl_isin = total_sold_value - (total_sold_qty * avg_buy_price if total_bought_qty > 0 else 0)
+            realized_pnl_isin_gross = total_sold_value - (total_sold_qty * avg_buy_price)
 
             aggregated_positions.append({
-                'isin': isin,
-                'total_bought_qty': total_bought_qty,
-                'total_sold_qty': total_sold_qty,
-                'current_qty': current_qty,
+                'isin': isin, 'total_bought_qty': total_bought_qty, 'total_sold_qty': total_sold_qty,
+                'current_qty': current_pos['quantity'] if current_pos else 0,
                 'avg_buy_price': avg_buy_price,
-                'realized_pnl': realized_pnl_isin,
-                'unrealized_pnl': unrealized_pnl,
-                'total_pnl': realized_pnl_isin + unrealized_pnl,
-                'current_value': current_value,
+                'realized_pnl': realized_pnl_isin_gross,
+                'unrealized_pnl': current_pos['unrealized_pnl'] if current_pos else 0,
+                'total_pnl': realized_pnl_isin_gross + (current_pos['unrealized_pnl'] if current_pos else 0),
+                'current_value': current_pos['current_amount'] if current_pos else 0,
             })
 
-        capital_gains = PortfolioTracker.calculate_capital_gains(transactions, commission, tax_rate)
-
         return {
-            'net_invested': net_invested,
-            'current_value': current_total_value,
-            'realized_pnl': realized_pnl,
+            'net_invested': invested_net_open,
+            'current_value': current_value_open,
+            'realized_pnl': realized_pnl_net,
             'total_pnl': total_pnl,
-            'total_pnl_pct': (total_pnl / initial_investment * 100) if initial_investment > 0 else 0,
+            'total_pnl_pct': (total_pnl / total_capital_invested * 100) if total_capital_invested > 0 else 0,
             'open_positions': open_positions_details,
             'aggregated_positions': aggregated_positions,
             'capital_gains': capital_gains

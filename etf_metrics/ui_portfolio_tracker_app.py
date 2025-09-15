@@ -114,8 +114,8 @@ def render_portfolio_tracker_ui():
         with st.sidebar.expander("➕ Aggiungi Acquisto"):
             with st.form("buy_form"):
                 buy_isin = st.text_input("ISIN")
-                buy_qty = st.number_input("Quantità", min_value=0.00, step=0.1)
-                buy_price = st.number_input("Prezzo Acquisto (€)", min_value=0.01, step=0.50, format="%.2f")
+                buy_qty = st.number_input("Quantità", min_value=0.000001, step=0.0001, format="%.6f")
+                buy_price = st.number_input("Prezzo Acquisto (€)", min_value=0.01, step=0.01, format="%.2f")
                 buy_date = st.date_input("Data Acquisto", datetime.now().date())
                 if st.form_submit_button("Registra Acquisto"):
                     trans = {"type": "buy", "isin": buy_isin.strip().upper(), "quantity": buy_qty, "price": buy_price,
@@ -126,7 +126,7 @@ def render_portfolio_tracker_ui():
         with st.sidebar.expander("➖ Registra Vendita"):
             with st.form("sell_form"):
                 sell_isin = st.text_input("ISIN ")
-                sell_qty = st.number_input("Quantità ", min_value=0.01, step=0.1)
+                sell_qty = st.number_input("Quantità ", min_value=0.000001, step=0.0001, format="%.6f")
                 sell_price = st.number_input("Prezzo Vendita (€)", min_value=0.01, step=0.01, format="%.2f")
                 sell_date = st.date_input("Data Vendita", datetime.now().date())
                 if st.form_submit_button("Registra Vendita"):
@@ -157,9 +157,9 @@ def render_portfolio_tracker_ui():
     st.subheader("🧭 Riepilogo Portafoglio")
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Investito Netto", f"€{pnl_results['net_invested']:,.2f}")
-    col2.metric("Valore Attuale", f"€{pnl_results['current_value']:,.2f}")
-    col3.metric("P&L Realizzato", f"€{pnl_results['realized_pnl']:,.2f}")
+    col1.metric("Investito Netto (Posizioni Aperte)", f"€{pnl_results['net_invested']:,.2f}")
+    col2.metric("Valore Attuale (Posizioni Aperte)", f"€{pnl_results['current_value']:,.2f}")
+    col3.metric("P&L Realizzato (Netto)", f"€{pnl_results['realized_pnl']:,.2f}")
     col4.metric("P&L Totale", f"€{pnl_results['total_pnl']:,.2f}", f"{pnl_results['total_pnl_pct']:.2f}%")
 
     # Grafico allocazione
@@ -176,7 +176,8 @@ def render_portfolio_tracker_ui():
                               'unrealized_pnl', 'unrealized_pnl_pct']].style.format({
             'avg_buy_price': '€{:.2f}', 'current_price': '€{:.2f}',
             'invested_amount': '€{:,.2f}', 'current_amount': '€{:,.2f}',
-            'unrealized_pnl': '€{:+,.2f}', 'unrealized_pnl_pct': '{:+.2f}%'
+            'unrealized_pnl': '€{:+,.2f}', 'unrealized_pnl_pct': '{:+.2f}%',
+            'quantity': '{:.6f}'
         }), use_container_width=True)
     else:
         st.info("Nessuna posizione aperta.")
@@ -189,7 +190,10 @@ def render_portfolio_tracker_ui():
                              'realized_pnl', 'unrealized_pnl', 'total_pnl', 'current_value']].style.format({
             'avg_buy_price': '€{:.2f}', 'realized_pnl': '€{:+,.2f}',
             'unrealized_pnl': '€{:+,.2f}', 'total_pnl': '€{:+,.2f}',
-            'current_value': '€{:,.2f}'
+            'current_value': '€{:,.2f}',
+            'total_bought_qty': '{:.6f}',
+            'total_sold_qty': '{:.6f}',
+            'current_qty': '{:.6f}',
         }), use_container_width=True)
     else:
         st.info("Nessun dato aggregato da mostrare.")
@@ -204,7 +208,8 @@ def render_portfolio_tracker_ui():
             'sale_price': '€{:.2f}', 'avg_buy_price': '€{:.2f}',
             'gross_pnl': '€{:+,.2f}', 'commission': '€{:.2f}',
             'taxable_amount': '€{:.2f}', 'tax_paid': '€{:.2f}',
-            'net_pnl': '€{:+,.2f}'
+            'net_pnl': '€{:+,.2f}',
+            'quantity': '{:.6f}'
         }), use_container_width=True)
     else:
         st.info("Nessuna vendita registrata.")
@@ -212,4 +217,4 @@ def render_portfolio_tracker_ui():
     # Tabella transazioni
     with st.expander("📜 Cronologia Transazioni"):
         df_trans = pd.DataFrame(portfolio_data["transactions"])
-        st.dataframe(df_trans, use_container_width=True)
+        st.dataframe(df_trans.style.format({'quantity': '{:.6f}'}), use_container_width=True)

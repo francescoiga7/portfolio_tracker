@@ -90,7 +90,7 @@ def render_portfolio_backtester_ui():
     )
 
     rf_ann_backtest = st.sidebar.number_input("Risk-free annuo (%) per Sharpe", min_value=-5.0, max_value=10.0,
-                                              value=1.0, step=0.25)
+                                              value=3.95, step=0.25)
 
     if st.sidebar.button("▶️ Esegui Backtest"):
         user_portfolio_def = parse_portfolio_input(portfolio_text)

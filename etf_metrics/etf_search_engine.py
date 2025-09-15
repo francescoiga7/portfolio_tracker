@@ -1,291 +1,173 @@
 # -*- coding: utf-8 -*-
 """
-ETF Search Engine (Universale • UCITS) — metrics come in momentum.py
+ETF Search Engine Definitivo - Robusto e Tollerante
 
-- Discovery universale (senza query utente) di ETF **UCITS** tramite Yahoo Finance.
-- Calcolo metriche nello **stesso stile di momentum.py**:
-  * scarica serie ampia (period="3y")
-  * filtra per lookback in mesi
-  * compute_metrics_from_series(series_filtrata) -> dict con 'total','cagr','vol_ann','mdd' (in %)
-  * compute_sharpe_ratio(series_filtrata, rf_annual_pct)
-
-Output DataFrame:
-['ticker', 'isin', 'nome etf', 'rendimento cagr', 'max drawdown', 'sharpe ratio']
-Progettato per essere richiamato dalla UI, ma senza dipendenze dirette da Streamlit.
+Logica Operativa:
+1.  **Scoperta Massimale**: Usa query ampie per scoprire il maggior numero possibile
+    di ETF/ETC/ETN sui mercati europei.
+2.  **Deduplicazione Flessibile**: Raggruppa per ISIN solo quando disponibile,
+    privilegiando sempre Borsa Italiana (.MI). Gli strumenti senza ISIN vengono
+    comunque mantenuti.
+3.  **Calcolo "Best-Effort"**: Tenta di calcolare tutte le metriche per ogni strumento.
+    Se un calcolo fallisce (es. Sharpe Ratio), il dato viene lasciato vuoto ma
+    lo strumento NON viene scartato.
+4.  **Classifica Informativa**: Ordina i risultati per Sharpe Ratio decrescente,
+    posizionando in fondo gli strumenti con dati incompleti. Questo garantisce
+    che l'utente veda sempre l'intero universo scoperto.
 """
-from __future__ import annotations
-
 import logging
 from typing import Dict, List, Optional, Tuple, Iterable
 from functools import lru_cache
-
+from collections import defaultdict
 import pandas as pd
 
 from .yahoo_client import yahoo_search, get_series, get_info
 from .metrics import compute_metrics_from_series, compute_sharpe_ratio
-
-# MANUAL_ISIN_MAP è opzionale (per risolvere ISIN se vuoi forzare alcuni mapping)
-try:
-    from .config import MANUAL_ISIN_MAP
-except Exception:
-    MANUAL_ISIN_MAP = {}
+from .utils import pick_preferred_symbol
 
 logger = logging.getLogger(__name__)
 
-# --- Periodi: mapping -> mesi ------------------------------------------------
-_PERIOD_CHOICES = ("1m", "3m", "6m", "1y", "3y", "5y", "10y", "ytd", "max")
+# --- Configurazioni per la Ricerca ---
+
+DEFAULT_SEED_QUERIES: Tuple[str, ...] = (
+    # Azionari ad ampia copertura
+    "MSCI World UCITS ETF", "FTSE All-World UCITS ETF", "Global Equity UCITS ETF",
+    "S&P 500 UCITS ETF", "NASDAQ 100 UCITS ETF", "STOXX Europe 600 UCITS ETF",
+    "MSCI Emerging Markets UCITS ETF", "Japan UCITS ETF",
+    # Tematici e Settoriali
+    "Technology Sector UCITS ETF", "Healthcare Sector UCITS ETF", "Financial Sector UCITS ETF",
+    "Clean Energy UCITS ETF", "AI & Robotics UCITS ETF", "Cybersecurity UCITS ETF",
+    # Fattoriali (Smart Beta)
+    "Value Factor UCITS ETF", "Growth Factor UCITS ETF", "Momentum Factor UCITS ETF", "Quality Factor UCITS ETF",
+    # Obbligazionari
+    "Global Aggregate Bond UCITS ETF EUR", "Government Bond UCITS ETF EUR", "Corporate Bond UCITS ETF EUR",
+    "High Yield Bond UCITS ETF EUR", "Inflation-Linked Bond UCITS ETF",
+    # Materie Prime e Crypto
+    "Gold ETC", "Silver ETC", "Broad Commodities ETC", "Bitcoin ETP", "Ethereum ETP"
+)
+
+PERIOD_MAP = {
+    "1d": (1 / 30.4, "1mo"), "1m": (1, "3mo"), "3m": (3, "6mo"),
+    "6m": (6, "1y"), "1y": (12, "3y"), "3y": (36, "5y"), "5y": (60, "10y"),
+}
 
 
-def _normalize_period_key(period: Optional[str]) -> str:
-    """Valida il periodo richiesto (default: '1y')."""
-    if not period or not isinstance(period, str):
-        return "1y"
-    p = period.strip().lower()
-    return p if p in _PERIOD_CHOICES else "1y"
+# --- Funzioni Helper ---
 
-
-def _period_to_lookback_months(period_key: str) -> int:
-    """Converte il periodo selezionato in mesi per l’estrazione e slicing (stile momentum.py)."""
-    from datetime import date
-
-    today = pd.to_datetime("today").date()
-    mapping = {"1m": 1, "3m": 3, "6m": 6, "1y": 12, "3y": 36, "5y": 60, "10y": 120}
-    if period_key in mapping:
-        return mapping[period_key]
-    if period_key == "ytd":
-        jan1 = date(today.year, 1, 1)
-        days = (today - jan1).days
-        months = max(1, int(round(days / 30.4)))
-        return months
-    if period_key == "max":
-        logger.warning("Periodo 'max' richiesto ma il fetch resta '3y' (stile momentum.py): la finestra effettiva è ~3 anni.")
-        return 120
-    return 12
-
-
-# --- Helper ETF / ISIN / Nome ------------------------------------------------
-def _is_etf_quote(q: Dict) -> bool:
-    qt = (q.get("quoteType") or q.get("type") or q.get("typeDisp") or "").upper()
-    nm = (q.get("longname") or q.get("shortname") or q.get("name") or "").upper()
-    return "ETF" in qt or "ETF" in nm
-
-
-def _is_ucits_quote(q: Dict) -> bool:
-    nm = (q.get("longname") or q.get("shortname") or q.get("name") or "")
-    return "UCITS" in nm.upper()
-
-
-def _extract_name(info: Optional[Dict], fallback: str) -> str:
-    candidates = []
-    if isinstance(info, dict):
-        candidates += [info.get("longName"), info.get("shortName")]
-    candidates.append(fallback)
-    for c in candidates:
-        if isinstance(c, str) and c.strip():
-            return c.strip()
-    return fallback
-
-
-def _invert_manual_isin_map() -> Dict[str, str]:
-    inverted = {}
-    try:
-        for isin, syms in (MANUAL_ISIN_MAP or {}).items():
-            if isinstance(syms, (list, tuple, set)):
-                for s in syms:
-                    if s:
-                        inverted[str(s).upper()] = isin
-            elif syms:
-                inverted[str(syms).upper()] = isin
-    except Exception:
-        pass
-    return inverted
-
-
-@lru_cache(maxsize=2048)
+@lru_cache(maxsize=4096)
 def _get_isin_for_ticker(ticker: str) -> Optional[str]:
-    """Ricava ISIN da inversione MANUAL_ISIN_MAP o da get_info() (chiavi contenenti 'isin')."""
-    if not ticker:
-        return None
-    inv = _invert_manual_isin_map()
-    if ticker.upper() in inv:
-        return inv[ticker.upper()]
+    if not ticker: return None
     try:
         info = get_info(ticker=ticker) or {}
-        for k, v in (info or {}).items():
-            if isinstance(k, str) and "isin" in k.lower() and isinstance(v, str) and len(v) >= 10:
-                return v.strip()
+        for k, v in info.items():
+            if "isin" in k.lower() and isinstance(v, str) and len(v) == 12:
+                return v.strip().upper()
     except Exception:
         pass
     return None
 
 
-# --- Discovery universo ETF (UCITS only) ------------------------------------
-DEFAULT_SEED_QUERIES: Tuple[str, ...] = (
-    # Generiche + UCITS
-    "ETF UCITS", "UCITS", "INDEX ETF UCITS", "ACCUMULATING UCITS", "DISTRIBUTING UCITS",
-    # Azionario
-    "MSCI UCITS", "S&P UCITS", "NASDAQ UCITS", "FTSE UCITS", "STOXX UCITS",
-    "SMALL CAP UCITS", "VALUE UCITS", "GROWTH UCITS", "ESG UCITS", "SRI UCITS",
-    # Geografici
-    "WORLD UCITS", "EUROPE UCITS", "EMERGING UCITS", "ASIA UCITS", "JAPAN UCITS", "CHINA UCITS", "USA UCITS",
-    # Obbligazionario
-    "BOND UCITS", "TREASURY UCITS", "CORPORATE UCITS", "HIGH YIELD UCITS", "INFLATION UCITS", "TIPS UCITS",
-    # Altri
-    "COMMODITY UCITS", "GOLD UCITS", "REIT UCITS", "CLEAN ENERGY UCITS",
-)
+def _is_valid_etf_quote(q: Dict) -> bool:
+    return (q.get("quoteType") or "").upper() in ["ETF", "ETP", "ETN"]
 
 
-def _discover_ucits_tickers(
-    seed_queries: Optional[Iterable[str]] = None,
-    quotes_per_query: int = 100,
-    limit_universe: int = 600,
-) -> List[str]:
-    """Scopre un insieme ampio di ticker ETF **UCITS** (deduplicati)."""
-    seed = list(seed_queries) if seed_queries is not None else list(DEFAULT_SEED_QUERIES)
-    tickers: List[str] = []
-    seen: set = set()
-    for q in seed:
+# --- Pipeline di Ricerca ---
+
+def _discover_universe(queries: Iterable[str], quotes_per_query: int, limit: int) -> List[str]:
+    tickers_seen = set()
+    ticker_list = []
+    for query in queries:
         try:
-            quotes = yahoo_search(q, quotes_count=quotes_per_query) or []
+            quotes = yahoo_search(query, quotes_count=quotes_per_query)
+            for q in quotes:
+                ticker = q.get("symbol")
+                if ticker and ticker not in tickers_seen and _is_valid_etf_quote(q):
+                    tickers_seen.add(ticker)
+                    ticker_list.append(ticker)
+            if len(ticker_list) >= limit: break
         except Exception as e:
-            logger.warning(f"Errore ricerca seed '{q}': {e}")
-            quotes = []
-        for quote in quotes:
-            if not _is_etf_quote(quote):
-                continue
-            if not _is_ucits_quote(quote):
-                continue
-            t = quote.get("symbol")
-            if not t or not isinstance(t, str) or t in seen:
-                continue
-            seen.add(t)
-            tickers.append(t)
-            if len(tickers) >= limit_universe:
-                return tickers
-    return tickers
+            logger.warning(f"Errore ricerca per '{query}': {e}")
+    return ticker_list
 
 
-# --- Calcolo metriche (stile momentum.py) -----------------------------------
-def _compute_row_for_ticker_like_momentum(
-    ticker: str,
-    lookback_months: int,
-    rf_ann_pct: float,
-) -> Optional[Dict[str, Optional[float]]]:
-    """
-    Replica la logica di momentum.py per un singolo ticker:
-    - scarica serie ampia (period='3y')
-    - filtra per la finestra [end - lookback_months : end]
-    - calcola metrics con compute_metrics_from_series + compute_sharpe_ratio
-    """
-    end_date = pd.to_datetime("today").normalize()
-    start_date = end_date - pd.DateOffset(months=lookback_months)
-    series = get_series(ticker, period="3y")
-    if series is None or series.empty:
-        return None
-    series_filtered = series.loc[start_date:end_date]
-    if series_filtered.shape[0] < 21:
-        return None
+def _get_unique_preferred_tickers(tickers: List[str]) -> List[str]:
+    isin_to_tickers = defaultdict(list)
+    tickers_without_isin = []
 
-    try:
-        metrics = compute_metrics_from_series(series_filtered) or {}
-    except Exception:
-        metrics = {}
-    try:
-        sharpe = compute_sharpe_ratio(series_filtered, rf_ann_pct)
-    except Exception:
-        sharpe = None
+    for ticker in tickers:
+        isin = _get_isin_for_ticker(ticker)
+        if isin:
+            isin_to_tickers[isin].append(ticker)
+        else:
+            tickers_without_isin.append(ticker)
 
-    try:
-        info = get_info(ticker=ticker) or {}
-    except Exception:
-        info = {}
-    name = _extract_name(info, fallback=ticker)
-    nm_upper = (info.get("longName") or info.get("shortName") or name or "").upper()
-    if "UCITS" not in nm_upper:
-        # Discovery è già UCITS; se qui non appare, filtriamo lo stesso per coerenza
-        return None
+    preferred_tickers = []
+    for isin, candidates in isin_to_tickers.items():
+        preferred = pick_preferred_symbol(candidates)
+        if preferred: preferred_tickers.append(preferred)
 
-    isin = _get_isin_for_ticker(ticker)
-    return {
+    # Aggiunge i ticker per cui non è stato trovato un ISIN, trattandoli come unici
+    preferred_tickers.extend(tickers_without_isin)
+    return list(dict.fromkeys(preferred_tickers))  # Rimuove eventuali duplicati finali
+
+
+def _calculate_metrics_for_ticker(ticker: str, lookback_months: float, fetch_period: str, rf_ann_pct: float) -> Dict:
+    # Inizializza il dizionario dei risultati per garantire che venga sempre restituito qualcosa
+    info = get_info(ticker=ticker) or {}
+    result = {
+        "isin": _get_isin_for_ticker(ticker),
         "ticker": ticker,
-        "isin": isin,
-        "nome etf": name,
-        "rendimento cagr": metrics.get("cagr"),
-        "max drawdown": metrics.get("mdd"),
-        "sharpe ratio": sharpe,
+        "name": info.get("longName") or info.get("shortName") or ticker,
+        "cagr_pct": None,
+        "mdd_pct": None,
+        "sharpe_ratio": None,
     }
 
+    series = get_series(ticker, period=fetch_period)
+    if series is None or len(series) < 2:
+        return result
 
-# --- Public API (richiamata dalla UI) ---------------------------------------
-def search_etfs_universal(
-    period: str = "1y",  # ✅ default 1 anno
-    risk_free_rate_pct: float = 0.0,  # ✅ RF in % annua (es. 4.0 = 4.0%)
-    quotes_per_query: int = 100,
-    limit_universe: int = 600,
-    max_results: int = 150,
-    sort_by: str = "sharpe ratio",  # 'sharpe ratio' | 'rendimento cagr' | 'max drawdown' | 'ticker'
-    ascending: bool = False,
-    seed_queries: Optional[Iterable[str]] = None,  # opzionale override
-) -> pd.DataFrame:
-    """
-    Ricerca universale **solo UCITS**:
-    - Discovery via seed queries (UCITS-only) → TICKER
-    - Calcolo metriche per ogni ticker con logica **identica** a momentum.py
-      (serie '3y' → slicing per lookback mesi → compute_metrics_from_series / compute_sharpe_ratio)
-    - Output tabellare ordinato.
-    """
-    pkey = _normalize_period_key(period)
-    lookback_months = _period_to_lookback_months(pkey)
+    end_date = series.index.max()
+    start_date = end_date - pd.DateOffset(days=int(lookback_months * 30.4))
+    series_filtered = series.loc[start_date:end_date]
 
-    universe = _discover_ucits_tickers(
-        seed_queries=seed_queries,
-        quotes_per_query=quotes_per_query,
-        limit_universe=limit_universe,
-    )
-    if not universe:
-        return pd.DataFrame(columns=["ticker", "isin", "nome etf", "rendimento cagr", "max drawdown", "sharpe ratio"])
+    if len(series_filtered) < 10:
+        return result
 
-    tickers = universe[:max_results]
+    metrics = compute_metrics_from_series(series_filtered) or {}
+    sharpe = compute_sharpe_ratio(series_filtered, rf_ann_pct)
 
-    rows: List[Dict] = []
-    for t in tickers:
+    result.update({
+        "cagr_pct": metrics.get("cagr"),
+        "mdd_pct": metrics.get("mdd"),
+        "sharpe_ratio": sharpe,
+    })
+    return result
+
+
+# --- API Pubblica ---
+
+def find_top_performers(period: str = "1y", risk_free_rate_pct: float = 3.0, quotes_per_query: int = 150,
+                        discovery_limit: int = 1500) -> pd.DataFrame:
+    if period not in PERIOD_MAP:
+        raise ValueError(f"Periodo '{period}' non supportato. Validi: {list(PERIOD_MAP.keys())}")
+
+    lookback_months, fetch_period = PERIOD_MAP[period]
+
+    raw_tickers = _discover_universe(DEFAULT_SEED_QUERIES, quotes_per_query, discovery_limit)
+    unique_tickers = _get_unique_preferred_tickers(raw_tickers)
+
+    results = []
+    for ticker in unique_tickers:
         try:
-            row = _compute_row_for_ticker_like_momentum(
-                ticker=t,
-                lookback_months=lookback_months,
-                rf_ann_pct=risk_free_rate_pct,
-            )
-            if row is not None:
-                rows.append(row)
+            metrics = _calculate_metrics_for_ticker(ticker, lookback_months, fetch_period, risk_free_rate_pct)
+            if metrics: results.append(metrics)
         except Exception as e:
-            logger.warning(f"Errore elaborando {t}: {e}")
+            logger.error(f"Errore calcolo metriche per {ticker}: {e}")
 
-    if not rows:
-        return pd.DataFrame(columns=["ticker", "isin", "nome etf", "rendimento cagr", "max drawdown", "sharpe ratio"])
+    if not results: return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(results)
+    df = df.sort_values(by="sharpe_ratio", ascending=False, na_position='last').reset_index(drop=True)
 
-    valid_sort_cols = {"ticker", "isin", "nome etf", "rendimento cagr", "max drawdown", "sharpe ratio"}
-    sort_key = sort_by if sort_by in valid_sort_cols else "sharpe ratio"
-    df = df.sort_values(by=[sort_key], ascending=ascending, na_position="last").reset_index(drop=True)
     return df
-
-
-def format_results_for_display(
-    df: pd.DataFrame,
-    pct_cols: Tuple[str, ...] = ("rendimento cagr", "max drawdown"),
-    round_cols: Tuple[str, ...] = ("sharpe ratio",),
-    pct_decimals: int = 2,
-    num_decimals: int = 2,
-) -> pd.DataFrame:
-    """Formattazione per UI (percentuali già in scala % → NON moltiplicare per 100)."""
-    if df is None or df.empty:
-        return df
-    df_fmt = df.copy()
-    for col in pct_cols:
-        if col in df_fmt.columns:
-            df_fmt[col] = df_fmt[col].apply(lambda x: f"{x:.{pct_decimals}f}%" if pd.notna(x) else "")
-    for col in round_cols:
-        if col in df_fmt.columns:
-            df_fmt[col] = df_fmt[col].apply(lambda x: f"{x:.{num_decimals}f}" if pd.notna(x) else "")
-    return df_fmt
