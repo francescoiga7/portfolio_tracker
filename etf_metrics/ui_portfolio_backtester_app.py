@@ -4,6 +4,31 @@ import pandas as pd
 from .portfolio_backtester import parse_portfolio_input, get_all_portfolios_for_backtest
 from .config import FAMOUS_PORTFOLIOS
 from .ui_portfolio_tracker_app import _display_backtest_results
+from .portfolio_tracker import PortfolioTracker
+
+
+def get_weights_from_portfolio(portfolio_name: str) -> str:
+    """Carica un portafoglio e calcola i pesi percentuali dalle posizioni aperte."""
+    portfolio_data = PortfolioTracker.load_portfolio_from_session(portfolio_name)
+    if not portfolio_data or not portfolio_data.get("transactions"):
+        return ""
+
+    pnl_results = PortfolioTracker.calculate_portfolio_pnl(portfolio_data["transactions"])
+    open_positions = pnl_results.get('open_positions', [])
+
+    if not open_positions:
+        return ""
+
+    total_value = sum(p['current_amount'] for p in open_positions)
+    if total_value == 0:
+        return ""
+
+    weights_str = []
+    for pos in open_positions:
+        weight = (pos['current_amount'] / total_value) * 100
+        weights_str.append(f"{pos['isin']}: {weight:.2f}")
+
+    return "\n".join(weights_str)
 
 
 def render_portfolio_backtester_ui():
@@ -12,21 +37,44 @@ def render_portfolio_backtester_ui():
 
     st.sidebar.header("⚙️ Impostazioni Backtest")
 
-    portfolio_text = st.sidebar.text_area(
-        "Definizione Portafoglio (ISIN: Peso%)",
-        "IE00BK5BQT80: 80\nIE00BDBRDM35: 20",
-        height=150,
-        help="Inserisci un ISIN o Ticker per riga, seguito da ':' e dal peso percentuale (es. 'VWCE.MI: 80'). La somma dei pesi verrà normalizzata a 100."
-    )
+    # 1. Scelta Strategia
+    strategy = st.sidebar.selectbox("Strategia di Investimento", ["Lump Sum (PIC)", "PAC"])
 
-    initial_investment = st.sidebar.number_input("Investimento Iniziale (€)", min_value=100, max_value=1000000,
-                                                 value=10000, step=100)
-    strategy = st.sidebar.selectbox("Strategia", ["Lump Sum (PIC)", "PAC"])
-
+    # 2. Campi Condizionali per la Strategia
+    initial_investment = 0
     monthly_investment = 0
-    if strategy == "PAC":
-        monthly_investment = st.sidebar.number_input("Investimento mensile (€)", min_value=50, max_value=10000,
+
+    if strategy == "Lump Sum (PIC)":
+        initial_investment = st.sidebar.number_input("Investimento Iniziale (€)", min_value=100, max_value=1000000,
+                                                     value=10000, step=100)
+    elif strategy == "PAC":
+        monthly_investment = st.sidebar.number_input("Investimento Mensile (€)", min_value=50, max_value=10000,
                                                      value=500, step=50)
+
+    # 3. Definizione del Portafoglio
+    st.sidebar.subheader("Definizione Portafoglio")
+    portfolio_source = st.sidebar.radio("Scegli come definire il portafoglio", ["Manuale", "Carica da Portafoglio Esistente"])
+
+    portfolio_text_content = ""
+    is_disabled = False
+
+    if portfolio_source == "Carica da Portafoglio Esistente":
+        saved_portfolios = PortfolioTracker.get_saved_portfolio_names()
+        if not saved_portfolios:
+            st.sidebar.warning("Nessun portafoglio salvato. Creane uno nel Portfolio Tracker.")
+        else:
+            selected_portfolio = st.sidebar.selectbox("Seleziona un Portafoglio", saved_portfolios)
+            if selected_portfolio:
+                portfolio_text_content = get_weights_from_portfolio(selected_portfolio)
+                is_disabled = True
+
+    portfolio_text = st.sidebar.text_area(
+        "Asset e Pesi (ISIN: Peso%)",
+        value=portfolio_text_content if portfolio_text_content else "IE00BK5BQT80: 80\nIE00BDBRDM35: 20",
+        height=150,
+        help="Inserisci un ISIN o Ticker per riga, seguito da ':' e dal peso percentuale (es. 'VWCE.MI: 80').",
+        disabled=is_disabled,
+    )
 
     rebalancing = st.sidebar.selectbox("Frequenza di Ribilanciamento", ["Mai", "Annuale"])
 

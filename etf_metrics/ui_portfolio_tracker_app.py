@@ -114,8 +114,8 @@ def render_portfolio_tracker_ui():
         with st.sidebar.expander("➕ Aggiungi Acquisto"):
             with st.form("buy_form"):
                 buy_isin = st.text_input("ISIN")
-                buy_qty = st.number_input("Quantità", min_value=0.01, step=0.1)
-                buy_price = st.number_input("Prezzo Acquisto (€)", min_value=0.01, step=0.01, format="%.2f")
+                buy_qty = st.number_input("Quantità", min_value=0.00, step=0.1)
+                buy_price = st.number_input("Prezzo Acquisto (€)", min_value=0.01, step=0.50, format="%.2f")
                 buy_date = st.date_input("Data Acquisto", datetime.now().date())
                 if st.form_submit_button("Registra Acquisto"):
                     trans = {"type": "buy", "isin": buy_isin.strip().upper(), "quantity": buy_qty, "price": buy_price,
@@ -135,9 +135,10 @@ def render_portfolio_tracker_ui():
                     PortfolioTracker.add_transaction_to_portfolio(current_portfolio_name, trans)
                     st.rerun()
 
-        if st.sidebar.button("💾 Salva Modifiche su File"):
-            PortfolioTracker.save_all_portfolios_to_json()
-            st.sidebar.success(f"Portafoglio '{current_portfolio_name}' salvato!")
+        st.sidebar.subheader("Impostazioni Fiscali")
+        commission = st.sidebar.number_input("Commissione di vendita (€)", min_value=0.0, value=1.0, step=0.5,
+                                             format="%.2f")
+        tax_rate = st.sidebar.slider("Imposta sulle plusvalenze (%)", min_value=0, max_value=100, value=26, step=1)
 
     # --- Pagina principale ---
     if not current_portfolio_name:
@@ -151,7 +152,7 @@ def render_portfolio_tracker_ui():
 
     # Calcola e mostra risultati P&L
     with st.spinner("Calcolo P&L in corso..."):
-        pnl_results = PortfolioTracker.calculate_portfolio_pnl(portfolio_data["transactions"])
+        pnl_results = PortfolioTracker.calculate_portfolio_pnl(portfolio_data["transactions"], commission, tax_rate)
 
     st.subheader("🧭 Riepilogo Portafoglio")
 
@@ -168,7 +169,7 @@ def render_portfolio_tracker_ui():
         _render_allocation_pie(labels, values, "Allocazione Attuale (%)")
 
     # Tabella posizioni aperte
-    st.subheader("📋 Posizioni Aperte")
+    st.subheader("Portafoglio Live: Posizioni Aperte")
     if pnl_results['open_positions']:
         df_open = pd.DataFrame(pnl_results['open_positions'])
         st.dataframe(df_open[['isin', 'quantity', 'avg_buy_price', 'current_price', 'invested_amount', 'current_amount',
@@ -179,6 +180,34 @@ def render_portfolio_tracker_ui():
         }), use_container_width=True)
     else:
         st.info("Nessuna posizione aperta.")
+
+    # Tabella aggregata per ISIN
+    st.subheader("Analisi per ISIN: La Storia Completa")
+    if pnl_results['aggregated_positions']:
+        df_agg = pd.DataFrame(pnl_results['aggregated_positions'])
+        st.dataframe(df_agg[['isin', 'total_bought_qty', 'total_sold_qty', 'current_qty', 'avg_buy_price',
+                             'realized_pnl', 'unrealized_pnl', 'total_pnl', 'current_value']].style.format({
+            'avg_buy_price': '€{:.2f}', 'realized_pnl': '€{:+,.2f}',
+            'unrealized_pnl': '€{:+,.2f}', 'total_pnl': '€{:+,.2f}',
+            'current_value': '€{:,.2f}'
+        }), use_container_width=True)
+    else:
+        st.info("Nessun dato aggregato da mostrare.")
+
+    # Tabella plusvalenze/minusvalenze
+    st.subheader("Cassetto Fiscale: Plus e Minusvalenze")
+    if pnl_results['capital_gains']:
+        df_gains = pd.DataFrame(pnl_results['capital_gains'])
+        st.dataframe(df_gains[
+            ['date', 'isin', 'quantity', 'sale_price', 'avg_buy_price', 'gross_pnl', 'commission', 'taxable_amount',
+             'tax_paid', 'net_pnl']].style.format({
+            'sale_price': '€{:.2f}', 'avg_buy_price': '€{:.2f}',
+            'gross_pnl': '€{:+,.2f}', 'commission': '€{:.2f}',
+            'taxable_amount': '€{:.2f}', 'tax_paid': '€{:.2f}',
+            'net_pnl': '€{:+,.2f}'
+        }), use_container_width=True)
+    else:
+        st.info("Nessuna vendita registrata.")
 
     # Tabella transazioni
     with st.expander("📜 Cronologia Transazioni"):

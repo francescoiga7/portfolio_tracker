@@ -193,24 +193,27 @@ def get_all_portfolios_for_backtest(
     """Prepara le serie storiche per tutti i portafogli da confrontare."""
     all_series_dict: Dict[str, pd.Series] = {}
 
-    # 1) Portafoglio utente
-    if strategy == "lump_sum (pic)":
+    # Valore fisso per l'investimento iniziale dei portafogli modello (per confronto)
+    famous_initial_investment = 10000
+
+    # 1) Simulazione del portafoglio utente
+    if strategy == "lump_sum_(pic)":
         user_series_norm = get_portfolio_series(user_portfolio_def, rebalancing=rebalancing)
         if user_series_norm is not None:
+            # Usa l'investimento iniziale definito dall'utente per il suo portafoglio
             user_series = user_series_norm * initial_investment
+            all_series_dict["Il Tuo Portafoglio"] = user_series
     else:  # PAC
         user_series = simulate_pac_investment(user_portfolio_def, monthly_investment)
-        if user_series is not None and strategy == "pac":  # Aggiungi l'investimento iniziale al PAC
-            user_series += initial_investment
+        if user_series is not None:
+            all_series_dict["Il Tuo Portafoglio (PAC)"] = user_series
 
-    if 'user_series' in locals() and user_series is not None:
-        all_series_dict["Il Tuo Portafoglio"] = user_series
-
-    # 2) Portafogli “famosi” (sempre lump-sum con stesso investimento iniziale)
+    # 2) Simulazione dei portafogli "famosi" (sempre in modalità Lump Sum per confronto)
     for name in famous_portfolios_to_compare:
         if name in config:
             famous_series_norm = get_portfolio_series(config[name], rebalancing=rebalancing)
             if famous_series_norm is not None:
-                all_series_dict[name] = famous_series_norm * initial_investment
+                # Usa un investimento iniziale fisso per i portafogli modello
+                all_series_dict[name] = famous_series_norm * famous_initial_investment
 
     return all_series_dict
