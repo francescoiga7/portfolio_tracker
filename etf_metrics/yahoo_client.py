@@ -92,29 +92,6 @@ class YahooClient(BaseFinancialClient):
             return None
 
     # ---- Info ----
-    def get_info_fallback(self, isin: str) -> Dict:
-        """
-        Informazioni minime quando l'ISIN è poco coperto:
-        prova a risolvere un ticker e poi usa yfinance.info.
-        """
-        try:
-            quotes = self.search(isin, quotes_count=5)
-            if not quotes:
-                return {**BASE_INFO, "longName": isin, "shortName": isin}
-            ticker = quotes[0].get("symbol")
-            if not ticker:
-                return {**BASE_INFO, "longName": isin, "shortName": isin}
-            info = yf.Ticker(ticker).info
-            return {
-                "longName": quotes[0].get("longname", quotes[0].get("shortname", isin)),
-                "shortName": quotes[0].get("shortname", isin),
-                "fundFamily": info.get("fundFamily", UNKNOWN),
-                "category": info.get("category", UNKNOWN),
-            }
-        except Exception as e:
-            logger.debug(f"Fallback info fallito per {isin}: {e}")
-            return {**BASE_INFO, "longName": isin, "shortName": isin}
-
     def get_info(self, isin: Optional[str] = None, ticker: Optional[str] = None) -> Dict:
         if not isin and not ticker:
             return {}
@@ -155,7 +132,3 @@ def get_series(ticker: str, period: str) -> Optional[pd.Series]:
 
 def get_info(isin: Optional[str] = None, ticker: Optional[str] = None) -> Dict:
     return _get_yahoo_client().get_info(isin=isin, ticker=ticker)
-
-
-def get_info_fallback(isin: str) -> Dict:
-    return _get_yahoo_client().get_info_fallback(isin)

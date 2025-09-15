@@ -7,6 +7,7 @@ from .ui_single_etf import render_single_etf_ui
 from .ui_momentum_app import render_momentum_ui
 from .ui_etf_search_app import render_etf_search_ui
 from .ui_portfolio_tracker_app import render_portfolio_tracker_ui
+from .ui_portfolio_backtester_app import render_portfolio_backtester_ui
 
 
 def init_session_state():
@@ -29,17 +30,19 @@ def run_app():
     st.sidebar.title("Strumenti di Analisi 📈")
     app_mode = st.sidebar.selectbox(
         "Scegli modalità",
-        ["Analisi Singolo ETF", "Verifica Momentum", "Ricerca ETF", "Portfolio Tracker"],
+        ["Portfolio Tracker", "Portfolio Backtester", "Analisi Singolo ETF", "Verifica Momentum", "Ricerca ETF"],
     )
 
-    if app_mode == "Analisi Singolo ETF":
+    if app_mode == "Portfolio Tracker":
+        render_portfolio_tracker_ui()
+    elif app_mode == "Portfolio Backtester":
+        render_portfolio_backtester_ui()
+    elif app_mode == "Analisi Singolo ETF":
         render_single_etf_ui()
     elif app_mode == "Verifica Momentum":
         render_momentum_ui()
     elif app_mode == "Ricerca ETF":
         render_etf_search_ui()
-    elif app_mode == "Portfolio Tracker":
-        render_portfolio_tracker_ui()
 
 
 # --- ENTRY POINT ---

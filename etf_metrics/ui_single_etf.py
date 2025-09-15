@@ -12,7 +12,7 @@ except Exception:
     HAS_PLOTLY = False
     st.warning("⚠️ Plotly non disponibile - i grafici saranno disabilitati")
 
-from .config import DEFAULT_CSV_PATH, PERIODS_ALL
+from .config import PERIODS_ALL
 from .pipeline import compute_etf_over_periods
 from .utils import to_percent_index
 from .yahoo_client import get_series, resolve_isin_one
@@ -42,18 +42,14 @@ def render_single_etf_ui():
 
     compare_input = st.sidebar.text_area("Confronta con (ISIN o Ticker)", "IE00B4L5Y983, SPY")
 
-    st.sidebar.header("Impostazioni Salvataggio")
-    do_save_csv = st.sidebar.checkbox("Salva/aggiorna CSV", True)
-
     if st.sidebar.button("Analizza ETF"):
         if not isin:
             st.warning("Inserisci un ISIN.")
         else:
             with st.spinner("Calcolo in corso…"):
                 try:
-                    csv_path = DEFAULT_CSV_PATH if do_save_csv else None
                     info_out, rows, frames = _cached_compute(
-                        isin, tuple(periods), csv_path, bench_override, rf_ann
+                        isin, tuple(periods), bench_override, rf_ann
                     )
                     st.session_state.data_out = (info_out, rows, frames)
                     st.session_state.etf_params = {'compare_input': compare_input, 'periods': periods}
@@ -72,11 +68,10 @@ def render_single_etf_ui():
 def _cached_compute(
     isin_: str,
     periods_: Tuple[str, ...],
-    csv_path_: Optional[str],
     bench_override_: Optional[str],
     rf_ann_: float
 ):
-    return compute_etf_over_periods(isin_, list(periods_), csv_path_, bench_override_, rf_ann_)
+    return compute_etf_over_periods(isin_, list(periods_), bench_override_, rf_ann_)
 
 
 def display_single_etf_results():

@@ -15,7 +15,6 @@ ND = "n.d."  # evita ripetizioni letterali della stringa "n.d."
 def compute_etf_over_periods(
     isin: str,
     periods: List[str],
-    csv_path: Optional[str] = None,  # mantenuto per compatibilità, anche se non utilizzato
     bench_override: Optional[str] = None,
     rf_ann: float = 0.0,
 ) -> Tuple[Dict[str, Optional[str]], List[Dict], Dict[str, Optional[pd.DataFrame]]]:
