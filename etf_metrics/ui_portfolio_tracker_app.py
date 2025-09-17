@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from typing import Optional, Dict, List, Tuple
+from typing import Dict, List
 from datetime import datetime
 import pandas as pd
 import streamlit as st
@@ -16,33 +16,76 @@ from .utils import to_percent_index
 from .metrics import compute_metrics_from_series, compute_sharpe_ratio
 
 
-# Funzioni helper per la UI
+# --- FUNZIONI HELPER PER LO STYLING (CON LA CORREZIONE) ---
+
+def style_pnl_columns(val):
+    """Colore verde per valori positivi, rosso per negativi."""
+    if isinstance(val, (int, float)):
+        color = '#28a745' if val > 0 else '#dc3545' if val < 0 else '#333333'
+        return f'color: {color}; font-weight: 600;'
+    return ''
+
+
+def format_dataframe(df: pd.DataFrame, column_config: Dict, pnl_cols: List[str] = [], bar_cols: List[str] = []):
+    """Applica formattazione completa a un DataFrame per la visualizzazione."""
+    df_display = df.rename(columns=column_config)
+
+    styler = df_display.style
+
+    # Mappa i nomi delle colonne originali ai nuovi nomi per lo styling
+    renamed_pnl_cols = [column_config.get(col) for col in pnl_cols if column_config.get(col) in df_display.columns]
+    renamed_bar_cols = [column_config.get(col) for col in bar_cols if column_config.get(col) in df_display.columns]
+
+    format_dict = {
+        name: '€{:,.2f}' for col, name in column_config.items() if '€' in name
+    }
+    format_dict.update({
+        name: '{:+.2f}%' for col, name in column_config.items() if '%' in name
+    })
+    format_dict.update({
+        name: '{:.6f}' for col, name in column_config.items() if 'Quantità' in name
+    })
+    styler = styler.format(format_dict, na_rep="n.d.")
+
+    if renamed_pnl_cols:
+        styler = styler.apply(lambda x: x.map(style_pnl_columns), subset=renamed_pnl_cols)
+
+    if renamed_bar_cols:
+        for col_name in renamed_bar_cols:
+            styler = styler.background_gradient(cmap='viridis_r', subset=[col_name])
+
+    styler = styler.set_properties(**{'text-align': 'right'}).set_properties(
+        subset=[column_config.get('isin', 'isin')], **{'text-align': 'left'}
+    )
+
+    return styler
+
+
+# Funzioni helper per la UI (invariate)
 def _render_allocation_pie(labels: List[str], values: List[float], title: str, key="alloc_pie"):
-    """Pie chart delle allocazioni."""
     if not labels or not values or sum(values) <= 0:
         st.info("Aggiungi almeno una posizione per vedere l'allocazione.")
         return
     if HAS_PLOTLY:
         fig = go.Figure(
-            data=[go.Pie(labels=labels, values=values, hole=0.35, textinfo="label+percent")]
+            data=[go.Pie(labels=labels, values=values, hole=0.4, textinfo="label+percent", pull=[0.05] * len(labels))]
         )
-        fig.update_layout(title_text=title, margin=dict(t=40, b=10, l=10, r=10))
+        fig.update_layout(title_text=title, margin=dict(t=50, b=10, l=10, r=10),
+                          legend=dict(orientation="h", yanchor="bottom", y=-0.4))
         st.plotly_chart(fig, use_container_width=True, key=key)
 
 
 def _display_backtest_results(all_series: Dict[str, pd.Series], rf_ann: float, key_prefix="backtest"):
-    """Grafico normalizzato e tabella metriche per il backtester."""
     if not all_series:
         st.error("Nessun dato da visualizzare.")
         return
-
+    # ... (il resto della funzione è invariato) ...
     period_map = {"1M": 1, "3M": 3, "6M": 6, "YTD": "ytd", "1A": 12, "3A": 36, "5A": 60, "Max": None}
     selected_period_label = st.radio(
         "Seleziona periodo di analisi", list(period_map.keys()), index=len(period_map) - 1, horizontal=True,
         key=f"{key_prefix}_period_radio"
     )
     lookback_months = period_map[selected_period_label]
-
     end_date = pd.to_datetime('today').normalize()
     if lookback_months == "ytd":
         start_date = pd.to_datetime(f"{end_date.year}-01-01")
@@ -50,22 +93,18 @@ def _display_backtest_results(all_series: Dict[str, pd.Series], rf_ann: float, k
         start_date = end_date - pd.DateOffset(months=lookback_months)
     else:
         start_date = min(s.index.min() for s in all_series.values() if s is not None and not s.empty)
-
     metrics_list, series_to_plot = [], {}
     for name, series in all_series.items():
         if series is None or series.empty: continue
         filtered = series[series.index >= start_date]
         if filtered.shape[0] < 2: continue
-
         series_to_plot[name] = filtered
         metrics = compute_metrics_from_series(filtered)
         metrics["sharpe"] = compute_sharpe_ratio(filtered, rf_ann)
         metrics["name"] = name
         metrics_list.append(metrics)
-
     st.subheader(f"Andamento Portafogli ({selected_period_label})")
     st.line_chart(series_to_plot)
-
     st.subheader(f"Metriche di Performance ({selected_period_label})")
     if metrics_list:
         df = pd.DataFrame(metrics_list).set_index("name")[["cagr", "vol_ann", "mdd", "sharpe"]]
@@ -79,142 +118,134 @@ def render_portfolio_tracker_ui():
     PortfolioTracker.init_session_from_json_once(filename="saved_portfolio.json")
 
     st.title("💼 Portfolio Tracker")
-    st.caption("Analisi delle tue posizioni e storico transazioni.")
+    st.caption("Analizza le tue posizioni, monitora le performance e gestisci le transazioni.")
 
-    # --- Sidebar per gestione portafoglio ---
-    st.sidebar.header("📂 I Tuoi Portafogli")
-
+    # Sidebar
+    st.sidebar.header("📂 Gestione Portafogli")
     saved_portfolios = PortfolioTracker.get_saved_portfolio_names()
-
-    # Logica per creare o caricare un portafoglio
-    action = st.sidebar.radio("Azione", ["Carica Portafoglio", "Crea Nuovo Portafoglio"])
-
     current_portfolio_name = st.session_state.get("current_portfolio_name", "")
-
-    if action == "Carica Portafoglio":
-        if not saved_portfolios:
-            st.sidebar.warning("Nessun portafoglio salvato. Creane uno nuovo.")
-            st.session_state.current_portfolio_name = ""
+    with st.sidebar.expander("Carica o Crea Portafoglio", expanded=not current_portfolio_name):
+        action = st.radio("Azione", ["Carica Portafoglio", "Crea Nuovo Portafoglio"], label_visibility="collapsed")
+        if action == "Carica Portafoglio":
+            if not saved_portfolios:
+                st.warning("Nessun portafoglio salvato.")
+            else:
+                selected = st.selectbox("Seleziona Portafoglio", saved_portfolios, index=saved_portfolios.index(
+                    current_portfolio_name) if current_portfolio_name in saved_portfolios else 0)
+                if st.button("Carica"):
+                    st.session_state.current_portfolio_name = selected
+                    st.rerun()
         else:
-            selected = st.sidebar.selectbox("Seleziona Portafoglio", saved_portfolios)
-            if st.sidebar.button("Carica"):
-                st.session_state.current_portfolio_name = selected
+            new_name = st.text_input("Nome Nuovo Portafoglio", "Il Mio Portafoglio")
+            if st.button("Crea"):
+                st.session_state.current_portfolio_name = new_name
+                st.session_state.setdefault("_pt_portfolios", {})[new_name] = {"name": new_name, "transactions": []}
                 st.rerun()
-    else:  # Crea Nuovo
-        new_name = st.sidebar.text_input("Nome Nuovo Portafoglio", "Il Mio Portafoglio")
-        if st.sidebar.button("Crea"):
-            st.session_state.current_portfolio_name = new_name
-            st.session_state.setdefault("_pt_portfolios", {})[new_name] = {"name": new_name, "transactions": []}
-            st.rerun()
 
-    # Se un portafoglio è caricato, mostra le opzioni di transazione
     if current_portfolio_name:
-        st.sidebar.subheader(f"Gestisci '{current_portfolio_name}'")
-
-        with st.sidebar.expander("➕ Aggiungi Acquisto"):
-            with st.form("buy_form"):
-                buy_isin = st.text_input("ISIN")
-                buy_qty = st.number_input("Quantità", min_value=0.000001, step=0.0001, format="%.6f")
-                buy_price = st.number_input("Prezzo Acquisto (€)", min_value=0.01, step=0.01, format="%.2f")
-                buy_date = st.date_input("Data Acquisto", datetime.now().date())
-                if st.form_submit_button("Registra Acquisto"):
-                    trans = {"type": "buy", "isin": buy_isin.strip().upper(), "quantity": buy_qty, "price": buy_price,
-                             "date": buy_date}
-                    PortfolioTracker.add_transaction_to_portfolio(current_portfolio_name, trans)
+        st.sidebar.subheader(f"Gestisci: '{current_portfolio_name}'")
+        with st.sidebar.expander("➕ Aggiungi Transazione"):
+            trans_type = st.radio("Tipo", ["Acquisto", "Vendita"], horizontal=True)
+            form_key = "buy_form" if trans_type == "Acquisto" else "sell_form"
+            with st.form(form_key):
+                isin = st.text_input("ISIN")
+                qty = st.number_input("Quantità", min_value=0.000001, step=0.0001, format="%.6f")
+                price = st.number_input(f"Prezzo {trans_type} (€)", min_value=0.01, step=0.01, format="%.2f")
+                date = st.date_input(f"Data {trans_type}", datetime.now().date())
+                if st.form_submit_button(f"Registra {trans_type}"):
+                    trans_data = {"type": "buy" if trans_type == "Acquisto" else "sell", "isin": isin.strip().upper(),
+                                  "quantity": qty, "price": price, "date": date}
+                    PortfolioTracker.add_transaction_to_portfolio(current_portfolio_name, trans_data)
                     st.rerun()
+        with st.sidebar.expander("⚙️ Impostazioni Fiscali"):
+            commission = st.number_input("Commissione per operazione (€)", min_value=0.0, value=1.0, step=0.5,
+                                         format="%.2f")
+            tax_rate = st.slider("Imposta plusvalenze (%)", 0, 100, 26, 1)
 
-        with st.sidebar.expander("➖ Registra Vendita"):
-            with st.form("sell_form"):
-                sell_isin = st.text_input("ISIN ")
-                sell_qty = st.number_input("Quantità ", min_value=0.000001, step=0.0001, format="%.6f")
-                sell_price = st.number_input("Prezzo Vendita (€)", min_value=0.01, step=0.01, format="%.2f")
-                sell_date = st.date_input("Data Vendita", datetime.now().date())
-                if st.form_submit_button("Registra Vendita"):
-                    trans = {"type": "sell", "isin": sell_isin.strip().upper(), "quantity": sell_qty,
-                             "price": sell_price, "date": sell_date}
-                    PortfolioTracker.add_transaction_to_portfolio(current_portfolio_name, trans)
-                    st.rerun()
-
-        st.sidebar.subheader("Impostazioni Fiscali")
-        commission = st.sidebar.number_input("Commissione di vendita (€)", min_value=0.0, value=1.0, step=0.5,
-                                             format="%.2f")
-        tax_rate = st.sidebar.slider("Imposta sulle plusvalenze (%)", min_value=0, max_value=100, value=26, step=1)
-
-    # --- Pagina principale ---
+    # Pagina principale
     if not current_portfolio_name:
-        st.info("Crea o carica un portafoglio dalla barra laterale per iniziare.")
+        st.info("👈 Crea o carica un portafoglio dalla barra laterale per iniziare.")
         return
-
     portfolio_data = PortfolioTracker.load_portfolio_from_session(current_portfolio_name)
     if not portfolio_data or not portfolio_data.get("transactions"):
-        st.info("Questo portafoglio è vuoto. Aggiungi una transazione di acquisto.")
+        st.info("Questo portafoglio è vuoto. Aggiungi una transazione per iniziare.")
         return
-
-    # Calcola e mostra risultati P&L
-    with st.spinner("Calcolo P&L in corso..."):
+    with st.spinner("Aggiornamento P&L in corso..."):
         pnl_results = PortfolioTracker.calculate_portfolio_pnl(portfolio_data["transactions"], commission, tax_rate)
 
-    st.subheader("🧭 Riepilogo Portafoglio")
+    # Layout a tabs
+    tab1, tab2, tab3 = st.tabs(["🧭 Riepilogo", "📊 Posizioni Dettagliate", "🗃️ Cassetto Fiscale e Storico"])
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Investito Netto (Posizioni Aperte)", f"€{pnl_results['net_invested']:,.2f}")
-    col2.metric("Valore Attuale (Posizioni Aperte)", f"€{pnl_results['current_value']:,.2f}")
-    col3.metric("P&L Realizzato (Netto)", f"€{pnl_results['realized_pnl']:,.2f}")
-    col4.metric("P&L Totale", f"€{pnl_results['total_pnl']:,.2f}", f"{pnl_results['total_pnl_pct']:.2f}%")
+    with tab1:
+        st.header("Riepilogo Generale")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Valore Attuale", f"€{pnl_results['current_value']:,.2f}")
+        col2.metric("P&L Totale", f"€{pnl_results['total_pnl']:,.2f}", f"{pnl_results['total_pnl_pct']:.2f}%")
+        col3.metric("Investito (Aperte)", f"€{pnl_results['net_invested']:,.2f}")
+        col4.metric("P&L Realizzato", f"€{pnl_results['realized_pnl']:,.2f}")
+        st.markdown("---")
+        st.subheader("Allocazione Attuale per ISIN")
+        if pnl_results['open_positions']:
+            labels = [p['isin'] for p in pnl_results['open_positions']]
+            values = [p['current_amount'] for p in pnl_results['open_positions']]
+            _render_allocation_pie(labels, values, "")
+        else:
+            st.info("Nessuna posizione aperta per mostrare l'allocazione.")
 
-    # Grafico allocazione
-    if pnl_results['open_positions']:
-        labels = [p['isin'] for p in pnl_results['open_positions']]
-        values = [p['current_amount'] for p in pnl_results['open_positions']]
-        _render_allocation_pie(labels, values, "Allocazione Attuale (%)")
+    with tab2:
+        st.header("Analisi delle Posizioni")
+        st.subheader("Portafoglio Live: Posizioni Aperte")
+        if pnl_results['open_positions']:
+            df_open = pd.DataFrame(pnl_results['open_positions'])
+            config = {
+                'isin': 'ISIN', 'quantity': 'Quantità', 'avg_buy_price': 'Prezzo Medio Acq. (€)',
+                'current_price': 'Prezzo Attuale (€)', 'invested_amount': 'Investito (€)',
+                'current_amount': 'Valore Attuale (€)', 'unrealized_pnl': 'P&L Non Realizzato (€)',
+                'unrealized_pnl_pct': 'P&L Non Realizzato (%)'
+            }
+            st.dataframe(format_dataframe(df_open, config,
+                                          pnl_cols=['unrealized_pnl', 'unrealized_pnl_pct'],
+                                          bar_cols=['current_amount']),
+                         use_container_width=True)
+        else:
+            st.info("Nessuna posizione aperta.")
 
-    # Tabella posizioni aperte
-    st.subheader("Portafoglio Live: Posizioni Aperte")
-    if pnl_results['open_positions']:
-        df_open = pd.DataFrame(pnl_results['open_positions'])
-        st.dataframe(df_open[['isin', 'quantity', 'avg_buy_price', 'current_price', 'invested_amount', 'current_amount',
-                              'unrealized_pnl', 'unrealized_pnl_pct']].style.format({
-            'avg_buy_price': '€{:.2f}', 'current_price': '€{:.2f}',
-            'invested_amount': '€{:,.2f}', 'current_amount': '€{:,.2f}',
-            'unrealized_pnl': '€{:+,.2f}', 'unrealized_pnl_pct': '{:+.2f}%',
-            'quantity': '{:.6f}'
-        }), use_container_width=True)
-    else:
-        st.info("Nessuna posizione aperta.")
+        st.subheader("Storico Complessivo per ISIN")
+        if pnl_results['aggregated_positions']:
+            df_agg = pd.DataFrame(pnl_results['aggregated_positions'])
+            config = {
+                'isin': 'ISIN', 'total_bought_qty': 'Tot. Quantità Acq.', 'total_sold_qty': 'Tot. Quantità Vend.',
+                'current_qty': 'Quantità Attuale', 'avg_buy_price': 'Prezzo Medio Acq. (€)',
+                'realized_pnl': 'P&L Realizzato (€)', 'unrealized_pnl': 'P&L Non Realizzato (€)',
+                'total_pnl': 'P&L Totale (€)', 'current_value': 'Valore Attuale (€)'
+            }
+            st.dataframe(format_dataframe(df_agg, config,
+                                          pnl_cols=['realized_pnl', 'unrealized_pnl', 'total_pnl']),
+                         use_container_width=True)
+        else:
+            st.info("Nessun dato aggregato da mostrare.")
 
-    # Tabella aggregata per ISIN
-    st.subheader("Analisi per ISIN: La Storia Completa")
-    if pnl_results['aggregated_positions']:
-        df_agg = pd.DataFrame(pnl_results['aggregated_positions'])
-        st.dataframe(df_agg[['isin', 'total_bought_qty', 'total_sold_qty', 'current_qty', 'avg_buy_price',
-                             'realized_pnl', 'unrealized_pnl', 'total_pnl', 'current_value']].style.format({
-            'avg_buy_price': '€{:.2f}', 'realized_pnl': '€{:+,.2f}',
-            'unrealized_pnl': '€{:+,.2f}', 'total_pnl': '€{:+,.2f}',
-            'current_value': '€{:,.2f}',
-            'total_bought_qty': '{:.6f}',
-            'total_sold_qty': '{:.6f}',
-            'current_qty': '{:.6f}',
-        }), use_container_width=True)
-    else:
-        st.info("Nessun dato aggregato da mostrare.")
+    with tab3:
+        st.header("Dettaglio Fiscale e Transazioni")
+        st.subheader("Dettaglio Plus/Minusvalenze Realizzate")
+        if pnl_results['capital_gains']:
+            df_gains = pd.DataFrame(pnl_results['capital_gains'])
+            config = {
+                'date': 'Data', 'isin': 'ISIN', 'quantity': 'Quantità', 'sale_price': 'Prezzo Vendita (€)',
+                'avg_buy_price': 'Prezzo Medio Acq. (€)', 'gross_pnl': 'P&L Lordo (€)',
+                'commission': 'Commissioni (€)', 'taxable_amount': 'Imponibile (€)',
+                'tax_paid': 'Tasse Pagate (€)', 'net_pnl': 'P&L Netto (€)'
+            }
+            st.dataframe(format_dataframe(df_gains, config,
+                                          pnl_cols=['gross_pnl', 'taxable_amount', 'tax_paid', 'net_pnl']),
+                         use_container_width=True)
+        else:
+            st.info("Nessuna vendita registrata.")
 
-    # Tabella plusvalenze/minusvalenze
-    st.subheader("Cassetto Fiscale: Plus e Minusvalenze")
-    if pnl_results['capital_gains']:
-        df_gains = pd.DataFrame(pnl_results['capital_gains'])
-        st.dataframe(df_gains[
-            ['date', 'isin', 'quantity', 'sale_price', 'avg_buy_price', 'gross_pnl', 'commission', 'taxable_amount',
-             'tax_paid', 'net_pnl']].style.format({
-            'sale_price': '€{:.2f}', 'avg_buy_price': '€{:.2f}',
-            'gross_pnl': '€{:+,.2f}', 'commission': '€{:.2f}',
-            'taxable_amount': '€{:.2f}', 'tax_paid': '€{:.2f}',
-            'net_pnl': '€{:+,.2f}',
-            'quantity': '{:.6f}'
-        }), use_container_width=True)
-    else:
-        st.info("Nessuna vendita registrata.")
-
-    # Tabella transazioni
-    with st.expander("📜 Cronologia Transazioni"):
-        df_trans = pd.DataFrame(portfolio_data["transactions"])
-        st.dataframe(df_trans.style.format({'quantity': '{:.6f}'}), use_container_width=True)
+        with st.expander("📜 Cronologia Completa delle Transazioni"):
+            df_trans = pd.DataFrame(portfolio_data["transactions"])
+            df_trans_display = df_trans.rename(columns={
+                'type': 'Tipo', 'isin': 'ISIN', 'quantity': 'Quantità',
+                'price': 'Prezzo (€)', 'date': 'Data'
+            })
+            st.dataframe(df_trans_display, use_container_width=True)

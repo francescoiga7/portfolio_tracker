@@ -20,8 +20,8 @@ def render_momentum_ui():
         "IE00BDVPNG13\nIE00BM67HT60\nLU2023678282\nIE00BYWQWR46\nIE00BYZK4669\nIE00BYZK4776\n"
         "IE00BQ70R696\nIE00BYZK4883\nIE000U58J0M1\nIE00BF0M6N54\nIE00BFYN8Y92\nIE00BKTLJC87\n"
         "IE00B1FZS467\nIE00BGL86Z12\nIE00BGBN6P67\nIE00BLRPQH31\nIE00BF0M2Z96\nIE00B1FZSF77\n"
-        "IE00B579F325\nDE000A1EK0G3\nCH0454664001\nBTCE\nVNGA20\nVNGA40\nVNGA60\nVNGA80\n"
-        "NL0009272764\nNL0009272772\nNL0009272780\nXQUI\nIE000YYE6WK5\nIE00BK5BC891",
+        "IE00B579F325\nDE000A1EK0G3\nCH0454664001\nBTH-EUR\nVNGA20\nVNGA40\nVNGA60\nVNGA80\n"
+        "NL0009272764\nNL0009272772\nNL0009272780\nXQUI\nIE000YYE6WK5\nIE00BK5BC891\nIE0002Y8CX98",
         height=120,
     )
     lookback = st.sidebar.slider("Periodo di lookback (mesi)", 1, 24, 6, 1)
@@ -38,7 +38,7 @@ def render_momentum_ui():
             st.session_state.momentum_results = calculate_momentum_rankings(isins_list, lookback, rf_ann_momentum)
 
     st.title("Verifica Momentum Corretto per il Rischio")
-    st.caption(f"Classifica per Sharpe Ratio negli ultimi {lookback} mesi.")
+    st.caption(f"Classifica per Sharpe Ratio negli ultimi {lookback} mesi, con segnale operativo attuale.")
 
     if st.session_state.momentum_results:
         results = st.session_state.momentum_results
@@ -52,11 +52,29 @@ def render_momentum_ui():
             df = (
                 pd.DataFrame(results)
                 .rename(columns={"isin": "ISIN", "ticker": "Ticker", "cagr_pct": "CAGR %",
-                                 "mdd_pct": "Max DD %", "sharpe_ratio": "Sharpe Ratio"})
-                .drop(columns=["start_date", "end_date"])
+                                 "mdd_pct": "Max DD %", "sharpe_ratio": "Sharpe Ratio", "signal": "Segnale Operativo"})
             )
+            # Riorganizza le colonne per una migliore leggibilità
+            df = df[["ISIN", "Ticker", "Sharpe Ratio", "Segnale Operativo", "CAGR %", "Max DD %"]]
+
             formatters = {"CAGR %": "{:.2f}%", "Max DD %": "{:.2f}%", "Sharpe Ratio": "{:.2f}"}
-            st.dataframe(df.style.format(formatters, na_rep="n.d."), use_container_width=True)
+
+            # Funzione per colorare il segnale
+            def style_signal(val):
+                signal_str = str(val)
+                if "Compra" in signal_str:
+                    return 'background-color: #28a745; color: white; font-weight: bold;'
+                elif "Vendi" in signal_str:
+                    return 'background-color: #dc3545; color: white; font-weight: bold;'
+                elif "Mantieni" in signal_str:
+                    return 'background-color: #ffc107; color: black;'
+                return ''
+
+            st.dataframe(
+                df.style.format(formatters, na_rep="n.d.").apply(lambda x: x.map(style_signal),
+                                                                 subset=["Segnale Operativo"]),
+                use_container_width=True
+            )
         else:
             st.error("Impossibile calcolare il momentum. Controlla gli ISIN inseriti.")
     else:

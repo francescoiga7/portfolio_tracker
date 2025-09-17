@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
-import pandas as pd
 from .portfolio_backtester import parse_portfolio_input, get_all_portfolios_for_backtest
 from .config import FAMOUS_PORTFOLIOS
 from .ui_portfolio_tracker_app import _display_backtest_results

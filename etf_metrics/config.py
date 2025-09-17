@@ -2,7 +2,7 @@
 """
 Config & costanti per il progetto ETF Metrics.
 """
-from typing import Dict, List
+from typing import Dict, List, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,6 @@ MANUAL_ISIN_MAP: Dict[str, List[str]] = {
     "IE00BDBRDM35": ["AGGH.MI", "AGGH.AS", "AGGH.L"],
     "IE00B3RBWM25": ["VDEV.MI", "VHVG.DE"],
     "IE00B3YCGJ38": ["SWDA.MI", "IWDA.AS"],
-    "IE000U58J0M1": ["^GSPC"],
 }
 
 # Parole chiave -> proxy benchmark (ticker Yahoo)
@@ -43,15 +42,6 @@ BENCHMARK_KEYWORDS_TO_PROXY: Dict[str, str] = {
     "gold": "GC=F",
     "bitcoin": "BTC-USD",
     "commodities": "DBC",
-}
-
-# Nome commerciale -> nome indice "canonico"
-BENCHMARK_NAME_MAP = {
-    "FTSE All-World": "FTSE ALL WORLD NET TR",
-    "FTSE All World": "FTSE ALL WORLD NET TR",
-    "MSCI ACWI IMI": "MSCI ACWI IMI NET TR",
-    "MSCI ACWI": "MSCI ACWI NET TR",
-    "MSCI World": "MSCI WORLD NET TR",
 }
 
 # ETF noti -> proxy benchmark
@@ -93,6 +83,19 @@ REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; etf-metrics/1.0)"}
 PERIODS_ALL = [
     "1d", "5d", "1mo", "3mo", "6mo", "1y", "3y", "5y", "10y", "ytd", "max"
 ]
+
+
+DEFAULT_SEED_QUERIES: Tuple[str, ...] = (
+    "MSCI World UCITS ETF", "FTSE All-World UCITS ETF", "Global Equity UCITS ETF",
+    "S&P 500 UCITS ETF", "NASDAQ 100 UCITS ETF", "STOXX Europe 600 UCITS ETF",
+    "MSCI Emerging Markets UCITS ETF", "Japan UCITS ETF",
+    "Technology Sector UCITS ETF", "Healthcare Sector UCITS ETF", "Financial Sector UCITS ETF",
+    "Clean Energy UCITS ETF", "AI & Robotics UCITS ETF", "Cybersecurity UCITS ETF",
+    "Value Factor UCITS ETF", "Growth Factor UCITS ETF", "Momentum Factor UCITS ETF", "Quality Factor UCITS ETF",
+    "Global Aggregate Bond UCITS ETF EUR", "Government Bond UCITS ETF EUR", "Corporate Bond UCITS ETF EUR",
+    "High Yield Bond UCITS ETF EUR", "Inflation-Linked Bond UCITS ETF",
+    "Gold ETC", "Silver ETC", "Broad Commodities ETC", "Bitcoin ETP", "Ethereum ETP"
+)
 
 # Porffoli modello per backtesting
 FAMOUS_PORTFOLIOS = {

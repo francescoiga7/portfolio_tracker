@@ -1,58 +1,21 @@
 # -*- coding: utf-8 -*-
-"""
-ETF Search Engine Definitivo - Robusto e Tollerante
-
-Logica Operativa:
-1.  **Scoperta Massimale**: Usa query ampie per scoprire il maggior numero possibile
-    di ETF/ETC/ETN sui mercati europei.
-2.  **Deduplicazione Flessibile**: Raggruppa per ISIN solo quando disponibile,
-    privilegiando sempre Borsa Italiana (.MI). Gli strumenti senza ISIN vengono
-    comunque mantenuti.
-3.  **Calcolo "Best-Effort"**: Tenta di calcolare tutte le metriche per ogni strumento.
-    Se un calcolo fallisce (es. Sharpe Ratio), il dato viene lasciato vuoto ma
-    lo strumento NON viene scartato.
-4.  **Classifica Informativa**: Ordina i risultati per Sharpe Ratio decrescente,
-    posizionando in fondo gli strumenti con dati incompleti. Questo garantisce
-    che l'utente veda sempre l'intero universo scoperto.
-"""
 import logging
-from typing import Dict, List, Optional, Tuple, Iterable
+from typing import Dict, List, Iterable, Optional
 from functools import lru_cache
 from collections import defaultdict
 import pandas as pd
+import streamlit as st
 
 from .yahoo_client import yahoo_search, get_series, get_info
-from .metrics import compute_metrics_from_series, compute_sharpe_ratio
+from .metrics import compute_sharpe_ratio
+from .etf_info import fallback_ter_from_yahoo_info
 from .utils import pick_preferred_symbol
+from .config import DEFAULT_SEED_QUERIES
 
 logger = logging.getLogger(__name__)
 
-# --- Configurazioni per la Ricerca ---
 
-DEFAULT_SEED_QUERIES: Tuple[str, ...] = (
-    # Azionari ad ampia copertura
-    "MSCI World UCITS ETF", "FTSE All-World UCITS ETF", "Global Equity UCITS ETF",
-    "S&P 500 UCITS ETF", "NASDAQ 100 UCITS ETF", "STOXX Europe 600 UCITS ETF",
-    "MSCI Emerging Markets UCITS ETF", "Japan UCITS ETF",
-    # Tematici e Settoriali
-    "Technology Sector UCITS ETF", "Healthcare Sector UCITS ETF", "Financial Sector UCITS ETF",
-    "Clean Energy UCITS ETF", "AI & Robotics UCITS ETF", "Cybersecurity UCITS ETF",
-    # Fattoriali (Smart Beta)
-    "Value Factor UCITS ETF", "Growth Factor UCITS ETF", "Momentum Factor UCITS ETF", "Quality Factor UCITS ETF",
-    # Obbligazionari
-    "Global Aggregate Bond UCITS ETF EUR", "Government Bond UCITS ETF EUR", "Corporate Bond UCITS ETF EUR",
-    "High Yield Bond UCITS ETF EUR", "Inflation-Linked Bond UCITS ETF",
-    # Materie Prime e Crypto
-    "Gold ETC", "Silver ETC", "Broad Commodities ETC", "Bitcoin ETP", "Ethereum ETP"
-)
-
-PERIOD_MAP = {
-    "1d": (1 / 30.4, "1mo"), "1m": (1, "3mo"), "3m": (3, "6mo"),
-    "6m": (6, "1y"), "1y": (12, "3y"), "3y": (36, "5y"), "5y": (60, "10y"),
-}
-
-
-# --- Funzioni Helper ---
+# --- Funzioni Helper per la Scoperta (precedentemente in etf_search_engine.py) ---
 
 @lru_cache(maxsize=4096)
 def _get_isin_for_ticker(ticker: str) -> Optional[str]:
@@ -70,8 +33,6 @@ def _get_isin_for_ticker(ticker: str) -> Optional[str]:
 def _is_valid_etf_quote(q: Dict) -> bool:
     return (q.get("quoteType") or "").upper() in ["ETF", "ETP", "ETN"]
 
-
-# --- Pipeline di Ricerca ---
 
 def _discover_universe(queries: Iterable[str], quotes_per_query: int, limit: int) -> List[str]:
     tickers_seen = set()
@@ -93,81 +54,65 @@ def _discover_universe(queries: Iterable[str], quotes_per_query: int, limit: int
 def _get_unique_preferred_tickers(tickers: List[str]) -> List[str]:
     isin_to_tickers = defaultdict(list)
     tickers_without_isin = []
-
     for ticker in tickers:
         isin = _get_isin_for_ticker(ticker)
         if isin:
             isin_to_tickers[isin].append(ticker)
         else:
             tickers_without_isin.append(ticker)
-
-    preferred_tickers = []
-    for isin, candidates in isin_to_tickers.items():
-        preferred = pick_preferred_symbol(candidates)
-        if preferred: preferred_tickers.append(preferred)
-
-    # Aggiunge i ticker per cui non è stato trovato un ISIN, trattandoli come unici
+    preferred_tickers = [pick_preferred_symbol(c) for c in isin_to_tickers.values() if c]
     preferred_tickers.extend(tickers_without_isin)
-    return list(dict.fromkeys(preferred_tickers))  # Rimuove eventuali duplicati finali
+    return list(dict.fromkeys(preferred_tickers))
 
 
-def _calculate_metrics_for_ticker(ticker: str, lookback_months: float, fetch_period: str, rf_ann_pct: float) -> Dict:
-    # Inizializza il dizionario dei risultati per garantire che venga sempre restituito qualcosa
-    info = get_info(ticker=ticker) or {}
-    result = {
-        "isin": _get_isin_for_ticker(ticker),
-        "ticker": ticker,
-        "name": info.get("longName") or info.get("shortName") or ticker,
-        "cagr_pct": None,
-        "mdd_pct": None,
-        "sharpe_ratio": None,
-    }
+# --- Logica dello Screener PAC ---
 
-    series = get_series(ticker, period=fetch_period)
-    if series is None or len(series) < 2:
-        return result
+def _calculate_metrics_for_screener(ticker: str) -> Dict:
+    try:
+        series = get_series(ticker, period="18mo")
+        if series is None or len(series) < 252: return {}
+        series_12m = series.last('12M')
+        if len(series_12m) < 200: return {}
+        info = get_info(ticker=ticker) or {}
 
-    end_date = series.index.max()
-    start_date = end_date - pd.DateOffset(days=int(lookback_months * 30.4))
-    series_filtered = series.loc[start_date:end_date]
+        sharpe = compute_sharpe_ratio(series_12m, rf_annual_pct=3.0)
+        volatility = series_12m.pct_change().std() * (252 ** 0.5) * 100
+        ter = fallback_ter_from_yahoo_info(info)
+        total_assets = info.get("totalAssets")
 
-    if len(series_filtered) < 10:
-        return result
-
-    metrics = compute_metrics_from_series(series_filtered) or {}
-    sharpe = compute_sharpe_ratio(series_filtered, rf_ann_pct)
-
-    result.update({
-        "cagr_pct": metrics.get("cagr"),
-        "mdd_pct": metrics.get("mdd"),
-        "sharpe_ratio": sharpe,
-    })
-    return result
+        return {
+            "ticker": ticker, "name": info.get("longName", ticker),
+            "sharpe_ratio": sharpe, "volatility": volatility,
+            "ter": ter, "total_assets": total_assets
+        }
+    except Exception:
+        return {}
 
 
-# --- API Pubblica ---
-
-def find_top_performers(period: str = "1y", risk_free_rate_pct: float = 3.0, quotes_per_query: int = 150,
-                        discovery_limit: int = 1500) -> pd.DataFrame:
-    if period not in PERIOD_MAP:
-        raise ValueError(f"Periodo '{period}' non supportato. Validi: {list(PERIOD_MAP.keys())}")
-
-    lookback_months, fetch_period = PERIOD_MAP[period]
-
-    raw_tickers = _discover_universe(DEFAULT_SEED_QUERIES, quotes_per_query, discovery_limit)
+def screen_best_etf_for_pac(discovery_limit: int = 1000) -> pd.DataFrame:
+    raw_tickers = _discover_universe(DEFAULT_SEED_QUERIES, quotes_per_query=200, limit=discovery_limit)
     unique_tickers = _get_unique_preferred_tickers(raw_tickers)
 
-    results = []
-    for ticker in unique_tickers:
-        try:
-            metrics = _calculate_metrics_for_ticker(ticker, lookback_months, fetch_period, risk_free_rate_pct)
-            if metrics: results.append(metrics)
-        except Exception as e:
-            logger.error(f"Errore calcolo metriche per {ticker}: {e}")
+    all_metrics = []
+    progress_bar = st.progress(0, text="Analisi ETF in corso...")
+    for i, ticker in enumerate(unique_tickers):
+        metrics = _calculate_metrics_for_screener(ticker)
+        if metrics: all_metrics.append(metrics)
+        progress_bar.progress((i + 1) / len(unique_tickers))
+    progress_bar.empty()
 
-    if not results: return pd.DataFrame()
+    if not all_metrics: return pd.DataFrame()
+    df = pd.DataFrame(all_metrics).dropna(subset=['sharpe_ratio', 'volatility', 'ter', 'total_assets'])
+    if df.empty: return pd.DataFrame()
 
-    df = pd.DataFrame(results)
-    df = df.sort_values(by="sharpe_ratio", ascending=False, na_position='last').reset_index(drop=True)
+    df['momentum_score'] = df['sharpe_ratio'].rank(pct=True) * 100
+    df['cost_score'] = df['ter'].rank(pct=True, ascending=False) * 100
+    df['volatility_score'] = df['volatility'].rank(pct=True, ascending=False) * 100
+    df['size_score'] = df['total_assets'].rank(pct=True) * 100
+    df['final_score'] = (df['momentum_score'] * 0.40 + df['cost_score'] * 0.30 + df['volatility_score'] * 0.20 + df[
+        'size_score'] * 0.10)
 
-    return df
+    df = df.sort_values(by="final_score", ascending=False).reset_index(drop=True)
+    view_cols = ["ticker", "name", "final_score", "momentum_score", "cost_score", "volatility_score", "size_score",
+                 "sharpe_ratio", "ter", "volatility"]
+    return df.reindex(columns=view_cols)

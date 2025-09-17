@@ -285,3 +285,65 @@ def compute_current_drawdown(s: pd.Series) -> Optional[float]:
     except Exception as e:
         log.error(f"Errore nel calcolo del drawdown corrente: {e}", exc_info=True)
         return None
+
+
+# --- NUOVE FUNZIONI INTEGRATE ---
+def calculate_technical_indicators(series: pd.Series) -> Dict[str, float]:
+    """Calcola SMA50, SMA200 e RSI a 14 periodi."""
+    indicators = {'sma50': None, 'sma200': None, 'rsi': None}
+    if series is None or len(series) < 200:
+        return indicators
+
+    indicators['sma50'] = series.rolling(window=50).mean().iloc[-1]
+    indicators['sma200'] = series.rolling(window=200).mean().iloc[-1]
+
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    indicators['rsi'] = rsi.iloc[-1]
+
+    return indicators
+
+
+def get_trading_signal(series: pd.Series) -> Dict[str, str]:
+    """Genera un segnale di trading basato su SMA e RSI."""
+    if series is None or len(series) < 200:
+        return {"signal": "Dati Insufficienti",
+                "reason": "Servono almeno 200 giorni di storico per calcolare gli indicatori."}
+
+    current_price = series.iloc[-1]
+    indicators = calculate_technical_indicators(series)
+    sma50 = indicators.get('sma50')
+    sma200 = indicators.get('sma200')
+    rsi = indicators.get('rsi')
+
+    if any(v is None or np.isnan(v) for v in [sma50, sma200, rsi]):
+        return {"signal": "Non Disponibile", "reason": "Impossibile calcolare gli indicatori richiesti."}
+
+    is_uptrend = sma50 > sma200
+    is_price_above_sma50 = current_price > sma50
+
+    if is_uptrend and is_price_above_sma50 and rsi < 70:
+        return {"signal": "Compra Ora",
+                "reason": "Trend rialzista (SMA50 > SMA200), prezzo sopra la media mobile a 50 giorni e non in ipercomprato (RSI < 70)."}
+    elif not is_uptrend and not is_price_above_sma50:
+        return {"signal": "Vendi Ora",
+                "reason": "Incrocio ribassista (SMA50 < SMA200) e prezzo sotto la media mobile a 50 giorni."}
+
+    reason_parts = []
+    if is_uptrend:
+        reason_parts.append("Il trend di fondo è positivo (SMA50 > SMA200).")
+    else:
+        reason_parts.append("Il trend di fondo è negativo (SMA50 < SMA200).")
+
+    if rsi >= 70:
+        reason_parts.append("L'asset è in zona di ipercomprato (RSI >= 70), suggerendo cautela.")
+    elif rsi <= 30:
+        reason_parts.append("L'asset è in zona di ipervenduto (RSI <= 30), possibile segnale di rimbalzo.")
+    else:
+        reason_parts.append("L'RSI è in zona neutrale (30 < RSI < 70).")
+
+    return {"signal": "Mantieni/Monitora", "reason": " ".join(reason_parts)}
