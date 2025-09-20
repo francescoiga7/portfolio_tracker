@@ -57,7 +57,8 @@ def render_tactical_screener_lab(as_of_date: date):
                 )
                 st.session_state.lab_screener_results = results
     else:
-        st.sidebar.error(f"Regime di Mercato: {regime} (VIX: {vix:.2f if vix else 'N/D'})")
+        vix_str = f"{vix:.2f}" if vix is not None else "N/D"
+        st.sidebar.error(f"Regime di Mercato: {regime} (VIX: {vix_str})")
         st.sidebar.warning(
             "In questa data il mercato era in una fase di alta volatilità. Lo screener non avrebbe operato.")
 

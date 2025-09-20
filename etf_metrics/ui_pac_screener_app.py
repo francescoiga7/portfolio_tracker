@@ -59,7 +59,8 @@ def render_pac_screener_ui():
                 st.session_state.pac_screener_results = results_df
 
     else:
-        st.sidebar.error(f"Regime di Mercato: {regime} (VIX: {vix:.2f if vix else 'N/D'})")
+        vix_str = f"{vix:.2f}" if vix is not None else "N/D"
+        st.sidebar.error(f"Regime di Mercato: {regime} (VIX: {vix_str})")
         st.sidebar.warning("Il mercato è in una fase di alta volatilità. Lo screener è disattivato per prudenza.")
 
     results = st.session_state.get('pac_screener_results')
