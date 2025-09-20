@@ -105,7 +105,7 @@ def render_momentum_lab(as_of_date: date):
                 "isin": "ISIN", "ticker": "Ticker",
                 "sharpe_ratio": "Sharpe Ratio", "signal": "Segnale Operativo"
             })
-            st.dataframe(df[["ISIN", "Ticker", "Sharpe Ratio", "Segnale Operativo"]], use_container_width=True)
+            st.dataframe(df[["ISIN", "Ticker", "Sharpe Ratio", "Segnale Operativo"]], width="stretch")
         else:
             st.warning(
                 f"Nessun ETF con dati sufficienti per il lookback di {lookback} mesi alla data del {as_of_date.strftime('%d/%m/%Y')}.")

@@ -72,7 +72,7 @@ def _render_allocation_pie(labels: List[str], values: List[float], title: str, k
         )
         fig.update_layout(title_text=title, margin=dict(t=50, b=10, l=10, r=10),
                           legend=dict(orientation="h", yanchor="bottom", y=-0.4))
-        st.plotly_chart(fig, use_container_width=True, key=key)
+        st.plotly_chart(fig, width="stretch", key=key)
 
 
 def _display_backtest_results(all_series: Dict[str, pd.Series], rf_ann: float, key_prefix="backtest"):
@@ -109,7 +109,7 @@ def _display_backtest_results(all_series: Dict[str, pd.Series], rf_ann: float, k
     if metrics_list:
         df = pd.DataFrame(metrics_list).set_index("name")[["cagr", "vol_ann", "mdd", "sharpe"]]
         df.columns = ["CAGR %", "Volatilità Ann. %", "Max Drawdown %", "Sharpe Ratio"]
-        st.dataframe(df.style.format("{:.2f}", na_rep="n.d."), use_container_width=True)
+        st.dataframe(df.style.format("{:.2f}", na_rep="n.d."), width="stretch")
 
 
 # UI Principale del Tracker
@@ -206,7 +206,7 @@ def render_portfolio_tracker_ui():
             st.dataframe(format_dataframe(df_open, config,
                                           pnl_cols=['unrealized_pnl', 'unrealized_pnl_pct'],
                                           bar_cols=['current_amount']),
-                         use_container_width=True)
+                         width="stretch")
         else:
             st.info("Nessuna posizione aperta.")
 
@@ -221,7 +221,7 @@ def render_portfolio_tracker_ui():
             }
             st.dataframe(format_dataframe(df_agg, config,
                                           pnl_cols=['realized_pnl', 'unrealized_pnl', 'total_pnl']),
-                         use_container_width=True)
+                         width="stretch")
         else:
             st.info("Nessun dato aggregato da mostrare.")
 
@@ -238,7 +238,7 @@ def render_portfolio_tracker_ui():
             }
             st.dataframe(format_dataframe(df_gains, config,
                                           pnl_cols=['gross_pnl', 'taxable_amount', 'tax_paid', 'net_pnl']),
-                         use_container_width=True)
+                         width="stretch")
         else:
             st.info("Nessuna vendita registrata.")
 
@@ -248,4 +248,4 @@ def render_portfolio_tracker_ui():
                 'type': 'Tipo', 'isin': 'ISIN', 'quantity': 'Quantità',
                 'price': 'Prezzo (€)', 'date': 'Data'
             })
-            st.dataframe(df_trans_display, use_container_width=True)
+            st.dataframe(df_trans_display, width="stretch")

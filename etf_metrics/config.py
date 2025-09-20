@@ -85,17 +85,39 @@ PERIODS_ALL = [
 ]
 
 
+# LISTA DI QUERY OTTIMIZZATA PER MASSIMA COPERTURA
 DEFAULT_SEED_QUERIES: Tuple[str, ...] = (
-    "MSCI World UCITS ETF", "FTSE All-World UCITS ETF", "Global Equity UCITS ETF",
-    "S&P 500 UCITS ETF", "NASDAQ 100 UCITS ETF", "STOXX Europe 600 UCITS ETF",
-    "MSCI Emerging Markets UCITS ETF", "Japan UCITS ETF",
-    "Technology Sector UCITS ETF", "Healthcare Sector UCITS ETF", "Financial Sector UCITS ETF",
-    "Clean Energy UCITS ETF", "AI & Robotics UCITS ETF", "Cybersecurity UCITS ETF",
-    "Value Factor UCITS ETF", "Growth Factor UCITS ETF", "Momentum Factor UCITS ETF", "Quality Factor UCITS ETF",
-    "Global Aggregate Bond UCITS ETF EUR", "Government Bond UCITS ETF EUR", "Corporate Bond UCITS ETF EUR",
-    "High Yield Bond UCITS ETF EUR", "Inflation-Linked Bond UCITS ETF",
-    "Gold ETC", "Silver ETC", "Broad Commodities ETC", "Bitcoin ETP", "Ethereum ETP"
+    # Azionari Globali e Regionali
+    "MSCI World", "FTSE All-World", "Global Equity", "Developed Markets",
+    "S&P 500", "NASDAQ 100", "STOXX Europe 600", "MSCI Europe",
+    "MSCI Emerging Markets", "MSCI Japan", "FTSE 100", "DAX", "CAC 40", "FTSE MIB",
+
+    # Tematici e Settoriali
+    "Technology Sector", "Healthcare Sector", "Financial Sector", "Energy Sector",
+    "Clean Energy", "AI & Robotics", "Cybersecurity", "Digitalisation", "Water",
+    "Uranium", "Nuclear", "Defense", "Quantum Computing", "Infrastructure", "Property", "REIT",
+    "ESG", "SRI", "Climate Change",
+
+    # Fattoriali
+    "Value Factor", "Growth Factor", "Momentum Factor", "Quality Factor", "Minimum Volatility",
+
+    # Obbligazionari
+    "Global Aggregate Bond", "Government Bond", "Treasury Bond", "Corporate Bond",
+    "High Yield Bond", "Inflation-Linked Bond", "Green Bond", "Floating Rate Note",
+    "Money Market", "Short Term",
+
+    # Commodities e Alternativi
+    "Gold ETC", "Silver ETC", "Broad Commodities ETC", "Bitcoin ETP", "Ethereum ETP",
+    "Real Estate", "Infrastructure",
+
+    # Stili di investimento e provider
+    "Vanguard LifeStrategy", "iShares", "Xtrackers", "Amundi", "Lyxor", "Invesco",
+
+    # Aggiunta diretta di Ticker e ISIN specifici per garantirne la cattura
+    "XEON", "IE00B3VTMJ91", "LU1650487413", "IE00BDBRDM35", "IWDE", "IE00BK5BQT80",
+    "IE00B4L5Y983", "NDXH", "CSSX5E", "CSMIB", "BTCE", "VNGA80", "XQUI", "IE000YYE6WK5"
 )
+
 
 # Porffoli modello per backtesting
 FAMOUS_PORTFOLIOS = {

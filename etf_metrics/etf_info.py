@@ -77,6 +77,7 @@ def get_yahoo_info(isin: str) -> Dict:
             yf_info = yf_ticker.info
             info["provider"] = yf_info.get("fundFamily", UNKNOWN)
             info["category"] = yf_info.get("category", UNKNOWN)
+            info["morningStarOverallRating"] = yf_info.get("morningStarOverallRating", UNKNOWN)
 
             # Preserva anche totalAssets per derivazioni successive
             total_assets = yf_info.get("totalAssets")

@@ -75,7 +75,7 @@ def render_momentum_ui():
 
             st.dataframe(
                 df.style.format(formatters, na_rep="n.d.").applymap(style_signal, subset=["Segnale Operativo"]),
-                use_container_width=True
+                width="stretch"
             )
         else:
             st.warning(f"Nessun ETF con dati sufficienti per il lookback di {lookback} mesi.")

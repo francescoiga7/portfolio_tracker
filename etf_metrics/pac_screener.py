@@ -67,7 +67,7 @@ def _get_unique_preferred_tickers(tickers: List[str]) -> List[str]:
         if base not in processed_bases:
             final_list.append(ticker)
             processed_bases.add(base)
-    return final_list
+    return list(dict.fromkeys(final_list))
 
 
 # --- Logica dello Screener Tattico Avanzato (con supporto Point-in-Time) ---
@@ -135,9 +135,8 @@ def screen_for_tactical_etfs(
         min_avg_value: float,
         specific_isins: Optional[List[str]] = None,
         as_of_date: Optional[date] = None,
-        selected_exchanges: Optional[List[str]] = None  # NUOVO PARAMETRO
 ) -> pd.DataFrame:
-    """Esegue lo screening tattico, con filtro opzionale per Borsa Valori."""
+    """Esegue lo screening tattico, focalizzato sugli ETP europei."""
 
     if specific_isins:
         unique_tickers = [resolve_isin_one(isin) for isin in specific_isins]
@@ -145,24 +144,26 @@ def screen_for_tactical_etfs(
     else:
         raw_tickers = _discover_universe(DEFAULT_SEED_QUERIES, quotes_per_query=200, limit=discovery_limit)
 
-        # --- NUOVO: Applica il filtro per Borsa Valori ---
-        if selected_exchanges:
-            filtered_by_exchange = []
-            for ticker in raw_tickers:
-                if any(ticker.endswith(suffix) for suffix in selected_exchanges if suffix):
-                    filtered_by_exchange.append(ticker)
-                # Include anche ticker senza suffisso se "" è nelle selezioni
-                elif "" in selected_exchanges and "." not in ticker:
-                    filtered_by_exchange.append(ticker)
-            raw_tickers = filtered_by_exchange
+        # --- FILTRO PER MERCATI EUROPEI ---
+        european_suffixes = [
+            ".MI", ".DE", ".AS", ".L", ".PA", ".SW", ".BR", ".LS", ".IR",
+            ".MC", ".HE", ".CO", ".ST", ".OL", ".VI"
+        ]
+
+        # Filtra per mantenere solo i ticker con suffisso europeo
+        european_tickers = [
+            ticker for ticker in raw_tickers
+            if any(ticker.endswith(suffix) for suffix in european_suffixes)
+        ]
+
+        raw_tickers = european_tickers  # Sovrascrive la lista con quella filtrata
 
         unique_tickers = _get_unique_preferred_tickers(raw_tickers)
 
     analysis_date = as_of_date or date.today()
 
-    # ... (il resto della funzione per l'analisi e il calcolo dei punteggi è invariato)
     all_metrics = []
-    progress_bar = st.progress(0, text=f"Analisi di {len(unique_tickers)} ETF in corso...")
+    progress_bar = st.progress(0, text=f"Analisi di {len(unique_tickers)} ETF europei in corso...")
     for i, ticker in enumerate(unique_tickers):
         metrics = _calculate_tactical_metrics(ticker, analysis_date)
         if metrics: all_metrics.append(metrics)
