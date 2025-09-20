@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from typing import List, Dict
+from typing import List, Dict, Optional
 import pandas as pd
 import streamlit as st
 
@@ -7,25 +7,18 @@ from .yahoo_client import resolve_isin_one, get_series
 from .metrics import compute_metrics_from_series, compute_sharpe_ratio, get_trading_signal
 
 
-@st.cache_data(show_spinner=True, ttl=60 * 30)
-def calculate_momentum_rankings(isins: List[str], lookback_months: int, rf_ann: float) -> List[Dict]:
+@st.cache_data(show_spinner="Caricamento dati storici...", ttl=60 * 30)
+def fetch_momentum_data(isins: List[str]) -> List[Dict]:
     """
-    Calcola un set completo di metriche per una lista di asset su un periodo di lookback
-    e li ordina per Sharpe Ratio, aggiungendo un segnale di trading.
+    Carica i dati storici completi e calcola il segnale di trading una sola volta.
     """
-    results: List[Dict] = []
-
-    end_date = pd.to_datetime("today").normalize()
-    start_date = end_date - pd.DateOffset(months=lookback_months)
-
-    # Periodo dinamico per ottenere abbastanza storico (almeno 3 anni per la SMA200)
-    period_months = max(lookback_months + 3, 36)
-    period = f"{period_months}mo"
+    fetched_data = []
+    period = "5y"  # Carica uno storico sufficientemente lungo per il backtesting
 
     for isin in isins:
         isin = (isin or "").strip().upper()
-        if not isin:
-            continue
+        if not isin: continue
+
         ticker = resolve_isin_one(isin)
         if not ticker:
             st.warning(f"ISIN {isin} non trovato, verrà saltato.")
@@ -36,36 +29,53 @@ def calculate_momentum_rankings(isins: List[str], lookback_months: int, rf_ann: 
             st.warning(f"Nessun dato storico per {ticker} ({isin}).")
             continue
 
-        # Filtra la serie per il periodo di lookback per le metriche di performance
-        series_filtered = series.loc[start_date:end_date]
-        if series_filtered.shape[0] < 21:  # richiede almeno ~1 mese di dati
-            st.warning(
-                f"Dati insufficienti per {ticker} ({isin}) nel periodo di {lookback_months} mesi."
-            )
-            continue
+        fetched_data.append({
+            "isin": isin,
+            "ticker": ticker,
+            "series": series,
+        })
+    return fetched_data
 
-        # Calcola le metriche di performance sulla serie filtrata
+
+def process_momentum_rankings(
+        fetched_data: List[Dict],
+        lookback_months: int,
+        rf_ann: float,
+        end_date_override: Optional[pd.Timestamp] = None
+) -> List[Dict]:
+    """
+    Elabora i dati per un specifico periodo, con possibilità di specificare una data di fine.
+    """
+    results = []
+    end_date = end_date_override or pd.to_datetime("today").normalize()
+    start_date = end_date - pd.DateOffset(months=lookback_months)
+
+    for data in fetched_data:
+        # Filtra la serie storica fino alla data specificata
+        series_as_of = data["series"][data["series"].index <= end_date]
+        if series_as_of.empty: continue
+
+        # Calcola il segnale usando i dati fino a "end_date"
+        signal_info = get_trading_signal(series_as_of)
+
+        # Filtra per il periodo di lookback per le metriche di performance
+        series_filtered = series_as_of.loc[start_date:end_date]
+        if series_filtered.shape[0] < 21: continue
+
         metrics = compute_metrics_from_series(series_filtered) or {}
         sharpe = compute_sharpe_ratio(series_filtered, rf_ann)
 
-        # Calcola il segnale di trading sulla serie COMPLETA per avere dati sufficienti per la SMA200
-        signal_info = get_trading_signal(series)
+        results.append({
+            "isin": data["isin"],
+            "ticker": data["ticker"],
+            "cagr_pct": metrics.get("cagr"),
+            "mdd_pct": metrics.get("mdd"),
+            "sharpe_ratio": sharpe,
+            "signal": signal_info.get("signal", "N/D"),
+        })
 
-        results.append(
-            {
-                "isin": isin,
-                "ticker": ticker,
-                "cagr_pct": metrics.get("cagr"),
-                "mdd_pct": metrics.get("mdd"),
-                "sharpe_ratio": sharpe,
-                "signal": signal_info.get("signal", "N/D"), # Aggiungi il segnale
-            }
-        )
-
-    # Ordina per Sharpe Ratio (discendente), i None finiscono in fondo
-    ranked_results = sorted(
+    return sorted(
         results,
         key=lambda x: x["sharpe_ratio"] if x["sharpe_ratio"] is not None else float("-inf"),
         reverse=True,
     )
-    return ranked_results
