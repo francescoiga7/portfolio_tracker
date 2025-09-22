@@ -84,7 +84,7 @@ def render_etf_comparison_ui():
             hovermode='x unified',
             height=500
         )
-        st.plotly_chart(fig, use_container_width=True, key="comparison_chart")
+        st.plotly_chart(fig, width="stretch", key="comparison_chart")
     else:
         # Fallback a grafico statico se Plotly non è disponibile
         chart_data = pd.DataFrame({

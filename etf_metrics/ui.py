@@ -9,8 +9,6 @@ from .ui_portfolio_tracker_app import render_portfolio_tracker_ui
 from .ui_portfolio_backtester_app import render_portfolio_backtester_ui
 from .ui_etf_comparison_app import render_etf_comparison_ui
 from .ui_pac_screener_app import render_pac_screener_ui
-# NUOVO IMPORT
-from .ui_strategy_lab_app import render_strategy_lab_ui
 
 def init_session_state():
     defaults = {
@@ -18,7 +16,8 @@ def init_session_state():
         "portfolio_results": None,
         "momentum_results": None,
         "pac_screener_results": pd.DataFrame(),
-        "lab_momentum_raw_data": None, # Stato per il laboratorio
+        "lab_momentum_raw_data": None,
+        "core_satellite_results": None, # NUOVO STATO
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -31,7 +30,14 @@ def run_app():
     st.sidebar.title("Strumenti di Analisi 📈")
     app_mode = st.sidebar.selectbox(
         "Scegli modalità",
-        ["Portfolio Tracker", "Portfolio Backtester", "Analisi Singolo ETF", "Confronta ETF", "Verifica Momentum", "Screener PAC", "Laboratorio Strategie"],
+        [
+            "Analisi Singolo ETF",
+            "Confronta ETF",
+            "Portfolio Tracker",
+            "Portfolio Backtester",
+            "Screener Tattico PAC",
+            "Verifica Momentum"
+        ],
     )
 
     if app_mode == "Portfolio Tracker":
@@ -42,13 +48,10 @@ def run_app():
         render_single_etf_ui()
     elif app_mode == "Confronta ETF":
         render_etf_comparison_ui()
+    elif app_mode == "Screener Tattico PAC":
+        render_pac_screener_ui()
     elif app_mode == "Verifica Momentum":
         render_momentum_ui()
-    elif app_mode == "Screener PAC":
-        render_pac_screener_ui()
-    # NUOVA SEZIONE
-    elif app_mode == "Laboratorio Strategie":
-        render_strategy_lab_ui()
 
 if __name__ == '__main__':
     run_app()

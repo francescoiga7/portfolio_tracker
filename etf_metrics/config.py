@@ -101,17 +101,19 @@ DEFAULT_SEED_QUERIES: Tuple[str, ...] = (
     # Fattoriali
     "Value Factor", "Growth Factor", "Momentum Factor", "Quality Factor", "Minimum Volatility",
 
+'''
     # Obbligazionari
     "Global Aggregate Bond", "Government Bond", "Treasury Bond", "Corporate Bond",
     "High Yield Bond", "Inflation-Linked Bond", "Green Bond", "Floating Rate Note",
     "Money Market", "Short Term",
+'''
 
     # Commodities e Alternativi
     "Gold ETC", "Silver ETC", "Broad Commodities ETC", "Bitcoin ETP", "Ethereum ETP",
     "Real Estate", "Infrastructure",
 
     # Stili di investimento e provider
-    "Vanguard LifeStrategy", "iShares", "Xtrackers", "Amundi", "Lyxor", "Invesco",
+    "Vanguard LifeStrategy", "iShares", "Xtrackers", "Amundi", "Lyxor", "Invesco", "VanEck", "HANetf"
 
     # Aggiunta diretta di Ticker e ISIN specifici per garantirne la cattura
     "XEON", "IE00B3VTMJ91", "LU1650487413", "IE00BDBRDM35", "IWDE", "IE00BK5BQT80",
