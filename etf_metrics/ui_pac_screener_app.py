@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-import pandas as pd
 import streamlit as st
-import re
 from datetime import date
 from .pac_screener import screen_for_tactical_etfs, get_market_regime
 
@@ -24,7 +22,6 @@ def render_pac_screener_ui():
 
     st.sidebar.header("⚙️ Parametri Screener")
 
-    # --- INTEGRAZIONE TIME TRAVEL ---
     with st.sidebar.expander("⏳ Time Travel (Opzionale)"):
         enable_time_travel = st.checkbox("Abilita Time Travel")
         as_of_date = st.date_input(

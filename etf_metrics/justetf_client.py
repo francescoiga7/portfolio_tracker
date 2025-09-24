@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 
 class JustETFClient(BaseFinancialClient):
-    """Client robusto per JustETF con gestione errori avanzata e cache integrata."""
 
     def __init__(self):
         super().__init__("JustETF", base_timeout=15)
@@ -105,7 +104,6 @@ class JustETFClient(BaseFinancialClient):
         }
 
 
-# --- helpers HTML parsing (invariati) ---
 def _strip_tags(html: str) -> str:
     html = re.sub(r"(?is)\<(script|style).*?\>.*?\</\1\>", " ", html)
     text = re.sub(r"(?s)\<[^\>]+\>", " ", html)
@@ -222,7 +220,6 @@ def parse_etf_details_from_html(html: str) -> dict:
     return details
 
 
-# ---- Lazy singleton + wrapper per retro‑compatibilità ----
 _JEC: Optional[JustETFClient] = None
 
 

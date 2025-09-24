@@ -4,7 +4,6 @@ import pandas as pd
 import streamlit as st
 from datetime import date
 
-# Importa entrambe le nuove funzioni
 from .momentum import fetch_momentum_data, process_momentum_rankings
 
 

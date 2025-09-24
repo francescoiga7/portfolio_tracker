@@ -3,7 +3,6 @@ import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Any, DefaultDict
-import pandas as pd
 import streamlit as st
 from collections import defaultdict
 
@@ -11,8 +10,6 @@ from .yahoo_client import resolve_isin_one, get_series
 
 logger = logging.getLogger(__name__)
 
-
-# --- Private Helper Functions for P&L Calculation ---
 
 def _calculate_open_positions(transactions: List[Dict[str, Any]]) -> DefaultDict[str, Dict[str, float]]:
     """

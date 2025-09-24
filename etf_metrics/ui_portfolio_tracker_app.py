@@ -4,7 +4,6 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-# Plotly opzionale
 try:
     import plotly.graph_objects as go
 
@@ -12,11 +11,8 @@ try:
 except Exception:
     HAS_PLOTLY = False
 
-from .utils import to_percent_index
 from .metrics import compute_metrics_from_series, compute_sharpe_ratio
 
-
-# --- FUNZIONI HELPER PER LO STYLING (CON LA CORREZIONE) ---
 
 def style_pnl_columns(val):
     """Colore verde per valori positivi, rosso per negativi."""

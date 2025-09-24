@@ -15,8 +15,6 @@ from .metrics import compute_metrics_from_series
 
 logger = logging.getLogger(__name__)
 
-
-# --- Funzioni Helper (invariate) ---
 @lru_cache(maxsize=4096)
 def _get_isin_for_ticker(ticker: str) -> Optional[str]:
     if not ticker: return None
@@ -70,7 +68,6 @@ def _get_unique_preferred_tickers(tickers: List[str]) -> List[str]:
     return list(dict.fromkeys(final_list))
 
 
-# --- Logica dello Screener Tattico Avanzato (con supporto Point-in-Time) ---
 @st.cache_data(show_spinner=False, ttl=60 * 15)
 def get_market_regime(as_of_date: Optional[date] = None) -> Dict:
     """Controlla il VIX per determinare il regime di mercato a una data specifica."""

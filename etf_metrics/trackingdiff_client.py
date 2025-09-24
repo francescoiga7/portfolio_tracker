@@ -57,7 +57,6 @@ class TrackingDifferencesClient(BaseFinancialClient):
         return value
 
 
-# ---- Lazy singleton + wrapper per retro‑compatibilità ----
 _TD: Optional[TrackingDifferencesClient] = None
 
 

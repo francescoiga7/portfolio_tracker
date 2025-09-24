@@ -56,7 +56,7 @@ def display_single_etf_results():
     info_out, rows, aligned_frames = st.session_state.data_out
     etf_ticker = info_out.get("yahoo_symbol")
 
-    # --- Trading Signal (invariato) ---
+    # --- Trading Signal ---
     if etf_ticker:
         full_series = get_series(etf_ticker, "2y")
         signal_info = get_trading_signal(full_series) if full_series is not None and not full_series.empty else {}
@@ -69,7 +69,7 @@ def display_single_etf_results():
             st.info(f"**Segnale Operativo: {signal}** - *{reason}*")
     st.markdown("---")
 
-    # --- Info Generali (invariato) ---
+    # --- Info Generali ---
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("ISIN", info_out.get("isin", "n.d."))

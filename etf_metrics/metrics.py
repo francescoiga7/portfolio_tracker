@@ -73,9 +73,6 @@ class MetricsCalculator:
     def _validate_series(s: pd.Series, min_length: int = 2, series_name: str = "unnamed") -> bool:
         return s is not None and len(s) >= min_length
 
-
-# --- Funzioni di Calcolo Metriche Esistenti (invariate) ---
-
 def compute_metrics_from_series(s: pd.Series) -> Dict[str, Optional[float]]:
     if not MetricsCalculator._validate_series(s):
         return {}
@@ -122,8 +119,6 @@ def compute_sharpe_ratio(s: pd.Series, rf_annual_pct: float = 0.0) -> Optional[f
     sharpe = (mean_excess / std_dev) * np.sqrt(per_year) if std_dev > 0 else None
     return float(sharpe) if sharpe is not None and np.isfinite(sharpe) else None
 
-
-# --- NUOVE METRICHE FINANZIARIE ---
 
 def compute_sortino_ratio(s: pd.Series, rf_annual_pct: float = 0.0) -> Optional[float]:
     """Calcola il Sortino Ratio, che penalizza solo la volatilità negativa."""
@@ -180,7 +175,6 @@ def compute_var(s: pd.Series, confidence_level: float = 0.95, holding_period_day
     return float(var_period * 100.0) if np.isfinite(var_period) else None
 
 
-# --- Altre funzioni (invariate) ---
 def compute_current_drawdown(s: pd.Series) -> Optional[float]:
     s_clean = MetricsCalculator._as_price_series(s)
     if s_clean is None: return None

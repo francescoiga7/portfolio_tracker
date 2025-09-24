@@ -7,9 +7,9 @@ from .yahoo_client import resolve_isin_one, get_series, get_info
 from .metrics import (
     compute_metrics_from_series,
     compute_sharpe_ratio,
-    compute_sortino_ratio,  # NUOVO
-    compute_omega_ratio,  # NUOVO
-    compute_var  # NUOVO
+    compute_sortino_ratio,
+    compute_omega_ratio,
+    compute_var
 )
 from .trackingdiff_client import fetch_tracking_difference
 from .etf_info import get_etf_extended_info, fetch_ter_justetf, fallback_ter_from_yahoo_info

@@ -15,8 +15,6 @@ from .config import DEFAULT_SEED_QUERIES
 logger = logging.getLogger(__name__)
 
 
-# --- Funzioni Helper per la Scoperta (precedentemente in etf_search_engine.py) ---
-
 @lru_cache(maxsize=4096)
 def _get_isin_for_ticker(ticker: str) -> Optional[str]:
     if not ticker: return None
@@ -64,8 +62,6 @@ def _get_unique_preferred_tickers(tickers: List[str]) -> List[str]:
     preferred_tickers.extend(tickers_without_isin)
     return list(dict.fromkeys(preferred_tickers))
 
-
-# --- Logica dello Screener PAC ---
 
 def _calculate_metrics_for_screener(ticker: str) -> Dict:
     try:

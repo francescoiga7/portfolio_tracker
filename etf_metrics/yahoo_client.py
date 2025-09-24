@@ -107,9 +107,7 @@ class YahooClient(BaseFinancialClient):
             return {}
 
 
-# ---- Lazy singleton + wrapper per retro-compatibilità ----
 _YC: Optional[YahooClient] = None
-
 
 def _get_yahoo_client() -> YahooClient:
     global _YC
