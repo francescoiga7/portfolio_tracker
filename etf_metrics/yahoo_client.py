@@ -39,7 +39,7 @@ class YahooClient(BaseFinancialClient):
             return []
         return data.get("quotes", []) or []
 
-    def search(self, query: str, quotes_count: int = 40) -> List[Dict]:
+    def search(self, query: str, quotes_count: int = 100) -> List[Dict]: # AUMENTATO A 100
         if not self.validate_input(query):
             return []
         for host in self._search_hosts:
@@ -116,7 +116,7 @@ def _get_yahoo_client() -> YahooClient:
     return _YC
 
 
-def yahoo_search(query: str, quotes_count: int = 40) -> List[Dict]:
+def yahoo_search(query: str, quotes_count: int = 100) -> List[Dict]: # AUMENTATO A 100
     return _get_yahoo_client().search(query, quotes_count)
 
 

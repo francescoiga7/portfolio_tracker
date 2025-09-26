@@ -58,23 +58,23 @@ TICKER_TO_PROXY: Dict[str, str] = {
 # Mappatura completa ISIN -> (ticker_benchmark, nome_benchmark)
 ISIN_TO_BENCHMARK = {
     "IE00BK5BQT80": ("VWRA.L", "FTSE All-World Index"),
-    "IE000YYE6WK5": ("^GSPC", "S&P 500 Index"),  # SPDR S&P 500 UCITS ETF
-    "IE00B4L5Y983": ("^GSPC", "S&P 500 Index"),  # Core S&P 500 UCITS ETF
-    "IE00B3YCGJ38": ("IWDA.AS", "MSCI World Index"),  # Core MSCI World UCITS ETF
-    "IE00B1YZSC51": ("IEUR.AS", "MSCI Europe Index"),  # Core MSCI Europe UCITS ETF
-    "IE00BKM4GZ66": ("EIMI.L", "MSCI Emerging Markets IMI Index"),  # Core MSCI EM IMI UCITS ETF
-    "IE00BDBRDM35": ("AGGG.L", "Bloomberg Global Aggregate Bond Index"),  # Core Global Aggregate Bond UCITS ETF
-    "IE00B3F81409": ("AGGG.L", "Bloomberg Global Aggregate Bond Index"),  # Core Global Bond UCITS ETF
-    "IE00B6R52259": ("GC=F", "Gold Spot Price"),  # Physical Gold ETC
-    "IE00BFNM3K80": ("WSML.L", "MSCI World SRI Index"),  # MSCI World SRI UCITS ETF
-    "IE00BN4Q0370": ("SUSW.L", "MSCI World ESG Universal Index"),  # MSCI World ESG Universal UCITS ETF
-    "IE00BFNM3D14": ("SUAG.L", "Bloomberg MSCI Global Green Bond Index"),  # Global Green Bond UCITS ETF
-    "LU0274208692": ("^GSPC", "S&P 500 Index"),  # db x-trackers S&P 500 UCITS ETF
-    "IE00B0M62Q58": ("IUES.DE", "MSCI Europe Index"),  # iShares Core MSCI Europe UCITS ETF
-    "IE00B1FZS467": ("CSPX.L", "S&P 500 Index"),  # iShares Core S&P 500 UCITS ETF
-    "IE00B52VJ196": ("INRG.L", "S&P Global Clean Energy Index"),  # iShares Global Clean Energy UCITS ETF
-    "IE00BYZK4552": ("RBOT.L", "ROBO Global Robotics Index"),  # iShares Automation & Robotics UCITS ETF
-    "IE00B14X4N27": ("CSBGE0.L", "iBoxx EUR Sovereigns Eurozone Index"),  # iShares Core EUR Govt Bond UCITS ETF
+    "IE000YYE6WK5": ("^GSPC", "S&P 500 Index"),
+    "IE00B4L5Y983": ("^GSPC", "S&P 500 Index"),
+    "IE00B3YCGJ38": ("IWDA.AS", "MSCI World Index"),
+    "IE00B1YZSC51": ("IEUR.AS", "MSCI Europe Index"),
+    "IE00BKM4GZ66": ("EIMI.L", "MSCI Emerging Markets IMI Index"),
+    "IE00BDBRDM35": ("AGGG.L", "Bloomberg Global Aggregate Bond Index"),
+    "IE00B3F81409": ("AGGG.L", "Bloomberg Global Aggregate Bond Index"),
+    "IE00B6R52259": ("GC=F", "Gold Spot Price"),
+    "IE00BFNM3K80": ("WSML.L", "MSCI World SRI Index"),
+    "IE00BN4Q0370": ("SUSW.L", "MSCI World ESG Universal Index"),
+    "IE00BFNM3D14": ("SUAG.L", "Bloomberg MSCI Global Green Bond Index"),
+    "LU0274208692": ("^GSPC", "S&P 500 Index"),
+    "IE00B0M62Q58": ("IUES.DE", "MSCI Europe Index"),
+    "IE00B1FZS467": ("CSPX.L", "S&P 500 Index"),
+    "IE00B52VJ196": ("INRG.L", "S&P Global Clean Energy Index"),
+    "IE00BYZK4552": ("RBOT.L", "ROBO Global Robotics Index"),
+    "IE00B14X4N27": ("CSBGE0.L", "iBoxx EUR Sovereigns Eurozone Index"),
 }
 
 REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; etf-metrics/1.0)"}
@@ -84,42 +84,43 @@ PERIODS_ALL = [
     "1d", "5d", "1mo", "3mo", "6mo", "1y", "3y", "5y", "10y", "ytd", "max"
 ]
 
-DEFAULT_SEED_QUERIES: Tuple[str, ...] = (
-    # Azionari Globali e Regionali
-    "MSCI World", "FTSE All-World", "Global Equity", "Developed Markets",
-    "S&P 500", "NASDAQ 100", "STOXX Europe 600", "MSCI Europe",
-    "MSCI Emerging Markets", "MSCI Japan", "FTSE 100", "DAX", "CAC 40", "FTSE MIB",
+# --- NUOVA STRATEGIA DI DISCOVERY A MATRICE ---
+asset_classes = ["Equity", "Government Bond", "Corporate Bond", "Aggregate Bond", "Commodity", "Real Estate"]
+geographies = ["Global", "Europe", "USA", "Eurozone", "Emerging Markets", "Japan", "Pacific", "Germany", "UK", "China"]
+themes_sectors = [
+    "Technology", "Healthcare", "Financials", "Energy", "Clean Energy", "AI & Robotics", "Cybersecurity",
+    "Digitalisation", "Water", "Uranium", "Nuclear", "Defense", "Infrastructure", "Semiconductors",
+    "Biotechnology", "Automation", "ESG", "SRI", "Climate", "Megatrends", "Megatrend Equal Weight",
+    "Aerospace", "Quantum Computing", "Innovation", "Artificial Intelligence & Robotics"
+]
+factors = ["Value", "Growth", "Momentum", "Quality", "Minimum Volatility", "Size"]
+providers = ["iShares", "Xtrackers", "Amundi", "Lyxor", "Invesco", "VanEck", "Vanguard", "SPDR", "HANetf", "ARK", "JPMorgan"]
+specific_commodities = ["Gold ETC", "Silver ETC", "Oil ETC", "Bitcoin ETP", "Ethereum ETP"]
 
-    # Tematici e Settoriali
-    "Technology Sector", "Healthcare Sector", "Financial Sector", "Energy Sector",
-    "Clean Energy", "AI & Robotics", "Cybersecurity", "Digitalisation", "Water",
-    "Uranium", "Nuclear", "Defense", "Quantum Computing", "Infrastructure", "Property", "REIT",
-    "ESG", "SRI", "Climate Change", "Semiconductors", "LifeStrategy"
-
-    # Fattoriali
-    "Value Factor", "Growth Factor", "Momentum Factor", "Quality Factor", "Minimum Volatility",
-
-'''
-    # Obbligazionari
-    "Global Aggregate Bond", "Government Bond", "Treasury Bond", "Corporate Bond",
-    "High Yield Bond", "Inflation-Linked Bond", "Green Bond", "Floating Rate Note",
-    "Money Market", "Short Term",
-'''
-
-    # Commodities e Alternativi
-    "Gold ETC", "Silver ETC", "Broad Commodities ETC", "Bitcoin ETP", "Ethereum ETP",
-    "Real Estate", "Infrastructure",
-
-    # Stili di investimento e provider
-    "Vanguard LifeStrategy", "iShares", "Xtrackers", "Amundi", "Lyxor", "Invesco", "VanEck", "HANetf"
-
-    # Aggiunta diretta di Ticker e ISIN specifici per garantirne la cattura
-    "XEON", "IE00B3VTMJ91", "LU1650487413", "IE00BDBRDM35", "IWDE", "IE00BK5BQT80",
-    "IE00B4L5Y983", "NDXH", "CSSX5E", "CSMIB", "BTCE", "VNGA80", "XQUI", "IE000YYE6WK5"
-)
+# Generazione delle query a matrice
+generated_queries = set()
+# 1. Asset Class x Geografia
+for ac in asset_classes:
+    for geo in geographies:
+        generated_queries.add(f'"{ac} {geo} UCITS ETF"')
+# 2. Tematici e Settoriali
+for theme in themes_sectors:
+    generated_queries.add(f'"{theme} UCITS ETF"')
+# 3. Fattori
+for factor in factors:
+    generated_queries.add(f'"{factor} Factor UCITS ETF"')
+# 4. Emittenti
+for provider in providers:
+    generated_queries.add(f'"{provider} UCITS ETF"')
+# 5. Commodities Specifiche
+for comm in specific_commodities:
+    generated_queries.add(f'"{comm}"')
 
 
-# Porffoli modello per backtesting
+DEFAULT_SEED_QUERIES: Tuple[str, ...] = tuple(sorted(list(generated_queries)))
+
+
+# Portafogli modello per backtesting
 FAMOUS_PORTFOLIOS = {
     "LifeStrategy 80 (LS80)": {
         "VTI": 0.40, "VEA": 0.24, "VWO": 0.16,
