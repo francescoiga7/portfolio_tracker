@@ -22,15 +22,28 @@ def style_pnl_columns(val):
     return ''
 
 
-def format_dataframe(df: pd.DataFrame, column_config: Dict, pnl_cols: List[str] = [], bar_cols: List[str] = []):
+def style_trend_signal(val: str) -> str:
+    """Applica uno stile colorato alla colonna dei segnali di trend."""
+    val_lower = val.lower()
+    if "mantieni" in val_lower:
+        return 'background-color: #28a745; color: white; font-weight: bold;'
+    elif "monitora" in val_lower:
+        return 'background-color: #ffc107; color: black; font-weight: bold;'
+    elif "vendita" in val_lower:
+        return 'background-color: #dc3545; color: white; font-weight: bold;'
+    return ''
+
+
+def format_dataframe(df: pd.DataFrame, column_config: Dict, pnl_cols: List[str] = [], bar_cols: List[str] = [],
+                     trend_cols: List[str] = []):
     """Applica formattazione completa a un DataFrame per la visualizzazione."""
     df_display = df.rename(columns=column_config)
 
     styler = df_display.style
 
-    # Mappa i nomi delle colonne originali ai nuovi nomi per lo styling
     renamed_pnl_cols = [column_config.get(col) for col in pnl_cols if column_config.get(col) in df_display.columns]
     renamed_bar_cols = [column_config.get(col) for col in bar_cols if column_config.get(col) in df_display.columns]
+    renamed_trend_cols = [column_config.get(col) for col in trend_cols if column_config.get(col) in df_display.columns]
 
     format_dict = {
         name: '€{:,.2f}' for col, name in column_config.items() if '€' in name
@@ -45,6 +58,10 @@ def format_dataframe(df: pd.DataFrame, column_config: Dict, pnl_cols: List[str] 
 
     if renamed_pnl_cols:
         styler = styler.apply(lambda x: x.map(style_pnl_columns), subset=renamed_pnl_cols)
+
+    if renamed_trend_cols:
+        for col_name in renamed_trend_cols:
+            styler = styler.map(style_trend_signal, subset=[col_name])
 
     if renamed_bar_cols:
         for col_name in renamed_bar_cols:
@@ -68,7 +85,7 @@ def _render_allocation_pie(labels: List[str], values: List[float], title: str, k
         )
         fig.update_layout(title_text=title, margin=dict(t=50, b=10, l=10, r=10),
                           legend=dict(orientation="h", yanchor="bottom", y=-0.4))
-        st.plotly_chart(fig, width="stretch", key=key)
+        st.plotly_chart(fig,width="stretch", key=key)
 
 
 def _display_backtest_results(all_series: Dict[str, pd.Series], rf_ann: float, key_prefix="backtest"):
@@ -105,7 +122,7 @@ def _display_backtest_results(all_series: Dict[str, pd.Series], rf_ann: float, k
     if metrics_list:
         df = pd.DataFrame(metrics_list).set_index("name")[["cagr", "vol_ann", "mdd", "sharpe"]]
         df.columns = ["CAGR %", "Volatilità Ann. %", "Max Drawdown %", "Sharpe Ratio"]
-        st.dataframe(df.style.format("{:.2f}", na_rep="n.d."), width="stretch")
+        st.dataframe(df.style.format("{:.2f}", na_rep="n.d."),width="stretch")
 
 
 # UI Principale del Tracker
@@ -166,7 +183,7 @@ def render_portfolio_tracker_ui():
     if not portfolio_data or not portfolio_data.get("transactions"):
         st.info("Questo portafoglio è vuoto. Aggiungi una transazione per iniziare.")
         return
-    with st.spinner("Aggiornamento P&L in corso..."):
+    with st.spinner("Aggiornamento P&L e Segnali di Trend in corso..."):
         pnl_results = PortfolioTracker.calculate_portfolio_pnl(portfolio_data["transactions"], commission, tax_rate)
 
     # Layout a tabs
@@ -194,15 +211,21 @@ def render_portfolio_tracker_ui():
         if pnl_results['open_positions']:
             df_open = pd.DataFrame(pnl_results['open_positions'])
             config = {
-                'isin': 'ISIN', 'quantity': 'Quantità', 'avg_buy_price': 'Prezzo Medio Acq. (€)',
-                'current_price': 'Prezzo Attuale (€)', 'invested_amount': 'Investito (€)',
-                'current_amount': 'Valore Attuale (€)', 'unrealized_pnl': 'P&L Non Realizzato (€)',
+                'isin': 'ISIN',
+                'trend_signal': 'Segnale di Trend',  # Nuova colonna
+                'quantity': 'Quantità',
+                'avg_buy_price': 'Prezzo Medio Acq. (€)',
+                'current_price': 'Prezzo Attuale (€)',
+                'invested_amount': 'Investito (€)',
+                'current_amount': 'Valore Attuale (€)',
+                'unrealized_pnl': 'P&L Non Realizzato (€)',
                 'unrealized_pnl_pct': 'P&L Non Realizzato (%)'
             }
             st.dataframe(format_dataframe(df_open, config,
                                           pnl_cols=['unrealized_pnl', 'unrealized_pnl_pct'],
-                                          bar_cols=['current_amount']),
-                         width="stretch")
+                                          bar_cols=['current_amount'],
+                                          trend_cols=['trend_signal']),  # Applica lo stile alla colonna trend
+                        width="stretch")
         else:
             st.info("Nessuna posizione aperta.")
 
@@ -217,7 +240,7 @@ def render_portfolio_tracker_ui():
             }
             st.dataframe(format_dataframe(df_agg, config,
                                           pnl_cols=['realized_pnl', 'unrealized_pnl', 'total_pnl']),
-                         width="stretch")
+                        width="stretch")
         else:
             st.info("Nessun dato aggregato da mostrare.")
 
@@ -234,7 +257,7 @@ def render_portfolio_tracker_ui():
             }
             st.dataframe(format_dataframe(df_gains, config,
                                           pnl_cols=['gross_pnl', 'taxable_amount', 'tax_paid', 'net_pnl']),
-                         width="stretch")
+                        width="stretch")
         else:
             st.info("Nessuna vendita registrata.")
 
@@ -244,4 +267,4 @@ def render_portfolio_tracker_ui():
                 'type': 'Tipo', 'isin': 'ISIN', 'quantity': 'Quantità',
                 'price': 'Prezzo (€)', 'date': 'Data'
             })
-            st.dataframe(df_trans_display, width="stretch")
+            st.dataframe(df_trans_display,width="stretch")

@@ -7,6 +7,7 @@ import streamlit as st
 from collections import defaultdict
 
 from .yahoo_client import resolve_isin_one, get_series
+from .metrics import get_trend_signal  # Importa la nuova funzione
 
 logger = logging.getLogger(__name__)
 
@@ -37,35 +38,47 @@ def _calculate_open_positions(transactions: List[Dict[str, Any]]) -> DefaultDict
     return positions
 
 
-def _fetch_current_prices(isins: List[str]) -> Dict[str, float]:
+def _fetch_current_prices_and_series(isins: List[str]) -> Dict[str, Dict[str, Any]]:
     """
-    Recupera i prezzi di mercato più recenti per una lista di ISIN.
+    Recupera il prezzo più recente e la serie storica per una lista di ISIN.
     """
-    prices = {}
+    data = {}
     for isin in isins:
         ticker = resolve_isin_one(isin)
-        series = get_series(ticker, "1mo") if ticker else None
+        # Richiediamo '1y' per avere dati sufficienti per le medie mobili
+        series = get_series(ticker, "1y") if ticker else None
         if series is not None and not series.empty:
-            prices[isin] = series.iloc[-1]
+            data[isin] = {
+                "price": series.iloc[-1],
+                "series": series
+            }
         else:
-            prices[isin] = 0
-            logger.warning(f"Impossibile recuperare il prezzo attuale per {isin} ({ticker})")
-    return prices
+            data[isin] = {
+                "price": 0,
+                "series": None
+            }
+            logger.warning(f"Impossibile recuperare i dati per {isin} ({ticker})")
+    return data
 
 
 def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, float]],
-                                    current_prices: Dict[str, float]) -> List[Dict[str, Any]]:
+                                    market_data: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Arricchisce i dati delle posizioni aperte con P&L non realizzato e altri dettagli.
+    Arricchisce i dati delle posizioni aperte con P&L e segnale di trend.
     """
     enriched_positions = []
     for isin, data in open_positions.items():
-        if data['quantity'] > 1e-9:  # Usa una tolleranza per evitare problemi di floating point
-            current_price = current_prices.get(isin, 0)
+        if data['quantity'] > 1e-9:
+            current_price = market_data.get(isin, {}).get("price", 0)
+            series = market_data.get(isin, {}).get("series", None)
+
             invested_amount = data['total_cost']
             current_amount = data['quantity'] * current_price
             unrealized_pnl = current_amount - invested_amount
             avg_buy_price = invested_amount / data['quantity'] if data['quantity'] > 0 else 0
+
+            # Calcola il segnale di trend
+            trend_signal = get_trend_signal(series)
 
             enriched_positions.append({
                 'isin': isin,
@@ -75,7 +88,8 @@ def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, f
                 'invested_amount': invested_amount,
                 'current_amount': current_amount,
                 'unrealized_pnl': unrealized_pnl,
-                'unrealized_pnl_pct': (unrealized_pnl / invested_amount * 100) if invested_amount > 0 else 0
+                'unrealized_pnl_pct': (unrealized_pnl / invested_amount * 100) if invested_amount > 0 else 0,
+                'trend_signal': trend_signal  # Aggiungi il segnale al dizionario
             })
     return enriched_positions
 
@@ -150,7 +164,7 @@ class PortfolioTracker:
 
     @staticmethod
     def calculate_capital_gains(transactions: List[Dict[str, Any]], commission: float = 1.0, tax_rate: float = 26.0) -> \
-    List[Dict[str, Any]]:
+            List[Dict[str, Any]]:
         """Calcola plusvalenze e minusvalenze per ogni operazione di vendita (logica LIFO implicita)."""
         sales_gains = []
         positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0})
@@ -196,7 +210,7 @@ class PortfolioTracker:
 
     @staticmethod
     def calculate_portfolio_pnl(transactions: List[Dict[str, Any]], commission: float = 1.0, tax_rate: float = 26.0) -> \
-    Dict[str, Any]:
+            Dict[str, Any]:
         """Orchestra il calcolo completo del P&L del portafoglio."""
         if not transactions:
             return {
@@ -205,25 +219,18 @@ class PortfolioTracker:
                 'total_pnl': 0, 'total_pnl_pct': 0
             }
 
-        # 1. Calcola P&L realizzato dal cassetto fiscale
         capital_gains_realized = PortfolioTracker.calculate_capital_gains(transactions, commission, tax_rate)
         realized_pnl_net = sum(cg['net_pnl'] for cg in capital_gains_realized)
 
-        # 2. Determina le posizioni aperte e il loro costo
         open_positions_base = _calculate_open_positions(transactions)
 
-        # 3. Recupera i prezzi attuali per le posizioni aperte
         isins_to_fetch = [isin for isin, data in open_positions_base.items() if data['quantity'] > 1e-9]
-        current_prices = _fetch_current_prices(isins_to_fetch)
+        market_data = _fetch_current_prices_and_series(isins_to_fetch)
 
-        # 4. Arricchisci le posizioni aperte con i dati di mercato e il P&L non realizzato
-        open_positions_details = _enrich_open_positions_with_pnl(open_positions_base, current_prices)
+        open_positions_details = _enrich_open_positions_with_pnl(open_positions_base, market_data)
 
-        # 5. Calcola le metriche di riepilogo del portafoglio
         summary = _aggregate_portfolio_summary(open_positions_details, realized_pnl_net, transactions)
 
-        # 6. (Mantenuto) Calcola posizioni aggregate per la tabella di dettaglio storico
-        # Questa logica è separata e serve solo per una vista specifica nella UI
         aggregated_positions = PortfolioTracker.calculate_aggregated_positions(transactions, open_positions_details)
 
         return {

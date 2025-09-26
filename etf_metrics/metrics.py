@@ -218,3 +218,34 @@ def get_trading_signal(series: pd.Series) -> Dict[str, str]:
 
     reason = f"Trend: {'Positivo' if is_uptrend else 'Negativo'}. RSI: {'Ipercomprato' if rsi >= 70 else 'Ipervenduto' if rsi <= 30 else 'Neutrale'}."
     return {"signal": "Mantieni/Monitora", "reason": reason}
+
+
+def get_trend_signal(series: pd.Series) -> str:
+    """
+    Genera un segnale di trend basato su medie mobili a 50 e 200 giorni.
+    """
+    if series is None or len(series) < 200:
+        return "Dati Insufficienti"
+
+    # Calcola le medie mobili
+    sma50 = series.rolling(window=50).mean()
+    sma200 = series.rolling(window=200).mean()
+
+    # Prendi gli ultimi valori disponibili
+    last_price = series.iloc[-1]
+    last_sma50 = sma50.iloc[-1]
+    last_sma200 = sma200.iloc[-1]
+
+    if pd.isna(last_sma50) or pd.isna(last_sma200):
+        return "Dati Insufficienti"
+
+    # Logica di segnale
+    if last_sma50 > last_sma200:
+        if last_price > last_sma50:
+            return "Mantieni (Trend Forte)"
+        else:
+            return "Monitora (Trend in Indebolimento)"
+    elif last_sma50 < last_sma200:
+        return "Valuta Vendita (Death Cross)"
+    else:
+        return "Laterale"

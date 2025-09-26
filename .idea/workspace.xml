@@ -4,8 +4,9 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="08b5446f-0e98-424d-bbb5-aa3e4a7fd80d" name="Changes" comment="Bug fixing">
-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+    <list default="true" id="08b5446f-0e98-424d-bbb5-aa3e4a7fd80d" name="Changes" comment="Changing pac_screener.py logic">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/etf_metrics/metrics.py" beforeDir="false" afterPath="$PROJECT_DIR$/etf_metrics/metrics.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -36,8 +37,8 @@
 }</component>
   <component name="GithubPullRequestsUISettings">{
   &quot;selectedUrlAndAccountId&quot;: {
-    &quot;url&quot;: &quot;https://github.com/francescoiga7/portfolio_tracker.git&quot;,
-    &quot;accountId&quot;: &quot;06a849db-1c9a-4b48-9067-c7b134ccecc3&quot;
+    &quot;url&quot;: &quot;https://github.com/francescoiga7/portfolio_tracker&quot;,
+    &quot;accountId&quot;: &quot;7c6dcdad-2262-4948-af85-ebab78866550&quot;
   }
 }</component>
   <component name="ProjectColorInfo">{
@@ -68,14 +69,23 @@
     &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
     &quot;git-widget-placeholder&quot;: &quot;dev&quot;,
+    &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,
     &quot;last_opened_file_path&quot;: &quot;C:/Users/fmainier/PycharmProjects/Project01_ETF&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;com.jetbrains.python.configuration.PyActiveSdkModuleConfigurable&quot;
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;com.jetbrains.python.configuration.PyActiveSdkModuleConfigurable&quot;,
+    &quot;to.speed.mode.migration.done&quot;: &quot;true&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
 }</component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-python-sdk-ce6832f46686-7b97d883f26b-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.25557.178" />
+        <option value="bundled-js-predefined-d6986cc7102b-9c94529fcfe0-JavaScript-PY-252.26199.168" />
+        <option value="bundled-python-sdk-b3d66beaba9a-c6efb3732140-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26199.168" />
       </set>
     </attachedChunks>
   </component>
@@ -86,6 +96,9 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1751632088057</updated>
+      <workItem from="1758872378127" duration="5008000" />
+      <workItem from="1758881006529" duration="4855000" />
+      <workItem from="1758886811171" duration="434000" />
     </task>
     <task id="LOCAL-00001" summary="First version">
       <option name="closed" value="true" />
@@ -119,12 +132,24 @@
       <option name="project" value="LOCAL" />
       <updated>1757707042953</updated>
     </task>
-    <option name="localTasksCounter" value="5" />
+    <task id="LOCAL-00005" summary="Changing pac_screener.py logic">
+      <option name="closed" value="true" />
+      <created>1758884737556</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1758884737556</updated>
+    </task>
+    <option name="localTasksCounter" value="6" />
     <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="First version" />
     <MESSAGE value="Bug fixing" />
-    <option name="LAST_COMMIT_MESSAGE" value="Bug fixing" />
+    <MESSAGE value="Changing pac_screener.py logic" />
+    <option name="LAST_COMMIT_MESSAGE" value="Changing pac_screener.py logic" />
   </component>
 </project>
