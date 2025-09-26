@@ -1,80 +1,18 @@
 # -*- coding: utf-8 -*-
 import logging
 import time
-from typing import Dict, List, Iterable, Optional
-from functools import lru_cache
-from collections import defaultdict
+from typing import Dict, List, Optional
 import pandas as pd
 import streamlit as st
 from datetime import date
 import numpy as np
 
-from .yahoo_client import yahoo_search, get_series, get_info, resolve_isin_one
-from .utils import pick_preferred_symbol
-from .config import DEFAULT_SEED_QUERIES, PREFERRED_SUFFIXES
+from .yahoo_client import get_series, get_info, resolve_isin_one
+from .etf_search_engine import discover_universe, get_unique_preferred_tickers
+from .config import DEFAULT_SEED_QUERIES
 from .metrics import compute_metrics_from_series
 
 logger = logging.getLogger(__name__)
-
-
-@lru_cache(maxsize=4096)
-def _get_isin_for_ticker(ticker: str) -> Optional[str]:
-    if not ticker: return None
-    try:
-        info = get_info(ticker=ticker) or {}
-        for k, v in info.items():
-            if "isin" in k.lower() and isinstance(v, str) and len(v) == 12:
-                return v.strip().upper()
-    except Exception:
-        pass
-    return None
-
-
-def _is_valid_etf_quote(q: Dict) -> bool:
-    return (q.get("quoteType") or "").upper() in ["ETF", "ETP", "ETN"]
-
-
-def _discover_universe(queries: Iterable[str], quotes_per_query: int, limit: int) -> List[str]:
-    tickers_seen, ticker_list = set(), []
-    # Rimuoviamo il limite per massimizzare la scoperta
-    for query in queries:
-        try:
-            quotes = yahoo_search(query, quotes_count=quotes_per_query)
-            for q in quotes:
-                ticker = q.get("symbol")
-                if ticker and ticker not in tickers_seen and _is_valid_etf_quote(q):
-                    tickers_seen.add(ticker)
-                    ticker_list.append(ticker)
-        except Exception as e:
-            logger.warning(f"Errore ricerca per '{query}': {e}")
-    return ticker_list
-
-
-def _get_unique_preferred_tickers(tickers: List[str], log_area: List[str]) -> List[str]:
-    log_area.append(f"**2. Deduplicazione e Selezione Ticker Preferiti...**")
-    isin_to_candidates, tickers_without_isin = defaultdict(list), []
-    for ticker in tickers:
-        isin = _get_isin_for_ticker(ticker)
-        if isin:
-            isin_to_candidates[isin].append(ticker)
-        else:
-            tickers_without_isin.append(ticker)
-
-    log_area.append(f"- Trovati {len(isin_to_candidates)} ISIN unici e {len(tickers_without_isin)} ticker senza ISIN.")
-
-    isin_to_preferred_ticker = {isin: pick_preferred_symbol(c, PREFERRED_SUFFIXES) for isin, c in
-                                isin_to_candidates.items()}
-    final_list = [v for v in isin_to_preferred_ticker.values() if v]
-
-    processed_bases = {t.split('.')[0] for t in final_list}
-    for ticker in tickers_without_isin:
-        base = ticker.split('.')[0]
-        if base not in processed_bases:
-            final_list.append(ticker)
-            processed_bases.add(base)
-
-    log_area.append(f"- **Universo finale da analizzare: {len(final_list)} ticker unici.**")
-    return list(dict.fromkeys(final_list))
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 15)
@@ -97,7 +35,7 @@ def get_market_regime(as_of_date: Optional[date] = None) -> Dict:
 
 
 @st.cache_data(show_spinner="Caricamento dati storici dell'universo ETF...", ttl=60 * 30)
-def fetch_screener_data(discovery_limit: int, log_area: List[str], specific_isins: Optional[List[str]] = None) -> List[
+def fetch_screener_data(log_area: List[str], specific_isins: Optional[List[str]] = None) -> List[
     Dict]:
     """
     Fase 1 (Lenta): Scopre o riceve un universo di ETF e scarica la loro intera serie storica.
@@ -111,7 +49,7 @@ def fetch_screener_data(discovery_limit: int, log_area: List[str], specific_isin
         log_area.append(f"- Trovati {len(unique_tickers)} ticker validi.")
     else:
         log_area.append("**1. Discovery & Download Dati...**")
-        raw_tickers = _discover_universe(DEFAULT_SEED_QUERIES, quotes_per_query=200, limit=discovery_limit)
+        raw_tickers = discover_universe(DEFAULT_SEED_QUERIES, quotes_per_query=200)
         log_area.append(f"- Trovati {len(raw_tickers)} ticker grezzi.")
 
         european_suffixes = [".MI", ".DE", ".AS", ".L", ".PA", ".SW", ".BR", ".LS", ".IR", ".MC", ".HE", ".CO", ".ST",
@@ -120,7 +58,9 @@ def fetch_screener_data(discovery_limit: int, log_area: List[str], specific_isin
                             any(ticker.endswith(suffix) for suffix in european_suffixes)]
         log_area.append(f"- Filtrati {len(european_tickers)} ticker su borse europee.")
 
-        unique_tickers = _get_unique_preferred_tickers(european_tickers, log_area)
+        unique_tickers = get_unique_preferred_tickers(european_tickers)
+        log_area.append(f"- **Universo finale da analizzare: {len(unique_tickers)} ticker unici.**")
+
 
     fetched_data = []
     progress_bar = st.progress(0, text=f"Download dati per {len(unique_tickers)} ETF...")
@@ -178,7 +118,7 @@ Optional[Dict]:
 
         log_entry.append("OK")
         return {
-            "ticker": ticker, "isin": _get_isin_for_ticker(ticker), "name": info.get("longName", ticker),
+            "ticker": ticker, "isin": get_info(ticker=ticker).get("isin"), "name": info.get("longName", ticker),
             "avg_value_eur": avg_value_eur, "calmar_ratio": calmar_ratio, "roc_12m": roc_12m,
             "roc_6m": roc_6m, "roc_3m": roc_3m, "proximity_to_high": proximity_to_high,
             "volatility_compression": volatility_compression, "volatility_6m": volatility_6m,

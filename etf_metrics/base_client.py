@@ -85,6 +85,7 @@ class BaseFinancialClient(ABC):
     def validate_input(self, input_data: Any) -> bool:
         """Valida i dati di input specifici del client."""
         pass
+
     def __enter__(self):
         return self
 

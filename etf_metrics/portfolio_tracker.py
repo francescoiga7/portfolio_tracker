@@ -7,7 +7,7 @@ import streamlit as st
 from collections import defaultdict
 
 from .yahoo_client import resolve_isin_one, get_series
-from .metrics import get_trend_signal  # Importa la nuova funzione
+from .metrics import get_trend_signal
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +29,58 @@ def _calculate_open_positions(transactions: List[Dict[str, Any]]) -> DefaultDict
             positions[isin]['total_cost'] += qty * price
         elif t['type'] == 'sell':
             if positions[isin]['quantity'] > 0:
-                # Il costo delle azioni vendute è proporzionale al costo medio di acquisto
                 avg_buy_price = positions[isin]['total_cost'] / positions[isin]['quantity']
                 cost_of_sold_shares = qty * avg_buy_price
                 positions[isin]['quantity'] -= qty
                 positions[isin]['total_cost'] -= cost_of_sold_shares
 
     return positions
+
+
+def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: float, tax_rate: float) -> \
+        List[Dict[str, Any]]:
+    """Calcola plusvalenze e minusvalenze per ogni operazione di vendita."""
+    sales_gains = []
+    positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0})
+    sorted_trans = sorted(transactions, key=lambda x: x['date'])
+
+    for t in sorted_trans:
+        isin = t['isin']
+        qty = float(t['quantity'])
+        price = float(t['price'])
+
+        if t['type'] == 'buy':
+            positions[isin]['quantity'] += qty
+            positions[isin]['total_cost'] += qty * price
+
+        elif t['type'] == 'sell':
+            if positions[isin]['quantity'] < qty:
+                logger.warning(
+                    f"Vendita di {isin} per una quantità ({qty}) superiore a quella posseduta. Transazione saltata.")
+                continue
+
+            avg_buy_price = positions[isin]['total_cost'] / positions[isin]['quantity']
+            cost_of_sold_shares = qty * avg_buy_price
+            sale_revenue = qty * price
+
+            capital_gain = sale_revenue - cost_of_sold_shares
+            taxable_amount = max(0, capital_gain)
+            tax_paid = taxable_amount * (tax_rate / 100.0)
+
+            gross_pnl_after_commission = capital_gain - commission
+            net_pnl = gross_pnl_after_commission - tax_paid
+
+            sales_gains.append({
+                'date': t['date'], 'isin': isin, 'quantity': qty,
+                'sale_price': price, 'avg_buy_price': avg_buy_price,
+                'gross_pnl': gross_pnl_after_commission, 'commission': commission,
+                'taxable_amount': taxable_amount, 'tax_paid': tax_paid, 'net_pnl': net_pnl
+            })
+
+            positions[isin]['quantity'] -= qty
+            positions[isin]['total_cost'] -= cost_of_sold_shares
+
+    return sales_gains
 
 
 def _fetch_current_prices_and_series(isins: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -45,7 +90,6 @@ def _fetch_current_prices_and_series(isins: List[str]) -> Dict[str, Dict[str, An
     data = {}
     for isin in isins:
         ticker = resolve_isin_one(isin)
-        # Richiediamo '1y' per avere dati sufficienti per le medie mobili
         series = get_series(ticker, "1y") if ticker else None
         if series is not None and not series.empty:
             data[isin] = {
@@ -77,7 +121,6 @@ def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, f
             unrealized_pnl = current_amount - invested_amount
             avg_buy_price = invested_amount / data['quantity'] if data['quantity'] > 0 else 0
 
-            # Calcola il segnale di trend
             trend_signal = get_trend_signal(series)
 
             enriched_positions.append({
@@ -89,7 +132,7 @@ def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, f
                 'current_amount': current_amount,
                 'unrealized_pnl': unrealized_pnl,
                 'unrealized_pnl_pct': (unrealized_pnl / invested_amount * 100) if invested_amount > 0 else 0,
-                'trend_signal': trend_signal  # Aggiungi il segnale al dizionario
+                'trend_signal': trend_signal
             })
     return enriched_positions
 
@@ -119,7 +162,6 @@ def _aggregate_portfolio_summary(
 
 
 class PortfolioTracker:
-    # --- Gestione storage in sessione/file (invariato) ---
     @staticmethod
     def init_session_from_json_once(filename: str = "saved_portfolio.json") -> None:
         if st.session_state.get("_pt_loaded_once"): return
@@ -160,54 +202,6 @@ class PortfolioTracker:
         except Exception as e:
             logger.warning("Errore salvataggio JSON %s: %s", filename, e)
 
-    # --- Logica di calcolo P&L (refactored) ---
-
-    @staticmethod
-    def calculate_capital_gains(transactions: List[Dict[str, Any]], commission: float = 1.0, tax_rate: float = 26.0) -> \
-            List[Dict[str, Any]]:
-        """Calcola plusvalenze e minusvalenze per ogni operazione di vendita (logica LIFO implicita)."""
-        sales_gains = []
-        positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0})
-        sorted_trans = sorted(transactions, key=lambda x: x['date'])
-
-        for t in sorted_trans:
-            isin = t['isin']
-            qty = float(t['quantity'])
-            price = float(t['price'])
-
-            if t['type'] == 'buy':
-                positions[isin]['quantity'] += qty
-                positions[isin]['total_cost'] += qty * price
-
-            elif t['type'] == 'sell':
-                if positions[isin]['quantity'] < qty:
-                    logger.warning(
-                        f"Vendita di {isin} per una quantità ({qty}) superiore a quella posseduta. Transazione saltata.")
-                    continue
-
-                avg_buy_price = positions[isin]['total_cost'] / positions[isin]['quantity']
-                cost_of_sold_shares = qty * avg_buy_price
-                sale_revenue = qty * price
-
-                capital_gain = sale_revenue - cost_of_sold_shares
-                taxable_amount = max(0, capital_gain)
-                tax_paid = taxable_amount * (tax_rate / 100.0)
-
-                gross_pnl_after_commission = capital_gain - commission
-                net_pnl = gross_pnl_after_commission - tax_paid
-
-                sales_gains.append({
-                    'date': t['date'], 'isin': isin, 'quantity': qty,
-                    'sale_price': price, 'avg_buy_price': avg_buy_price,
-                    'gross_pnl': gross_pnl_after_commission, 'commission': commission,
-                    'taxable_amount': taxable_amount, 'tax_paid': tax_paid, 'net_pnl': net_pnl
-                })
-
-                positions[isin]['quantity'] -= qty
-                positions[isin]['total_cost'] -= cost_of_sold_shares
-
-        return sales_gains
-
     @staticmethod
     def calculate_portfolio_pnl(transactions: List[Dict[str, Any]], commission: float = 1.0, tax_rate: float = 26.0) -> \
             Dict[str, Any]:
@@ -219,7 +213,7 @@ class PortfolioTracker:
                 'total_pnl': 0, 'total_pnl_pct': 0
             }
 
-        capital_gains_realized = PortfolioTracker.calculate_capital_gains(transactions, commission, tax_rate)
+        capital_gains_realized = _calculate_realized_pnl(transactions, commission, tax_rate)
         realized_pnl_net = sum(cg['net_pnl'] for cg in capital_gains_realized)
 
         open_positions_base = _calculate_open_positions(transactions)

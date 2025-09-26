@@ -23,6 +23,19 @@ PERIOD_MAP_LABEL_TO_YF = {
 
 
 def render_single_etf_ui():
+    st.title("Analisi Singolo ETF")
+    st.caption("Analizza le performance e le metriche di rischio di un singolo ETF.")
+
+    with st.expander("📖 Metodologia e Funzionamento"):
+        st.markdown("""
+        Questa sezione ti permette di analizzare in dettaglio un singolo ETF. Puoi:
+        - **Inserire l'ISIN** dell'ETF che ti interessa.
+        - **Sovrascrivere il benchmark** predefinito con un ticker Yahoo a tua scelta.
+        - **Impostare il tasso risk-free** per il calcolo dello Sharpe Ratio.
+        - **Visualizzare le metriche di performance** e di rischio per diversi periodi di tempo.
+        - **Confrontare la performance** dell'ETF con il suo benchmark.
+        """)
+
     st.sidebar.header("Impostazioni Analisi")
     isin = st.sidebar.text_input("ISIN", value="IE00BK5BQT80").strip().upper()
     bench_override = st.sidebar.text_input("Override Benchmark (Ticker Yahoo)", "").strip() or None
@@ -40,7 +53,6 @@ def render_single_etf_ui():
                     st.error(f"Errore durante l'analisi: {e}")
                     st.session_state.data_out = None
 
-    st.title("Analisi Singolo ETF")
     if 'data_out' in st.session_state and st.session_state.data_out:
         display_single_etf_results()
     else:
@@ -56,7 +68,6 @@ def display_single_etf_results():
     info_out, rows, aligned_frames = st.session_state.data_out
     etf_ticker = info_out.get("yahoo_symbol")
 
-    # --- Trading Signal ---
     if etf_ticker:
         full_series = get_series(etf_ticker, "2y")
         signal_info = get_trading_signal(full_series) if full_series is not None and not full_series.empty else {}
@@ -69,7 +80,6 @@ def display_single_etf_results():
             st.info(f"**Segnale Operativo: {signal}** - *{reason}*")
     st.markdown("---")
 
-    # --- Info Generali ---
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("ISIN", info_out.get("isin", "n.d."))
@@ -83,7 +93,6 @@ def display_single_etf_results():
     b_sym, b_name = info_out.get("benchmark_symbol"), info_out.get("benchmark_name")
     st.write(f"**Benchmark:** `{b_sym}` - *{b_name}*")
 
-    # --- UI Metriche con nuove aggiunte ---
     selected_period_label = st.radio("Seleziona periodo:", list(PERIOD_MAP_LABEL_TO_YF.keys()), index=4,
                                      horizontal=True)
     selected_period = PERIOD_MAP_LABEL_TO_YF[selected_period_label]
@@ -94,14 +103,12 @@ def display_single_etf_results():
         st.subheader(f"📊 Metriche di Performance e Rischio - {selected_period_label}")
         row = filtered_df.iloc[0]
 
-        # Performance
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Rendimento Totale", f"{row.get('total_return_pct', 0):.2f}%")
         c2.metric("CAGR", f"{row.get('cagr_pct', 0):.2f}%")
         c3.metric("Volatilità Ann.", f"{row.get('vol_ann_pct', 0):.2f}%")
         c4.metric("Max Drawdown", f"{row.get('mdd_pct', 0):.2f}%")
 
-        # Risk-Adjusted e Nuove Metriche
         st.markdown("---")
         c5, c6, c7, c8 = st.columns(4)
         c5.metric("Sharpe Ratio", f"{row.get('sharpe_ratio', 0):.2f}")
@@ -112,7 +119,6 @@ def display_single_etf_results():
         c8.metric("VaR 95% (1 giorno)", f"{row.get('var_95_1d_pct', 0):.2f}%",
                   help="Massima perdita attesa in 1 giorno con il 95% di confidenza.")
 
-    # --- Grafico (invariato) ---
     st.subheader(f"📈 Grafico Performance - {selected_period_label}")
     frame = aligned_frames.get(selected_period)
     if frame is not None and not frame.empty and len(frame) > 1:
@@ -121,7 +127,6 @@ def display_single_etf_results():
     else:
         st.warning(f"Dati insufficienti per il grafico nel periodo '{selected_period_label}'.")
 
-    # --- Tabella Completa (aggiornata con nuove colonne) ---
     with st.expander("📋 Tabella Completa Tutti i Periodi"):
         view_cols = [
             "period", "total_return_pct", "cagr_pct", "vol_ann_pct", "mdd_pct",
@@ -134,4 +139,4 @@ def display_single_etf_results():
         })
         formatters = {c: "{:.2f}%" for c in df_view.columns if "%" in c}
         formatters.update({c: "{:.2f}" for c in ["Sharpe", "Sortino", "Omega"]})
-        st.dataframe(df_view.style.format(formatters, na_rep="n.d."))
+        st.dataframe(df_view.style.format(formatters, na_rep="n.d."),width="stretch")

@@ -1,82 +1,79 @@
 # -*- coding: utf-8 -*-
 import logging
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 import numpy as np
 import pandas as pd
-from datetime import timedelta
 from scipy.stats import norm
 
 log = logging.getLogger(__name__)
 
+VALIDATION_THRESHOLDS = {
+    "min_daily_return": -0.5,
+    "max_daily_return": 2.0,
+    "min_annual_vol": 0.01,
+    "max_annual_vol": 2.0,
+    "min_price": 0.01,
+    "max_sharpe": 10.0
+}
 
-class MetricsCalculator:
-    VALIDATION_THRESHOLDS = {
-        "min_daily_return": -0.5,
-        "max_daily_return": 2.0,
-        "min_annual_vol": 0.01,
-        "max_annual_vol": 2.0,
-        "min_price": 0.01,
-        "max_sharpe": 10.0
-    }
 
-    @staticmethod
-    def _normalize_timezone(s: pd.Series) -> pd.Series:
-        if isinstance(s.index, pd.DatetimeIndex) and s.index.tz is not None:
-            s = s.copy()
-            s.index = s.index.tz_localize(None)
-        return s
+def _normalize_timezone(s: pd.Series) -> pd.Series:
+    if isinstance(s.index, pd.DatetimeIndex) and s.index.tz is not None:
+        s = s.copy()
+        s.index = s.index.tz_localize(None)
+    return s
 
-    @staticmethod
-    def _safe_division(numerator: float, denominator: float, default: Optional[float] = None,
-                       operation_name: str = "division") -> Optional[float]:
-        try:
-            if denominator == 0 or np.isnan(denominator) or np.isinf(denominator):
-                return default
-            if np.isnan(numerator) or np.isinf(numerator):
-                return default
-            result = numerator / denominator
-            if np.isnan(result) or np.isinf(result):
-                return default
-            return float(result)
-        except Exception:
+
+def _safe_division(numerator: float, denominator: float, default: Optional[float] = None) -> Optional[float]:
+    try:
+        if denominator == 0 or np.isnan(denominator) or np.isinf(denominator):
             return default
-
-    @staticmethod
-    def _as_price_series(s: pd.Series, series_name: str = "unnamed") -> Optional[pd.Series]:
-        if s is None: return None
-        s = MetricsCalculator._normalize_timezone(s).sort_index()
-        values = pd.to_numeric(s, errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
-        values = values[values > 0]
-        cleaned = pd.Series(values.values, index=values.index).sort_index()
-        if len(cleaned) < 2: return None
-        return cleaned
-
-    @staticmethod
-    def _infer_periods_per_year(s: pd.Series) -> float:
-        default = 252.0
-        if len(s) < 2 or not isinstance(s.index, pd.DatetimeIndex):
+        if np.isnan(numerator) or np.isinf(numerator):
             return default
-        elapsed_days = (s.index[-1] - s.index[0]).days
-        years = elapsed_days / 365.25
-        returns = s.pct_change().dropna()
-        if years > 0 and len(returns) > 0:
-            return float(np.clip(len(returns) / years, 50.0, 520.0))
+        result = numerator / denominator
+        if np.isnan(result) or np.isinf(result):
+            return default
+        return float(result)
+    except Exception:
         return default
 
-    @staticmethod
-    def _clip_extreme_returns(returns: pd.Series) -> pd.Series:
-        lo = MetricsCalculator.VALIDATION_THRESHOLDS["min_daily_return"]
-        hi = MetricsCalculator.VALIDATION_THRESHOLDS["max_daily_return"]
-        return returns.clip(lower=lo, upper=hi)
 
-    @staticmethod
-    def _validate_series(s: pd.Series, min_length: int = 2, series_name: str = "unnamed") -> bool:
-        return s is not None and len(s) >= min_length
+def _as_price_series(s: pd.Series) -> Optional[pd.Series]:
+    if s is None: return None
+    s = _normalize_timezone(s).sort_index()
+    values = pd.to_numeric(s, errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
+    values = values[values > 0]
+    cleaned = pd.Series(values.values, index=values.index).sort_index()
+    if len(cleaned) < 2: return None
+    return cleaned
+
+
+def _infer_periods_per_year(s: pd.Series) -> float:
+    default = 252.0
+    if len(s) < 2 or not isinstance(s.index, pd.DatetimeIndex):
+        return default
+    elapsed_days = (s.index[-1] - s.index[0]).days
+    years = elapsed_days / 365.25
+    returns = s.pct_change().dropna()
+    if years > 0 and len(returns) > 0:
+        return float(np.clip(len(returns) / years, 50.0, 520.0))
+    return default
+
+
+def _clip_extreme_returns(returns: pd.Series) -> pd.Series:
+    lo = VALIDATION_THRESHOLDS["min_daily_return"]
+    hi = VALIDATION_THRESHOLDS["max_daily_return"]
+    return returns.clip(lower=lo, upper=hi)
+
+
+def _validate_series(s: pd.Series, min_length: int = 2) -> bool:
+    return s is not None and len(s) >= min_length
+
 
 def compute_metrics_from_series(s: pd.Series) -> Dict[str, Optional[float]]:
-    if not MetricsCalculator._validate_series(s):
+    if not _validate_series(s):
         return {}
-    s_clean = MetricsCalculator._as_price_series(s)
+    s_clean = _as_price_series(s)
     if s_clean is None: return {}
 
     total_return = (s_clean.iloc[-1] / s_clean.iloc[0]) - 1.0
@@ -87,7 +84,7 @@ def compute_metrics_from_series(s: pd.Series) -> Dict[str, Optional[float]]:
     cagr = ((1.0 + total_return) ** (1.0 / years) - 1.0) if years > 0 else None
 
     returns = s_clean.pct_change().dropna()
-    per_year = MetricsCalculator._infer_periods_per_year(s_clean)
+    per_year = _infer_periods_per_year(s_clean)
     vol_ann = returns.std(ddof=1) * np.sqrt(per_year) if len(returns) >= 2 else None
 
     wealth = s_clean / s_clean.iloc[0]
@@ -104,15 +101,15 @@ def compute_metrics_from_series(s: pd.Series) -> Dict[str, Optional[float]]:
 
 
 def compute_sharpe_ratio(s: pd.Series, rf_annual_pct: float = 0.0) -> Optional[float]:
-    s_clean = MetricsCalculator._as_price_series(s)
+    s_clean = _as_price_series(s)
     if s_clean is None or len(s_clean) < 3: return None
     returns = s_clean.pct_change().dropna()
     if len(returns) < 2: return None
 
-    per_year = MetricsCalculator._infer_periods_per_year(s_clean)
+    per_year = _infer_periods_per_year(s_clean)
     rf_per_period = (rf_annual_pct / 100.0) / per_year
 
-    excess_returns = MetricsCalculator._clip_extreme_returns(returns) - rf_per_period
+    excess_returns = _clip_extreme_returns(returns) - rf_per_period
     mean_excess = excess_returns.mean()
     std_dev = excess_returns.std(ddof=1)
 
@@ -122,18 +119,17 @@ def compute_sharpe_ratio(s: pd.Series, rf_annual_pct: float = 0.0) -> Optional[f
 
 def compute_sortino_ratio(s: pd.Series, rf_annual_pct: float = 0.0) -> Optional[float]:
     """Calcola il Sortino Ratio, che penalizza solo la volatilità negativa."""
-    s_clean = MetricsCalculator._as_price_series(s)
+    s_clean = _as_price_series(s)
     if s_clean is None or len(s_clean) < 3: return None
     returns = s_clean.pct_change().dropna()
     if len(returns) < 2: return None
 
-    per_year = MetricsCalculator._infer_periods_per_year(s_clean)
+    per_year = _infer_periods_per_year(s_clean)
     rf_per_period = (rf_annual_pct / 100.0) / per_year
 
     excess_returns = returns - rf_per_period
     mean_excess = excess_returns.mean()
 
-    # Calcola la deviazione standard solo dei rendimenti negativi (downside deviation)
     downside_returns = excess_returns[excess_returns < 0]
     downside_std = downside_returns.std(ddof=1)
 
@@ -146,37 +142,34 @@ def compute_sortino_ratio(s: pd.Series, rf_annual_pct: float = 0.0) -> Optional[
 
 def compute_omega_ratio(s: pd.Series, required_return_pct: float = 0.0) -> Optional[float]:
     """Calcola l'Omega Ratio, che misura il rapporto tra guadagni e perdite ponderati."""
-    s_clean = MetricsCalculator._as_price_series(s)
+    s_clean = _as_price_series(s)
     if s_clean is None or len(s_clean) < 3: return None
     returns = s_clean.pct_change().dropna()
     if returns.empty: return None
 
-    threshold = (required_return_pct / 100.0) / MetricsCalculator._infer_periods_per_year(s)
+    threshold = (required_return_pct / 100.0) / _infer_periods_per_year(s)
 
     gains = (returns - threshold).where(returns > threshold, 0).sum()
     losses = (threshold - returns).where(returns < threshold, 0).sum()
 
-    return MetricsCalculator._safe_division(gains, losses)
+    return _safe_division(gains, losses)
 
 
 def compute_var(s: pd.Series, confidence_level: float = 0.95, holding_period_days: int = 1) -> Optional[float]:
     """Calcola il Value at Risk (VaR) storico."""
-    s_clean = MetricsCalculator._as_price_series(s)
+    s_clean = _as_price_series(s)
     if s_clean is None: return None
     returns = s_clean.pct_change().dropna()
     if returns.empty: return None
 
-    # Calcola il VaR per un giorno
     daily_var = -returns.quantile(1 - confidence_level)
-
-    # Estrapola per il periodo di detenzione (es. 10 giorni)
     var_period = daily_var * np.sqrt(holding_period_days)
 
     return float(var_period * 100.0) if np.isfinite(var_period) else None
 
 
 def compute_current_drawdown(s: pd.Series) -> Optional[float]:
-    s_clean = MetricsCalculator._as_price_series(s)
+    s_clean = _as_price_series(s)
     if s_clean is None: return None
     rel = s_clean / s_clean.cummax()
     return float((rel.iloc[-1] - 1.0) * 100.0)
@@ -227,11 +220,9 @@ def get_trend_signal(series: pd.Series) -> str:
     if series is None or len(series) < 200:
         return "Dati Insufficienti"
 
-    # Calcola le medie mobili
     sma50 = series.rolling(window=50).mean()
     sma200 = series.rolling(window=200).mean()
 
-    # Prendi gli ultimi valori disponibili
     last_price = series.iloc[-1]
     last_sma50 = sma50.iloc[-1]
     last_sma200 = sma200.iloc[-1]
@@ -239,7 +230,6 @@ def get_trend_signal(series: pd.Series) -> str:
     if pd.isna(last_sma50) or pd.isna(last_sma200):
         return "Dati Insufficienti"
 
-    # Logica di segnale
     if last_sma50 > last_sma200:
         if last_price > last_sma50:
             return "Mantieni (Trend Forte)"

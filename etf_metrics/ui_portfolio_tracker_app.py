@@ -74,7 +74,6 @@ def format_dataframe(df: pd.DataFrame, column_config: Dict, pnl_cols: List[str] 
     return styler
 
 
-# Funzioni helper per la UI (invariate)
 def _render_allocation_pie(labels: List[str], values: List[float], title: str, key="alloc_pie"):
     if not labels or not values or sum(values) <= 0:
         st.info("Aggiungi almeno una posizione per vedere l'allocazione.")
@@ -92,7 +91,6 @@ def _display_backtest_results(all_series: Dict[str, pd.Series], rf_ann: float, k
     if not all_series:
         st.error("Nessun dato da visualizzare.")
         return
-    # ... (il resto della funzione è invariato) ...
     period_map = {"1M": 1, "3M": 3, "6M": 6, "YTD": "ytd", "1A": 12, "3A": 36, "5A": 60, "Max": None}
     selected_period_label = st.radio(
         "Seleziona periodo di analisi", list(period_map.keys()), index=len(period_map) - 1, horizontal=True,
@@ -125,7 +123,6 @@ def _display_backtest_results(all_series: Dict[str, pd.Series], rf_ann: float, k
         st.dataframe(df.style.format("{:.2f}", na_rep="n.d."),width="stretch")
 
 
-# UI Principale del Tracker
 def render_portfolio_tracker_ui():
     from .portfolio_tracker import PortfolioTracker
     PortfolioTracker.init_session_from_json_once(filename="saved_portfolio.json")
@@ -133,7 +130,16 @@ def render_portfolio_tracker_ui():
     st.title("💼 Portfolio Tracker")
     st.caption("Analizza le tue posizioni, monitora le performance e gestisci le transazioni.")
 
-    # Sidebar
+    with st.expander("📖 Metodologia e Funzionamento"):
+        st.markdown("""
+        Questa sezione ti permette di monitorare e analizzare i tuoi portafogli di investimento. Puoi:
+        - **Creare nuovi portafogli** o **caricare portafogli esistenti**.
+        - **Aggiungere transazioni** di acquisto e vendita per ogni portafoglio.
+        - **Visualizzare un riepilogo** con le metriche principali del tuo portafoglio.
+        - **Analizzare le posizioni aperte** con dettagli su P&L non realizzato e segnali di trend.
+        - **Consultare lo storico delle transazioni** e il cassetto fiscale con il P&L realizzato.
+        """)
+
     st.sidebar.header("📂 Gestione Portafogli")
     saved_portfolios = PortfolioTracker.get_saved_portfolio_names()
     current_portfolio_name = st.session_state.get("current_portfolio_name", "")
@@ -175,7 +181,6 @@ def render_portfolio_tracker_ui():
                                          format="%.2f")
             tax_rate = st.slider("Imposta plusvalenze (%)", 0, 100, 26, 1)
 
-    # Pagina principale
     if not current_portfolio_name:
         st.info("👈 Crea o carica un portafoglio dalla barra laterale per iniziare.")
         return
@@ -186,7 +191,6 @@ def render_portfolio_tracker_ui():
     with st.spinner("Aggiornamento P&L e Segnali di Trend in corso..."):
         pnl_results = PortfolioTracker.calculate_portfolio_pnl(portfolio_data["transactions"], commission, tax_rate)
 
-    # Layout a tabs
     tab1, tab2, tab3 = st.tabs(["🧭 Riepilogo", "📊 Posizioni Dettagliate", "🗃️ Cassetto Fiscale e Storico"])
 
     with tab1:
@@ -212,7 +216,7 @@ def render_portfolio_tracker_ui():
             df_open = pd.DataFrame(pnl_results['open_positions'])
             config = {
                 'isin': 'ISIN',
-                'trend_signal': 'Segnale di Trend',  # Nuova colonna
+                'trend_signal': 'Segnale di Trend',
                 'quantity': 'Quantità',
                 'avg_buy_price': 'Prezzo Medio Acq. (€)',
                 'current_price': 'Prezzo Attuale (€)',
@@ -224,7 +228,7 @@ def render_portfolio_tracker_ui():
             st.dataframe(format_dataframe(df_open, config,
                                           pnl_cols=['unrealized_pnl', 'unrealized_pnl_pct'],
                                           bar_cols=['current_amount'],
-                                          trend_cols=['trend_signal']),  # Applica lo stile alla colonna trend
+                                          trend_cols=['trend_signal']),
                         width="stretch")
         else:
             st.info("Nessuna posizione aperta.")

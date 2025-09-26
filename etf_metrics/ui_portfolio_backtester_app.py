@@ -34,12 +34,20 @@ def render_portfolio_backtester_ui():
     st.title("🔙 Portfolio Backtester")
     st.caption("Simula e confronta le performance di portafogli personalizzati nel tempo.")
 
+    with st.expander("📖 Metodologia e Funzionamento"):
+        st.markdown("""
+        Questa sezione ti permette di simulare e confrontare le performance di portafogli personalizzati nel tempo. Puoi:
+        - **Scegliere una strategia di investimento**: "Lump Sum (PIC)" o "PAC".
+        - **Definire il tuo portafoglio**: manualmente o caricandolo da un portafoglio esistente.
+        - **Impostare la frequenza di ribilanciamento**: "Mai" o "Annuale".
+        - **Confrontare il tuo portafoglio** con alcuni portafogli modello.
+        - **Eseguire il backtest** e visualizzare i risultati.
+        """)
+
     st.sidebar.header("⚙️ Impostazioni Backtest")
 
-    # 1. Scelta Strategia
     strategy = st.sidebar.selectbox("Strategia di Investimento", ["Lump Sum (PIC)", "PAC"])
 
-    # 2. Campi Condizionali per la Strategia
     initial_investment = 0
     monthly_investment = 0
 
@@ -50,7 +58,6 @@ def render_portfolio_backtester_ui():
         monthly_investment = st.sidebar.number_input("Investimento Mensile (€)", min_value=50, max_value=10000,
                                                      value=500, step=50)
 
-    # 3. Definizione del Portafoglio
     st.sidebar.subheader("Definizione Portafoglio")
     portfolio_source = st.sidebar.radio("Scegli come definire il portafoglio", ["Manuale", "Carica da Portafoglio Esistente"])
 
@@ -109,7 +116,6 @@ def render_portfolio_backtester_ui():
                 st.session_state.backtest_results = {'series': all_series, 'rf_ann': rf_ann_backtest}
             st.success("Backtest completato!")
 
-    # Visualizzazione risultati
     if st.session_state.get('backtest_results') and st.session_state.backtest_results.get('series'):
         st.subheader("📊 Risultati del Backtest")
         _display_backtest_results(

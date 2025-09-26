@@ -50,7 +50,6 @@ def render_pac_screener_ui():
 
             log_list_for_fetching = []
             st.session_state.pac_screener_raw_data = fetch_screener_data(
-                discovery_limit=10000,
                 log_area=log_list_for_fetching,
                 specific_isins=specific_isins
             )
@@ -123,7 +122,7 @@ def render_pac_screener_ui():
                     "Volatilità 6M": "{:.2%}", "Valore Scambiato (€)": "€{:,.0f}"
                 }).background_gradient(cmap='Greens', subset=['Punteggio Finale', 'Score Qualità', 'Score Momentum'])
                 .background_gradient(cmap='Reds_r', subset=['Score Breakout', 'Score Low Volatility']),
-                width="stretch"
+               width="stretch"
             )
         else:
             st.warning(
@@ -141,7 +140,7 @@ def render_pac_screener_ui():
             log_df_data = [log for log in st.session_state.debug_log_processing if isinstance(log, list)]
             if log_df_data:
                 log_df = pd.DataFrame(log_df_data, columns=['Ticker', 'Esito'])
-                st.dataframe(log_df, width="stretch")
+                st.dataframe(log_df,width="stretch")
 
     else:
         st.info("Imposta la modalità e premi 'Carica/Aggiorna Dati Universo ETF' per iniziare.")

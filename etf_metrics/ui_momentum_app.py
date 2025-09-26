@@ -9,9 +9,19 @@ from .momentum import fetch_momentum_data, process_momentum_rankings
 
 def render_momentum_ui():
     st.title("Verifica Momentum Corretto per il Rischio")
+    st.caption("Analizza il momentum di un elenco di ETF, correggendolo per il rischio.")
+
+    with st.expander("📖 Metodologia e Funzionamento"):
+        st.markdown("""
+        Questa sezione ti permette di analizzare il momentum di un elenco di ETF, correggendolo per il rischio. Puoi:
+        - **Inserire un elenco di ISIN** da confrontare.
+        - **Impostare il periodo di lookback** per il calcolo delle metriche.
+        - **Impostare il tasso risk-free** per il calcolo dello Sharpe Ratio.
+        - **Visualizzare la classifica** degli ETF per Sharpe Ratio.
+        """)
+
     st.sidebar.header("Impostazioni Momentum")
 
-    # --- Sezione 1: Caricamento Dati ---
     with st.sidebar.expander("1. Carica l'universo di ETF", expanded=True):
         momentum_isins = st.text_area(
             "ISIN da confrontare (uno per riga)",
@@ -37,10 +47,8 @@ def render_momentum_ui():
                 st.warning("Inserisci almeno un ISIN.")
                 st.session_state.momentum_raw_data = None
             else:
-                # La cache di fetch_momentum_data assicura che i dati vengano scaricati solo una volta
                 st.session_state.momentum_raw_data = fetch_momentum_data(isins_list)
 
-    # --- Sezione 2: Analisi Interattiva (visibile solo dopo aver caricato i dati) ---
     if 'momentum_raw_data' in st.session_state and st.session_state.momentum_raw_data:
         st.sidebar.header("2. Filtri di Analisi")
 
@@ -66,7 +74,6 @@ def render_momentum_ui():
         else:
             st.caption(f"Classifica per Sharpe Ratio negli ultimi {lookback} mesi, con segnale operativo attuale.")
 
-        # Elabora i dati grezzi con il lookback e la data di analisi correnti
         results = process_momentum_rankings(
             st.session_state.momentum_raw_data,
             lookback,
@@ -98,7 +105,7 @@ def render_momentum_ui():
 
             st.dataframe(
                 df.style.format(formatters, na_rep="n.d.").map(style_signal, subset=["Segnale Operativo"]),
-                width="stretch"
+               width="stretch"
             )
         else:
             st.warning(f"Nessun ETF con dati sufficienti per il lookback di {lookback} mesi alla data selezionata.")
