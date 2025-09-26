@@ -84,8 +84,6 @@ PERIODS_ALL = [
     "1d", "5d", "1mo", "3mo", "6mo", "1y", "3y", "5y", "10y", "ytd", "max"
 ]
 
-
-# LISTA DI QUERY OTTIMIZZATA PER MASSIMA COPERTURA
 DEFAULT_SEED_QUERIES: Tuple[str, ...] = (
     # Azionari Globali e Regionali
     "MSCI World", "FTSE All-World", "Global Equity", "Developed Markets",
@@ -96,7 +94,7 @@ DEFAULT_SEED_QUERIES: Tuple[str, ...] = (
     "Technology Sector", "Healthcare Sector", "Financial Sector", "Energy Sector",
     "Clean Energy", "AI & Robotics", "Cybersecurity", "Digitalisation", "Water",
     "Uranium", "Nuclear", "Defense", "Quantum Computing", "Infrastructure", "Property", "REIT",
-    "ESG", "SRI", "Climate Change",
+    "ESG", "SRI", "Climate Change", "Semiconductors", "LifeStrategy"
 
     # Fattoriali
     "Value Factor", "Growth Factor", "Momentum Factor", "Quality Factor", "Minimum Volatility",

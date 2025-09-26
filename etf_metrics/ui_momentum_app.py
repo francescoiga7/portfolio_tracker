@@ -11,7 +11,6 @@ def render_momentum_ui():
     st.title("Verifica Momentum Corretto per il Rischio")
     st.sidebar.header("Impostazioni Momentum")
 
-    # --- INTEGRAZIONE TIME TRAVEL ---
     with st.sidebar.expander("⏳ Time Travel (Opzionale)"):
         enable_time_travel = st.checkbox("Abilita Time Travel", key="momentum_tt_check")
         as_of_date = st.date_input(

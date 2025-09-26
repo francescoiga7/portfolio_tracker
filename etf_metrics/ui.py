@@ -9,6 +9,8 @@ from .ui_portfolio_tracker_app import render_portfolio_tracker_ui
 from .ui_portfolio_backtester_app import render_portfolio_backtester_ui
 from .ui_etf_comparison_app import render_etf_comparison_ui
 from .ui_pac_screener_app import render_pac_screener_ui
+import subprocess
+subprocess.run(["uv", "pip", "install", "-r", "requirements.txt", "--upgrade"])
 
 def init_session_state():
     defaults = {

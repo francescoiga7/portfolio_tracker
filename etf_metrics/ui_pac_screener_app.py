@@ -6,7 +6,7 @@ from .pac_screener import screen_for_tactical_etfs, get_market_regime
 
 def render_pac_screener_ui():
     """Renderizza la UI per il Screener Tattico con funzionalità Time Travel integrata."""
-    st.title("🎯 Screener Tattico Avanzato (Europa)")
+    st.title("🎯 Screener ETF")
     st.caption("Scopri ETP con potenziale di breakout quotati sulle principali borse europee.")
 
     with st.expander("📖 Leggi la Metodologia"):
