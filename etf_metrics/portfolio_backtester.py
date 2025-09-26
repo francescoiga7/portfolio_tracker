@@ -1,195 +1,219 @@
 # -*- coding: utf-8 -*-
-import re
+import logging
 from typing import Dict, Optional, List
 import pandas as pd
-import streamlit as st
+
 from .yahoo_client import resolve_isin_one, get_series
+from .base_client import DataValidator
+
+logger = logging.getLogger(__name__)
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60)
-def get_portfolio_series(portfolio_def: Dict[str, float], period: str = "max") -> Optional[pd.Series]:
+def _load_series_and_mapping(portfolio_def: Dict[str, float], period: str):
     """
-    Costruisce la serie storica di un portafoglio basato sui suoi componenti e pesi.
-    Risolve gli ISIN se necessario.
+    Carica le serie per gli asset (ticker o ISIN) e ritorna:
+    - df allineato (indice comune) con colonne=ticker
+    - mappa asset_originale -> ticker
     """
-    all_series = {}
+    all_series: Dict[str, pd.Series] = {}
+    asset_to_ticker: Dict[str, str] = {}
 
-    for asset, weight in portfolio_def.items():
-        ticker = asset
-        # Se l'asset è un ISIN, prova a risolverlo
-        if re.match(r'^[A-Z]{2}[A-Z0-9]{9}[0-9]$', asset.upper()):
-            resolved_ticker = resolve_isin_one(asset.upper())
-            if not resolved_ticker:
-                st.warning(f"Impossibile risolvere l'ISIN {asset}, verrà saltato.")
-                continue
-            ticker = resolved_ticker
-
-        series = get_series(ticker, period)
-        if series is not None and not series.empty:
-            all_series[ticker] = series
-        else:
-            st.warning(f"Nessun dato storico trovato per {ticker} ({asset}), verrà saltato.")
+    for asset, _ in portfolio_def.items():
+        ticker = resolve_isin_one(asset.upper()) if DataValidator.validate_isin(asset) else asset
+        if not ticker:
+            logger.warning("Impossibile risolvere ISIN %s; asset saltato.", asset)
+            continue
+        s = get_series(ticker, period)
+        if s is None or s.empty:
+            logger.warning("Nessun dato storico per %s (%s); asset saltato.", ticker, asset)
+            continue
+        all_series[ticker] = s
+        asset_to_ticker[asset] = ticker
 
     if not all_series:
-        return None
+        return None, {}
 
     # Allinea tutte le serie su un indice di date comune
     df = pd.DataFrame(all_series).dropna()
     if df.shape[0] < 2:
-        st.error("Dati storici insufficienti per costruire il portafoglio dopo l'allineamento.")
+        logger.error("Dati storici insufficienti per costruire il portafoglio dopo l'allineamento.")
+        return None, {}
+
+    return df, asset_to_ticker
+
+
+def _rebalance_portfolio(prices_df: pd.DataFrame, weights: pd.Series) -> pd.Series:
+    """
+    Applica una strategia di ribilanciamento annuale.
+    """
+    capitals = pd.Series(0.0, index=prices_df.index)
+    capitals.iloc[0] = 1.0  # Inizia con un capitale di 1.0
+
+    last_rebalance_year = prices_df.index[0].year
+
+    # Ritorno giornaliero dei singoli asset
+    returns = prices_df.pct_change().fillna(0)
+
+    # Pesature correnti, inizializzate con i pesi target
+    current_weights = weights.copy()
+
+    for i in range(1, len(prices_df)):
+        date = prices_df.index[i]
+
+        # Aggiorna il capitale con i ritorni del giorno precedente
+        portfolio_return = (returns.iloc[i] * current_weights).sum()
+        capitals.iloc[i] = capitals.iloc[i - 1] * (1 + portfolio_return)
+
+        # Aggiorna i pesi in base ai ritorni
+        new_weights = current_weights * (1 + returns.iloc[i])
+        current_weights = new_weights / new_weights.sum()
+
+        # Controlla se è necessario ribilanciare (inizio anno)
+        if date.year > last_rebalance_year:
+            current_weights = weights.copy()  # Ripristina i pesi target
+            last_rebalance_year = date.year
+
+    return capitals
+
+
+def get_portfolio_series(portfolio_def: Dict[str, float], period: str = "max", rebalancing: str = 'mai') -> Optional[
+    pd.Series]:
+    """
+    Costruisce la serie storica di un portafoglio (Lump Sum).
+    Supporta il ribilanciamento annuale.
+    """
+    df, asset_to_ticker = _load_series_and_mapping(portfolio_def, period)
+    if df is None:
         return None
 
-    # Normalizza le serie (rebase a 1) e applica i pesi
-    norm_df = df / df.iloc[0]
+    weights_dict = {asset_to_ticker[a]: portfolio_def[a] for a in asset_to_ticker.keys()}
+    weights_series = pd.Series(weights_dict, index=df.columns, dtype=float).fillna(0.0)
 
-    # Assicurati che i pesi corrispondano alle serie effettivamente scaricate
-    weights_series = pd.Series(
-        {ticker: portfolio_def[asset] for asset, ticker in zip(portfolio_def.keys(), all_series.keys())})
-    weights_series /= weights_series.sum()  # Normalizza i pesi nel caso qualche asset sia stato saltato
+    if weights_series.sum() <= 0:
+        return None
+    weights_series /= weights_series.sum()
 
-    portfolio_val = (norm_df * weights_series).sum(axis=1)
+    if rebalancing == 'annuale':
+        portfolio_val = _rebalance_portfolio(df, weights_series)
+    else:
+        norm_df = df / df.iloc[0]
+        portfolio_val = (norm_df * weights_series).sum(axis=1)
+
     portfolio_val.name = "Portfolio"
-
     return portfolio_val
 
 
-def simulate_pac_investment(portfolio_def: Dict[str, float], monthly_investment: float, period: str = "max") -> \
-Optional[pd.Series]:
+def simulate_pac_investment(
+        portfolio_def: Dict[str, float],
+        monthly_investment: float,
+        period: str = "max",
+) -> Optional[pd.Series]:
     """
-    Simula un Piano di Accumulo Capitale (PAC) per un portafoglio.
+    Simula un Piano di Accumulo (PAC).
     """
-    all_series = {}
-    asset_to_ticker = {}  # Mappatura da asset originale a ticker risolto
-
-    for asset, weight in portfolio_def.items():
-        original_asset = asset
-        ticker = asset
-
-        # Se l'asset è un ISIN, prova a risolverlo
-        if re.match(r'^[A-Z]{2}[A-Z0-9]{9}[0-9]$', asset.upper()):
-            resolved_ticker = resolve_isin_one(asset.upper())
-            if not resolved_ticker:
-                st.warning(f"Impossibile risolvere l'ISIN {asset}, verrà saltato.")
-                continue
-            ticker = resolved_ticker
-            asset_to_ticker[original_asset] = ticker
-
-        series = get_series(ticker, period)
-        if series is not None and not series.empty:
-            all_series[original_asset] = series  # Usa l'asset originale come chiave
-        else:
-            st.warning(f"Nessun dato storico trovato per {ticker} ({asset}), verrà saltato.")
-
-    if not all_series:
+    df, asset_to_ticker = _load_series_and_mapping(portfolio_def, period)
+    if df is None:
         return None
 
-    # Allinea tutte le serie su un indice di date comune
-    df = pd.DataFrame(all_series).dropna()
-    if df.shape[0] < 2:
-        st.error("Dati storici insufficienti per costruire il portafoglio dopo l'allineamento.")
-        return None
+    weights_dict = {asset_to_ticker[a]: portfolio_def[a] for a in asset_to_ticker.keys()}
+    weights_series = pd.Series(weights_dict, index=df.columns, dtype=float).fillna(0.0)
+    if weights_series.sum() <= 0: return None
+    weights_series /= weights_series.sum()
 
-    # Calcola l'investimento mensile per ogni asset
-    monthly_investments = {}
-    start_date = df.index[0]
-    end_date = df.index[-1]
+    shares = pd.DataFrame(0.0, index=df.index, columns=df.columns)
+    monthly_dates = pd.date_range(start=df.index.min(), end=df.index.max(), freq="MS")
 
-    # Genera tutte le date mensili nel periodo
-    all_dates = pd.date_range(start=start_date, end=end_date, freq='MS')
+    # Trova gli indici dei giorni di negoziazione effettivi corrispondenti all'inizio del mese
+    # 'side="left"' assicura di prendere il primo giorno valido ON or AFTER l'inizio del mese
+    purchase_indices = df.index.searchsorted(monthly_dates, side='left')
 
-    for asset, series in all_series.items():
-        # Calcola l'investimento per questo asset
-        asset_investment = monthly_investment * portfolio_def[asset]
+    # Rimuovi indici duplicati se più inizi di mese mappano allo stesso giorno di negoziazione
+    valid_indices = [idx for idx in purchase_indices if idx < len(df.index)]
+    actual_purchase_dates = df.index[valid_indices].unique()
 
-        # Crea una serie con gli acquisti mensili
-        purchases = pd.Series(0.0, index=df.index)
-        for date in all_dates:
-            if date in df.index:
-                # Trova il prezzo alla data di acquisto
-                price = series.loc[date]
-                # Calcola quante quote acquistare
-                shares = asset_investment / price
-                purchases.loc[date] += shares
+    for purchase_date in actual_purchase_dates:
+        # Prezzi validi nel giorno di acquisto
+        prices_on_day = df.loc[purchase_date]
+        alloc = monthly_investment * weights_series
 
-        # Calcola il numero cumulativo di quote
-        cumulative_shares = purchases.cumsum()
+        # Aggiungi le quote acquistate nel giorno di negoziazione corretto
+        shares.loc[purchase_date] += alloc.div(prices_on_day).fillna(0)
 
-        # Calcola il valore del investimento in questo asset
-        monthly_investments[asset] = cumulative_shares * series
+    cumulative_shares = shares.cumsum()
+    portfolio_values = (cumulative_shares * df).sum(axis=1)
 
-    # Combina tutti gli asset
-    portfolio_val = pd.DataFrame(monthly_investments).sum(axis=1)
-    portfolio_val.name = "Portfolio PAC"
+    portfolio_values.name = "Portfolio PAC"
+    return portfolio_values
 
-    return portfolio_val
 
 def parse_portfolio_input(text_input: str) -> Optional[Dict[str, float]]:
     """
     Estrae la definizione del portafoglio da un input testuale.
-    Formato atteso: ISIN:PESO% (es. IE00BK5BQT80: 80)
     """
-    portfolio = {}
+    portfolio: Dict[str, float] = {}
     lines = text_input.strip().split('\n')
-    total_weight = 0
+    total_weight = 0.0
 
     for line in lines:
         if not line.strip():
             continue
-
         parts = [p.strip() for p in line.split(':')]
         if len(parts) != 2:
-            st.error(f"Riga mal formattata: '{line}'. Usare il formato 'ISIN: PESO'.")
+            logger.error("Riga mal formattata: '%s'. Formato atteso 'ISIN: PESO'.", line)
             return None
 
-        isin, weight_str = parts
-        isin = isin.upper()
-
-        if not re.match(r'^[A-Z]{2}[A-Z0-9]{9}[0-9]$', isin):
-            st.error(f"ISIN non valido: '{isin}'.")
-            return None
+        asset, weight_str = parts
+        asset = asset.upper()
 
         try:
             weight = float(weight_str.replace('%', ''))
             if weight <= 0:
                 raise ValueError
-            portfolio[isin] = weight
+            portfolio[asset] = weight
             total_weight += weight
         except ValueError:
-            st.error(f"Peso non valido per {isin}: '{weight_str}'. Inserire un numero positivo.")
+            logger.error("Peso non valido per %s: '%s'.", asset, weight_str)
             return None
 
     if not portfolio:
-        st.info("Inserisci almeno un ISIN con un peso per definire il portafoglio.")
         return None
 
-    if abs(total_weight - 100.0) > 0.01:
-        st.warning(f"La somma dei pesi è {total_weight:.2f}%, non 100%. I pesi verranno normalizzati.")
-
-    # Normalizza i pesi a 1
     return {k: v / total_weight for k, v in portfolio.items()}
 
 
-def get_all_portfolios_for_backtest(user_portfolio_def: Dict, famous_portfolios_to_compare: List[str], config: Dict,
-                                    strategy: str = "lump_sum", monthly_investment: float = 1000) -> Dict[
-    str, pd.Series]:
+def get_all_portfolios_for_backtest(
+        user_portfolio_def: Dict,
+        famous_portfolios_to_compare: List[str],
+        config: Dict,
+        initial_investment: float = 10000,
+        strategy: str = "lump_sum",
+        monthly_investment: float = 500,
+        rebalancing: str = 'mai'
+) -> Dict[str, pd.Series]:
     """Prepara le serie storiche per tutti i portafogli da confrontare."""
+    all_series_dict: Dict[str, pd.Series] = {}
 
-    all_series_dict = {}
+    # Valore fisso per l'investimento iniziale dei portafogli modello (per confronto)
+    famous_initial_investment = 10000
 
-    # 1. Calcola il portafoglio dell'utente
-    if strategy == "lump_sum":
-        user_series = get_portfolio_series(user_portfolio_def)
+    # 1) Simulazione del portafoglio utente
+    if strategy == "lump_sum_(pic)":
+        user_series_norm = get_portfolio_series(user_portfolio_def, rebalancing=rebalancing)
+        if user_series_norm is not None:
+            # Usa l'investimento iniziale definito dall'utente per il suo portafoglio
+            user_series = user_series_norm * initial_investment
+            all_series_dict["Il Tuo Portafoglio"] = user_series
     else:  # PAC
         user_series = simulate_pac_investment(user_portfolio_def, monthly_investment)
+        if user_series is not None:
+            all_series_dict["Il Tuo Portafoglio (PAC)"] = user_series
 
-    if user_series is not None:
-        all_series_dict["Il Tuo Portafoglio"] = user_series
-
-    # 2. Calcola i portafogli famosi selezionati (sempre lump-sum per i modelli)
+    # 2) Simulazione dei portafogli "famosi" (sempre in modalità Lump Sum per confronto)
     for name in famous_portfolios_to_compare:
         if name in config:
-            famous_series = get_portfolio_series(config[name])
-            if famous_series is not None:
-                all_series_dict[name] = famous_series
+            famous_series_norm = get_portfolio_series(config[name], rebalancing=rebalancing)
+            if famous_series_norm is not None:
+                # Usa un investimento iniziale fisso per i portafogli modello
+                all_series_dict[name] = famous_series_norm * famous_initial_investment
 
     return all_series_dict

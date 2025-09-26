@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 import re
 from typing import Dict, Optional, Tuple
+import logging
 from .config import BENCHMARK_KEYWORDS_TO_PROXY, TICKER_TO_PROXY, ISIN_TO_BENCHMARK
 from .yahoo_client import get_info
-import logging
+
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -11,8 +12,8 @@ logger = logging.getLogger(__name__)
 # - Indice: MSCI ACWI (sviluppati + emergenti)
 # - Proxy Yahoo Finance: iShares MSCI ACWI ETF -> "ACWI"
 # Se preferisci MSCI World, puoi impostare:
-#   DEFAULT_EQUITY_BENCHMARK_PROXY_TICKER = "URTH"  (iShares MSCI World ETF)
-#   DEFAULT_EQUITY_BENCHMARK_NAME = "MSCI World"
+# DEFAULT_EQUITY_BENCHMARK_PROXY_TICKER = "URTH" (iShares MSCI World ETF)
+# DEFAULT_EQUITY_BENCHMARK_NAME = "MSCI World"
 # Oppure FTSE Global All Cap (proxy "VT")
 # ============================================================
 DEFAULT_EQUITY_BENCHMARK_PROXY_TICKER = "ACWI"
@@ -37,17 +38,16 @@ def lookup_proxy_for_benchmark(
     Returns:
         Tuple[Optional[str], Optional[str]]: (ticker proxy del benchmark, nome del benchmark).
     """
-    # PRIORITÀ 1: Controllo tramite mappatura manuale ISIN (più affidabile)
+    # 1) Mappatura manuale per ISIN (se disponibile)
     etf_isin = etf_info.get("isin")
     if etf_isin and etf_isin in ISIN_TO_BENCHMARK:
         proxy_ticker, benchmark_name = ISIN_TO_BENCHMARK[etf_isin]
         logger.info(f"Benchmark trovato da mappatura manuale per {etf_isin}: {proxy_ticker} -> {benchmark_name}")
         return proxy_ticker, benchmark_name
 
-    # 2. Controllo tramite parole chiave nel nome del benchmark (da justETF o simili).
+    # 2) Parole chiave nel bench_name
     proxy_found: Optional[str] = None
     final_bench_name: Optional[str] = bench_name
-
     if bench_name:
         low = bench_name.lower()
         for key, proxy in BENCHMARK_KEYWORDS_TO_PROXY.items():
@@ -56,15 +56,17 @@ def lookup_proxy_for_benchmark(
                 logger.debug(f"Proxy individuato da bench_name '{bench_name}' con keyword '{key}': {proxy_found}")
                 break
 
-    # 3. Controllo tramite ticker dell'ETF (se non abbiamo ancora trovato un proxy).
+    # 3) Heuristica sul ticker ETF (se non trovato)
     if not proxy_found and etf_ticker:
-        base = re.sub(r"\.[A-Z]+$", "", etf_ticker.upper())  # rimuove suffissi tipo .MI, .SW, .DE, ecc.
+        # Rimuove suffissi tipo .MI, .SW, .DE, ecc. (fix del pattern regex)
+        base = re.sub(r"\.[A-Z]+$", "", etf_ticker.upper())
         for k, proxy in TICKER_TO_PROXY.items():
             if k in base:
                 proxy_found = proxy
                 logger.debug(f"Proxy individuato da ticker ETF '{etf_ticker}' (base '{base}') con chiave '{k}': {proxy_found}")
                 break
-    # 4. Controllo tramite parole chiave nel testo descrittivo dell'ETF.
+
+    # 4) Parole chiave nel testo descrittivo dell'ETF
     if not proxy_found:
         text = " ".join(
             str(etf_info.get(k, ""))
@@ -78,7 +80,7 @@ def lookup_proxy_for_benchmark(
                     final_bench_name = key.title()
                 break
 
-    # 5. Se abbiamo trovato un proxy, proviamo a ottenere un nome migliore da Yahoo Finance.
+    # 5) Se abbiamo un proxy ma non un nome chiaro, prova a recuperarlo da Yahoo
     if proxy_found and not final_bench_name:
         try:
             proxy_info = get_info(ticker=proxy_found)
@@ -91,27 +93,19 @@ def lookup_proxy_for_benchmark(
         except Exception as e:
             logger.warning(f"Impossibile recuperare info Yahoo per '{proxy_found}': {e}")
 
-    # 6. FALLBACK DI DEFAULT: MSCI ACWI (proxy ACWI)
+    # 6) Fallback di default (MSCI ACWI / ACWI)
     if not proxy_found:
         proxy_found = DEFAULT_EQUITY_BENCHMARK_PROXY_TICKER
         if not final_bench_name:
             final_bench_name = DEFAULT_EQUITY_BENCHMARK_NAME
-        logger.info(
-            f"Nessun benchmark rilevato. Uso default globale: "
-            f"{proxy_found} -> {final_bench_name}"
-        )
+        logger.info(f"Nessun benchmark rilevato. Uso default globale: {proxy_found} -> {final_bench_name}")
 
-        # Prova opzionale a migliorare il nome (senza bloccare il flusso)
-        if final_bench_name == DEFAULT_EQUITY_BENCHMARK_NAME:
-            try:
-                proxy_info = get_info(ticker=proxy_found)
-                name_from_yahoo = proxy_info.get("longName") or proxy_info.get("shortName")
-                # Manteniamo come 'benchmark' l'indice (MSCI ACWI), non il nome ETF.
-                # Quindi non sovrascriviamo final_bench_name se già coerente con l'indice.
-                logger.debug(
-                    f"Info Yahoo per default '{proxy_found}': '{name_from_yahoo}' (benchmark: '{final_bench_name}')"
-                )
-            except Exception as e:
-                logger.debug(f"Skip miglioramento nome per default '{proxy_found}': {e}")
+        # Tentativo non vincolante di recuperare un nome migliore per il proxy di default
+        try:
+            proxy_info = get_info(ticker=proxy_found)
+            _ = proxy_info.get("longName") or proxy_info.get("shortName")
+            # Manteniamo comunque come 'benchmark' l'indice (MSCI ACWI), non il nome ETF.
+        except Exception as e:
+            logger.debug(f"Skip miglioramento nome per default '{proxy_found}': {e}")
 
     return proxy_found, final_bench_name
