@@ -84,8 +84,12 @@ def _render_allocation_pie(labels: List[str], values: List[float], title: str, k
         )
         fig.update_layout(title_text=title, margin=dict(t=50, b=10, l=10, r=10),
                           legend=dict(orientation="h", yanchor="bottom", y=-0.4))
-        st.plotly_chart(fig,width="stretch", key=key)
 
+        st.plotly_chart(
+            fig,
+            use_container_width=True, # Recommended way to make it full width
+            key="comparison_chart"    # Keep Streamlit component arguments
+        )
 
 def _display_backtest_results(all_series: Dict[str, pd.Series], rf_ann: float, key_prefix="backtest"):
     if not all_series:
