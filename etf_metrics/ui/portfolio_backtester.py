@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
-from .portfolio_backtester import parse_portfolio_input, get_all_portfolios_for_backtest
-from .config import FAMOUS_PORTFOLIOS
-from .ui_portfolio_tracker_app import _display_backtest_results
-from .portfolio_tracker import PortfolioTracker
+from etf_metrics.core.portfolio_backtester import parse_portfolio_input, get_all_portfolios_for_backtest
+from etf_metrics.shared.config import FAMOUS_PORTFOLIOS
+from etf_metrics.ui.portfolio_tracker import _display_backtest_results
+from etf_metrics.core.portfolio_tracker import PortfolioTracker
 
 
 def get_weights_from_portfolio(portfolio_name: str) -> str:

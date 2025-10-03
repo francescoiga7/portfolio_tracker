@@ -10,11 +10,11 @@ try:
 except Exception:
     HAS_PLOTLY = False
 
-from .config import PERIODS_ALL
-from .pipeline import compute_etf_over_periods
-from .utils import to_percent_index
-from .yahoo_client import get_series
-from .metrics import get_trading_signal
+from etf_metrics.shared.config import PERIODS_ALL
+from etf_metrics.core.pipeline import compute_etf_over_periods
+from etf_metrics.shared.utils import to_percent_index
+from etf_metrics.clients.yahoo_client import get_series
+from etf_metrics.core.metrics import get_trading_signal
 
 PERIOD_MAP_LABEL_TO_YF = {
     "1M": "1mo", "3M": "3mo", "6M": "6mo", "YTD": "ytd",
@@ -23,7 +23,7 @@ PERIOD_MAP_LABEL_TO_YF = {
 
 
 def render_single_etf_ui():
-    st.title("Analisi Singolo ETF")
+    st.title("Analisi ETF")
     st.caption("Analizza le performance e le metriche di rischio di un singolo ETF.")
 
     with st.expander("📖 Metodologia e Funzionamento"):

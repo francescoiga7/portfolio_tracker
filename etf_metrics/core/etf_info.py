@@ -4,8 +4,8 @@ import re
 import logging
 import yfinance as yf
 
-from .yahoo_client import resolve_isin_one
-from .justetf_client import fetch_justetf_page, parse_etf_details_from_html, parse_ter_from_html
+from etf_metrics.clients.yahoo_client import resolve_isin_one
+from etf_metrics.clients.justetf_client import fetch_justetf_page, parse_etf_details_from_html, parse_ter_from_html
 
 logger = logging.getLogger(__name__)
 

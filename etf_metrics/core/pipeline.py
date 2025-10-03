@@ -3,7 +3,7 @@ import datetime as dt
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
-from .yahoo_client import resolve_isin_one, get_series, get_info
+from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series, get_info
 from .metrics import (
     compute_metrics_from_series,
     compute_sharpe_ratio,
@@ -11,8 +11,8 @@ from .metrics import (
     compute_omega_ratio,
     compute_var
 )
-from .trackingdiff_client import fetch_tracking_difference
-from .etf_info import get_etf_extended_info, fetch_ter_justetf, fallback_ter_from_yahoo_info
+from etf_metrics.clients.trackingdiff_client import fetch_tracking_difference
+from etf_metrics.core.etf_info import get_etf_extended_info, fetch_ter_justetf, fallback_ter_from_yahoo_info
 from .benchmark import lookup_proxy_for_benchmark
 
 ND = "n.d."

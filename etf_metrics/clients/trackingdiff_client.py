@@ -3,7 +3,7 @@ import logging
 import re
 from typing import Optional
 
-from .config import REQUEST_HEADERS
+from etf_metrics.shared.config import REQUEST_HEADERS
 from .base_client import BaseFinancialClient, DataValidator
 
 logger = logging.getLogger(__name__)

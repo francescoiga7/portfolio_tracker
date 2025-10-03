@@ -6,7 +6,7 @@ from typing import Dict, List, Any, DefaultDict
 import streamlit as st
 from collections import defaultdict
 
-from .yahoo_client import resolve_isin_one, get_series
+from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series
 from .metrics import get_trend_signal
 
 logger = logging.getLogger(__name__)

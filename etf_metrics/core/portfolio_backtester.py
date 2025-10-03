@@ -3,8 +3,8 @@ import logging
 from typing import Dict, Optional, List
 import pandas as pd
 
-from .yahoo_client import resolve_isin_one, get_series
-from .base_client import DataValidator
+from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series
+from etf_metrics.clients.base_client import DataValidator
 
 logger = logging.getLogger(__name__)
 

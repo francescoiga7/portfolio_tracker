@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
 import logging
-import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Iterable
 import pandas as pd
 import streamlit as st
 from datetime import date
 import numpy as np
 
-from .yahoo_client import get_series, get_info, resolve_isin_one
+from etf_metrics.clients.yahoo_client import get_series, get_info, resolve_isin_one
 from .etf_search_engine import discover_universe, get_unique_preferred_tickers
-from .config import DEFAULT_SEED_QUERIES
+from etf_metrics.shared.config import DEFAULT_SEED_QUERIES
 from .metrics import compute_metrics_from_series
 
 logger = logging.getLogger(__name__)
@@ -34,45 +33,51 @@ def get_market_regime(as_of_date: Optional[date] = None) -> Dict:
         return {"vix": None, "regime": "Sconosciuto"}
 
 
-@st.cache_data(show_spinner="Caricamento dati storici dell'universo ETF...", ttl=60 * 30)
-def fetch_screener_data(log_area: List[str], specific_isins: Optional[List[str]] = None) -> List[
-    Dict]:
+@st.cache_data(show_spinner="Caricamento dati storici dell'universo...", ttl=60 * 30)
+def fetch_screener_data(
+        log_area: List[str],
+        specific_isins: Optional[List[str]] = None,
+        instrument_types: List[str] = ["ETF", "ETP", "ETN"],
+        queries: Iterable[str] = DEFAULT_SEED_QUERIES,
+        quotes_per_query: int = 200
+) -> List[Dict]:
     """
-    Fase 1 (Lenta): Scopre o riceve un universo di ETF e scarica la loro intera serie storica.
+    Fase 1 (Lenta): Scopre o riceve un universo di strumenti e scarica la loro intera serie storica.
     """
     unique_tickers = []
     if specific_isins:
-        log_area.append(f"**1. Modalità ISIN Specifici: {len(specific_isins)} ISIN forniti.**")
-        with st.spinner("Risoluzione ISIN in Ticker..."):
-            unique_tickers = [resolve_isin_one(isin) for isin in specific_isins]
-            unique_tickers = list(filter(None, unique_tickers))
+        log_area.append(f"**1. Modalità Manuale: {len(specific_isins)} strumenti forniti.**")
+        with st.spinner("Risoluzione ISIN/Ticker..."):
+            resolved_tickers = []
+            for item in specific_isins:
+                if len(item) == 12:  # Assumiamo sia un ISIN
+                    ticker = resolve_isin_one(item)
+                    if ticker:
+                        resolved_tickers.append(ticker)
+                else:  # Assumiamo sia già un ticker
+                    resolved_tickers.append(item)
+            unique_tickers = list(filter(None, resolved_tickers))
         log_area.append(f"- Trovati {len(unique_tickers)} ticker validi.")
     else:
-        log_area.append("**1. Discovery & Download Dati...**")
-        raw_tickers = discover_universe(DEFAULT_SEED_QUERIES, quotes_per_query=200)
+        log_area.append(f"**1. Discovery Automatica per tipi: {', '.join(instrument_types)}...**")
+        raw_tickers = discover_universe(queries, quotes_per_query=quotes_per_query, instrument_types=instrument_types)
         log_area.append(f"- Trovati {len(raw_tickers)} ticker grezzi.")
 
-        european_suffixes = [".MI", ".DE", ".AS", ".L", ".PA", ".SW", ".BR", ".LS", ".IR", ".MC", ".HE", ".CO", ".ST",
-                             ".OL", ".VI"]
-        european_tickers = [ticker for ticker in raw_tickers if
-                            any(ticker.endswith(suffix) for suffix in european_suffixes)]
-        log_area.append(f"- Filtrati {len(european_tickers)} ticker su borse europee.")
-
-        unique_tickers = get_unique_preferred_tickers(european_tickers)
+        unique_tickers = get_unique_preferred_tickers(raw_tickers)
         log_area.append(f"- **Universo finale da analizzare: {len(unique_tickers)} ticker unici.**")
 
-
     fetched_data = []
-    progress_bar = st.progress(0, text=f"Download dati per {len(unique_tickers)} ETF...")
+    progress_bar = st.progress(0, text=f"Download dati per {len(unique_tickers)} strumenti...")
     for i, ticker in enumerate(unique_tickers):
-        series_full = get_series(ticker, period="5y")
+        # Per il trading tattico serve il DataFrame completo
+        series_full = get_series(ticker, period="5y", as_dataframe=True)
         if series_full is not None and not series_full.empty:
+            # Per mantenere la compatibilità, salviamo il df ma lo chiamiamo 'series'
             fetched_data.append({"ticker": ticker, "series": series_full})
         progress_bar.progress((i + 1) / len(unique_tickers), text=f"Download: {ticker}")
     progress_bar.empty()
-    log_area.append(f"- **Download completato per {len(fetched_data)} ETF con dati storici sufficienti.**")
+    log_area.append(f"- **Download completato per {len(fetched_data)} strumenti con dati storici sufficienti.**")
     return fetched_data
-
 
 def _calculate_metrics_from_series(ticker: str, series_full: pd.Series, as_of_date: date, log_entry: List[str]) -> \
 Optional[Dict]:

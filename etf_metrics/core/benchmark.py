@@ -2,8 +2,8 @@
 import re
 from typing import Dict, Optional, Tuple
 import logging
-from .config import BENCHMARK_KEYWORDS_TO_PROXY, TICKER_TO_PROXY, ISIN_TO_BENCHMARK
-from .yahoo_client import get_info
+from etf_metrics.shared.config import BENCHMARK_KEYWORDS_TO_PROXY, TICKER_TO_PROXY, ISIN_TO_BENCHMARK
+from etf_metrics.clients.yahoo_client import get_info
 
 logger = logging.getLogger(__name__)
 

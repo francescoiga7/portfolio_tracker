@@ -4,7 +4,7 @@ import logging
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 
-from .config import REQUEST_HEADERS
+from etf_metrics.shared.config import REQUEST_HEADERS
 from .base_client import BaseFinancialClient, DataValidator
 from bs4 import BeautifulSoup
 

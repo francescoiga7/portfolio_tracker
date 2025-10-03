@@ -3,7 +3,7 @@ from typing import List, Dict, Optional
 import pandas as pd
 import streamlit as st
 
-from .yahoo_client import resolve_isin_one, get_series
+from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series
 from .metrics import compute_metrics_from_series, compute_sharpe_ratio, get_trading_signal
 
 

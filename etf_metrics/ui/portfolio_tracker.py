@@ -11,7 +11,7 @@ try:
 except Exception:
     HAS_PLOTLY = False
 
-from .metrics import compute_metrics_from_series, compute_sharpe_ratio
+from etf_metrics.core.metrics import compute_metrics_from_series, compute_sharpe_ratio
 
 
 def style_pnl_columns(val):
@@ -128,7 +128,7 @@ def _display_backtest_results(all_series: Dict[str, pd.Series], rf_ann: float, k
 
 
 def render_portfolio_tracker_ui():
-    from .portfolio_tracker import PortfolioTracker
+    from etf_metrics.core.portfolio_tracker import PortfolioTracker
     PortfolioTracker.init_session_from_json_once(filename="saved_portfolio.json")
 
     st.title("💼 Portfolio Tracker")

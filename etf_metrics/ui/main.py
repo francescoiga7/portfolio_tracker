@@ -3,13 +3,14 @@ import streamlit as st
 import pandas as pd
 
 # Import dei renderer
-from .ui_single_etf import render_single_etf_ui
-from .ui_momentum_app import render_momentum_ui
-from .ui_portfolio_tracker_app import render_portfolio_tracker_ui
-from .ui_portfolio_backtester_app import render_portfolio_backtester_ui
-from .ui_etf_comparison_app import render_etf_comparison_ui
-from .ui_pac_screener_app import render_pac_screener_ui
-import subprocess
+from etf_metrics.ui.single_etf import render_single_etf_ui
+from etf_metrics.ui.momentum import render_momentum_ui
+from etf_metrics.ui.portfolio_tracker import render_portfolio_tracker_ui
+from etf_metrics.ui.portfolio_backtester import render_portfolio_backtester_ui
+from .comparison import render_etf_comparison_ui
+from etf_metrics.ui.pac_screener import render_pac_screener_ui
+from etf_metrics.ui.trading import render_trading_ui
+
 
 def init_session_state():
     """Inizializza lo stato della sessione per l'applicazione."""
@@ -20,6 +21,8 @@ def init_session_state():
         "pac_screener_results": pd.DataFrame(),
         "lab_momentum_raw_data": None,
         "core_satellite_results": None,
+        "tactical_signals": [],
+        "simulated_trades": {},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -34,12 +37,13 @@ def run_app():
     app_mode = st.sidebar.selectbox(
         "Scegli modalità",
         [
-            "Analisi Singolo ETF",
+            "Analisi ETF",
             "Confronta ETF",
             "Portfolio Tracker",
             "Portfolio Backtester",
-            "Screener Tattico PAC",
-            "Verifica Momentum"
+            "Screener PAC",
+            "Verifica Momentum",
+            "Trading"
         ],
     )
 
@@ -47,14 +51,16 @@ def run_app():
         render_portfolio_tracker_ui()
     elif app_mode == "Portfolio Backtester":
         render_portfolio_backtester_ui()
-    elif app_mode == "Analisi Singolo ETF":
+    elif app_mode == "Analisi ETF":
         render_single_etf_ui()
     elif app_mode == "Confronta ETF":
         render_etf_comparison_ui()
-    elif app_mode == "Screener Tattico PAC":
+    elif app_mode == "Screener PAC":
         render_pac_screener_ui()
     elif app_mode == "Verifica Momentum":
         render_momentum_ui()
+    elif app_mode == "Trading":
+        render_trading_ui()
 
 if __name__ == '__main__':
     run_app()
