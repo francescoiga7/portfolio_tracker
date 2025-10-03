@@ -153,21 +153,14 @@ FAMOUS_PORTFOLIOS = {
 }
 
 TACTICAL_TRADING_SEED_QUERIES: Tuple[str, ...] = (
-    # Big Cap & Tech Giants
-    "Apple Inc.", "Microsoft Corporation", "NVIDIA Corporation", "Amazon.com, Inc.",
-    "Alphabet Inc.", "Meta Platforms, Inc.", "Tesla, Inc.",
-    # Liste dei più attivi (molto efficaci per la scoperta)
-    "most active stocks NASDAQ",
-    "most active stocks NYSE",
-    "trending stocks USA",
-    # Settori Chiave
-    "Semiconductor stocks",
-    "AI stocks",
-    "Cloud computing stocks",
-    "Cybersecurity stocks",
-    "Biotechnology stocks",
-    # Indici Principali (come fallback)
-    "S&P 100",
-    "NASDAQ 100",
-    "Dow Jones Industrial Average"
+    # Indici principali (per ETF)
+    "MSCI World UCITS ETF", "S&P 500 UCITS ETF", "NASDAQ 100 UCITS ETF", "STOXX 600 UCITS ETF",
+    # Azioni ad alta capitalizzazione e popolari in Europa
+    "DAX 40 stocks", "CAC 40 stocks", "AEX stocks",
+    # Titoli Growth e Tech popolari su Trade Republic
+    "popular tech stocks NASDAQ", "high growth stocks NYSE", "trending fintech stocks",
+    # Query generiche per scoprire titoli caldi
+    "most active stocks XETRA", # Borsa di Francoforte
+    "top performing stocks Borsa Italiana", # Borsa di Milano
+    "breakout stocks USA",
 )

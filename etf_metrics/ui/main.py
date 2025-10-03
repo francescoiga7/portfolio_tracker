@@ -37,29 +37,29 @@ def run_app():
     app_mode = st.sidebar.selectbox(
         "Scegli modalità",
         [
-            "Analisi ETF",
-            "Confronta ETF",
-            "Portfolio Tracker",
-            "Portfolio Backtester",
-            "Screener PAC",
-            "Verifica Momentum",
-            "Trading"
+            "🔎 Analisi ETF",
+            "⚖️ Confronta ETF",
+            "💼 Portfolio Tracker",
+            "⏳ Portfolio Backtester",
+            "🎯 Screener PAC",
+            "⚡ Verifica Momentum",
+            "💹 Trading"
         ],
     )
 
-    if app_mode == "Portfolio Tracker":
+    if app_mode == "💼 Portfolio Tracker":
         render_portfolio_tracker_ui()
-    elif app_mode == "Portfolio Backtester":
+    elif app_mode == "⏳ Portfolio Backtester":
         render_portfolio_backtester_ui()
-    elif app_mode == "Analisi ETF":
+    elif app_mode == "🔎 Analisi ETF":
         render_single_etf_ui()
-    elif app_mode == "Confronta ETF":
+    elif app_mode == "⚖️ Confronta ETF":
         render_etf_comparison_ui()
-    elif app_mode == "Screener PAC":
+    elif app_mode == "🎯 Screener PAC":
         render_pac_screener_ui()
-    elif app_mode == "Verifica Momentum":
+    elif app_mode == "⚡ Verifica Momentum":
         render_momentum_ui()
-    elif app_mode == "Trading":
+    elif app_mode == "💹 Trading":
         render_trading_ui()
 
 if __name__ == '__main__':

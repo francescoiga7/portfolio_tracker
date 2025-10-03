@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
 
 log = logging.getLogger(__name__)
 
@@ -252,91 +251,85 @@ def get_trend_signal(series: pd.Series) -> str:
     else:
         return "Laterale"
 
+def get_tactical_buy_signal_v2(series_df: pd.DataFrame) -> Tuple[Optional[Dict[str, str]], List[str]]:
+    """
+    Genera un segnale di acquisto tattico basato su momentum e volumi, con logging dettagliato.
+    """
+    ticker = series_df.attrs.get('ticker', 'N/A')
+    logs = [f"⚪ **{ticker}**: Inizio analisi..."]
 
-# --- NUOVE FUNZIONI PER TRADING TATTICO ---
-
-def calculate_short_term_indicators(series_df: pd.DataFrame) -> Dict:
-    """Calcola indicatori tecnici per il trading di breve termine."""
     if not isinstance(series_df, pd.DataFrame) or 'Close' not in series_df.columns or len(series_df) < 30:
-        return {}
+        logs.append("❌ Dati storici insufficienti (meno di 30 giorni).")
+        return None, logs
 
-    ema_short = series_df['Close'].ewm(span=12, adjust=False).mean()
-    ema_long = series_df['Close'].ewm(span=26, adjust=False).mean()
+    # Indicatori
+    price = series_df['Close'].iloc[-1]
+    sma10 = series_df['Close'].rolling(window=10).mean().iloc[-1]
+    volume = series_df['Volume'].iloc[-1]
+    volume_sma20 = series_df['Volume'].rolling(window=20).mean().iloc[-1]
+    roc_5 = (series_df['Close'].iloc[-1] / series_df['Close'].iloc[-6] - 1) * 100 if len(series_df) > 5 else 0
 
-    # Stochastic Oscillator
-    low_14 = series_df['Low'].rolling(window=14).min()
-    high_14 = series_df['High'].rolling(window=14).max()
-    stochastic_k = 100 * ((series_df['Close'] - low_14) / (high_14 - low_14))
+    # Condizioni
+    price_above_sma = price > sma10
+    volume_above_sma = volume > volume_sma20
+    roc_positive = roc_5 > 0
 
-    # Volume
-    volume_mean = series_df['Volume'].rolling(window=20).mean()
+    # Logging
+    logs.append(f"  - Prezzo > SMA10: **{'Sì' if price_above_sma else 'No'}** (Prezzo: {price:.2f}, SMA10: {sma10:.2f})")
+    logs.append(f"  - Volume > Media Volume 20gg: **{'Sì' if volume_above_sma else 'No'}** (Volume: {volume:,.0f}, Media: {volume_sma20:,.0f})")
+    logs.append(f"  - ROC 5gg > 0: **{'Sì' if roc_positive else 'No'}** (ROC: {roc_5:.2f}%)")
 
-    return {
-        "ema_short": ema_short.iloc[-1], "ema_long": ema_long.iloc[-1],
-        "stochastic_k": stochastic_k.iloc[-1],
-        "volume": series_df['Volume'].iloc[-1], "volume_mean": volume_mean.iloc[-1],
-        "prev_ema_short": ema_short.iloc[-2], "prev_ema_long": ema_long.iloc[-2],
-        "prev_stochastic_k": stochastic_k.iloc[-2]
-    }
-
-
-def get_tactical_buy_signal(indicators: Dict) -> Optional[Dict[str, str]]:
-    """
-    Genera un segnale di acquisto tattico basato su una confluenza di indicatori.
-    """
-    if not indicators:
-        return None
-
-    # 1. EMA Crossover
-    ema_crossed_up = indicators['prev_ema_short'] <= indicators['prev_ema_long'] and \
-                     indicators['ema_short'] > indicators['ema_long']
-
-    # 2. Stochastic Oscillator
-    stochastic_bullish = indicators['prev_stochastic_k'] < 20 and indicators['stochastic_k'] >= 20
-
-    # 3. Volume Confirmation
-    volume_confirmed = indicators['volume'] > indicators['volume_mean']
-
-    if ema_crossed_up and stochastic_bullish and volume_confirmed:
-        return {
+    if price_above_sma and volume_above_sma and roc_positive:
+        signal = {
             "signal": "Compra",
-            "reason": "Crossover EMA rialzista, Stocastico in uscita da ipervenduto e volumi in aumento."
+            "reason": f"Momentum positivo con Prezzo > SMA10, Volume > Media e ROC 5gg a +{roc_5:.2f}%."
         }
-    return None
+        logs.append(f"✅ **Segnale di ACQUISTO trovato!**")
+        return signal, logs
 
+    logs.append("❌ Nessuna condizione di acquisto soddisfatta.")
+    return None, logs
 
-def monitor_simulated_trade(
+def monitor_simulated_trade_v2(
         purchase_price: float,
         series: pd.Series,
         take_profit_pct: float,
         stop_loss_pct: float,
-        trailing_stop_pct: float
+        commission: float,
+        tax_rate: float
 ) -> Optional[Dict[str, str]]:
-    """Monitora una posizione aperta e genera segnali di vendita."""
+    """Monitora una posizione aperta e genera segnali di vendita con logica fiscale."""
     if series is None or len(series) < 2:
         return None
 
     current_price = series.iloc[-1]
+    gross_pnl = current_price - purchase_price
 
     # 1. Take Profit
     if current_price >= purchase_price * (1 + take_profit_pct / 100):
-        return {"signal": "Vendi", "reason": f"Obiettivo di profitto (+{take_profit_pct}%) raggiunto."}
+        return {"signal": "Vendi (Take Profit)", "reason": f"Obiettivo di profitto (+{take_profit_pct}%) raggiunto."}
 
     # 2. Stop Loss
     if current_price <= purchase_price * (1 - stop_loss_pct / 100):
-        return {"signal": "Vendi", "reason": f"Stop loss (-{stop_loss_pct}%) raggiunto."}
+        return {"signal": "Vendi (Stop Loss)", "reason": f"Stop loss (-{stop_loss_pct}%) raggiunto."}
 
-    # 3. Trailing Stop Loss
-    if trailing_stop_pct > 0:
-        max_price_since_purchase = series[series.index >= series.index[0]].max()
-        trailing_stop_price = max_price_since_purchase * (1 - trailing_stop_pct / 100)
-        if current_price < trailing_stop_price:
-            return {"signal": "Vendi", "reason": f"Trailing stop loss (-{trailing_stop_pct}%) attivato."}
+    # 3. Condizione Fiscale e Commissioni
+    if gross_pnl > 0:
+        taxable_amount = gross_pnl
+        tax_paid = taxable_amount * (tax_rate / 100.0)
+        net_pnl = gross_pnl - commission - tax_paid
+        if net_pnl <= 0: # Se il profitto non copre tasse e commissioni, non è un segnale di vendita "ideale"
+             pass # Potresti voler aggiungere una logica qui, ma per ora non genera segnale
+    else: # Se in perdita, non ci sono tasse sulla plusvalenza
+        net_pnl = gross_pnl - commission
 
-    # 4. EMA Bearish Crossover
-    ema_short = series.ewm(span=12, adjust=False).mean()
-    ema_long = series.ewm(span=26, adjust=False).mean()
-    if ema_short.iloc[-2] >= ema_long.iloc[-2] and ema_short.iloc[-1] < ema_long.iloc[-1]:
-        return {"signal": "Vendi", "reason": "Incrocio ribassista delle medie mobili (EMA 12/26)."}
+    # Esempio di segnale di vendita basato sul PNL Netto (puoi adattarlo)
+    # Questa è una logica di esempio, potresti volerla più complessa
+    # Per ora, la vendita è guidata solo da TP e SL.
+
+    # Potresti aggiungere altre condizioni qui, es. incrocio ribassista di medie mobili
+    sma10 = series.rolling(window=10).mean().iloc[-1]
+    if current_price < sma10:
+         return {"signal": "Vendi (Segnale Tecnico)", "reason": "Il prezzo è sceso sotto la media mobile a 10 giorni."}
 
     return None

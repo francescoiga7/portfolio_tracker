@@ -8,7 +8,7 @@ from etf_metrics.core.momentum import fetch_momentum_data, process_momentum_rank
 
 
 def render_momentum_ui():
-    st.title("Verifica Momentum")
+    st.title("⚡ Verifica Momentum")
     st.caption("Analizza il momentum di un elenco di ETF, correggendolo per il rischio.")
 
     with st.expander("📖 Metodologia: Momentum Corretto per il Rischio"):

@@ -23,7 +23,7 @@ PERIOD_MAP_LABEL_TO_YF = {
 
 
 def render_single_etf_ui():
-    st.title("Analisi ETF")
+    st.title("🔎 Analisi ETF")
     st.caption("Analizza le performance e le metriche di rischio di un singolo ETF.")
 
     with st.expander("📖 Metodologia e Funzionamento"):

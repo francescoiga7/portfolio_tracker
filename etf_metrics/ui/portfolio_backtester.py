@@ -31,7 +31,7 @@ def get_weights_from_portfolio(portfolio_name: str) -> str:
 
 
 def render_portfolio_backtester_ui():
-    st.title("🔙 Portfolio Backtester")
+    st.title("⏳ Portfolio Backtester")
     st.caption("Simula e confronta le performance di portafogli personalizzati nel tempo.")
 
     with st.expander("📖 Metodologia e Funzionamento"):

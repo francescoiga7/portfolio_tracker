@@ -3,7 +3,6 @@ import streamlit as st
 import pandas as pd
 import re
 
-# Supponendo che 'yahoo_client' e 'utils' siano moduli accessibili
 from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series
 from etf_metrics.shared.utils import to_percent_index
 
@@ -22,7 +21,7 @@ PERIOD_MAP_LABEL_TO_YF = {
 
 def render_etf_comparison_ui():
     """Renderizza la UI per la comparazione di più ETF."""
-    st.title("🔍 Confronto Multi-ETF")
+    st.title("⚖️ Confronto Multi-ETF")
     st.caption("Visualizza e confronta le performance di più ETF o azioni su diversi orizzonti temporali.")
 
     with st.expander("📖 Metodologia e Funzionamento"):
