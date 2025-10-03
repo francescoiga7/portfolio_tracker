@@ -39,7 +39,7 @@ class YahooClient(BaseFinancialClient):
             return []
         return data.get("quotes", []) or []
 
-    def search(self, query: str, quotes_count: int = 100) -> List[Dict]: # AUMENTATO A 100
+    def search(self, query: str, quotes_count: int = 100) -> List[Dict]:  # AUMENTATO A 100
         if not self.validate_input(query):
             return []
         for host in self._search_hosts:
@@ -48,13 +48,23 @@ class YahooClient(BaseFinancialClient):
                 return quotes
         return []
 
-    # ---- ISIN → Ticker ----
+    # ---- ISIN <-> Ticker Resolution ----
     def resolve_isin_one(self, isin: str) -> Optional[str]:
         if isin in MANUAL_ISIN_MAP:
             return pick_preferred_symbol(MANUAL_ISIN_MAP[isin])
         quotes = self.search(isin, quotes_count=60)
         symbols = [q.get("symbol") for q in quotes if q.get("symbol")]
         return pick_preferred_symbol(symbols)
+
+    def resolve_ticker_to_isin(self, ticker: str) -> Optional[str]:
+        """Tenta di trovare l'ISIN per un dato ticker."""
+        try:
+            info = self.get_info(ticker=ticker)
+            if info and isinstance(info.get('isin'), str):
+                return info['isin']
+        except Exception:
+            pass
+        return None
 
     # ---- Serie storiche ----
     def get_series(self, ticker: str, period: str) -> Optional[pd.Series]:
@@ -95,19 +105,28 @@ class YahooClient(BaseFinancialClient):
     def get_info(self, isin: Optional[str] = None, ticker: Optional[str] = None) -> Dict:
         if not isin and not ticker:
             return {}
-        if isin and not ticker:
-            t = self.resolve_isin_one(isin)
-            if t:
-                ticker = t
-        if not ticker:
+
+        resolved_ticker = ticker
+        if isin and not resolved_ticker:
+            resolved_ticker = self.resolve_isin_one(isin)
+
+        if not resolved_ticker:
             return {}
+
         try:
-            return yf.Ticker(ticker).info
+            info = yf.Ticker(resolved_ticker).info
+            # Assicura che l'ISIN sia presente se non fornito inizialmente
+            if not isin and 'isin' in info and isinstance(info['isin'], str):
+                pass  # ISIN trovato
+            elif isin:
+                info['isin'] = isin  # Assicura che l'ISIN originale sia preservato
+            return info
         except Exception:
             return {}
 
 
 _YC: Optional[YahooClient] = None
+
 
 def _get_yahoo_client() -> YahooClient:
     global _YC
@@ -116,12 +135,16 @@ def _get_yahoo_client() -> YahooClient:
     return _YC
 
 
-def yahoo_search(query: str, quotes_count: int = 100) -> List[Dict]: # AUMENTATO A 100
+def yahoo_search(query: str, quotes_count: int = 100) -> List[Dict]:  # AUMENTATO A 100
     return _get_yahoo_client().search(query, quotes_count)
 
 
 def resolve_isin_one(isin: str) -> Optional[str]:
     return _get_yahoo_client().resolve_isin_one(isin)
+
+
+def resolve_ticker_to_isin(ticker: str) -> Optional[str]:
+    return _get_yahoo_client().resolve_ticker_to_isin(ticker)
 
 
 def get_series(ticker: str, period: str) -> Optional[pd.Series]:

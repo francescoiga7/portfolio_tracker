@@ -7,7 +7,7 @@ import pandas as pd
 
 def render_pac_screener_ui():
     """Renderizza la UI per il Screener Tattico con logica di caching avanzata."""
-    st.title("🎯 Screener ETF Tattico")
+    st.title("🎯 Screener ETF")
     st.caption("Scopri ETP con potenziale di breakout quotati sulle principali borse europee.")
 
     # Inizializza il log di debug nella sessione se non esiste
