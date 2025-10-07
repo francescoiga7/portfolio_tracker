@@ -79,57 +79,84 @@ def fetch_screener_data(
     log_area.append(f"- **Download completato per {len(fetched_data)} strumenti con dati storici sufficienti.**")
     return fetched_data
 
-def _calculate_metrics_from_series(ticker: str, series_full: pd.Series, as_of_date: date, log_entry: List[str]) -> \
-Optional[Dict]:
+import warnings
+
+
+def _calculate_metrics_from_series(ticker: str, series_full: pd.DataFrame, as_of_date: date, log_entry: List[str]) -> \
+        Optional[Dict]:  # <-- MODIFICA 1: Il tipo corretto è DataFrame
     """Calcola le metriche per un singolo ETF a partire dalla sua serie storica completa."""
     try:
-        end_date = pd.to_datetime(as_of_date)
-        series = series_full[series_full.index <= end_date]
-        if series.empty or len(series) < 252:
-            log_entry.append("Dati storici insufficienti alla data selezionata.")
-            return None
+        # --- Blocco per catturare i warnings ---
+        with warnings.catch_warnings(record=True) as caught_warnings:
+            warnings.simplefilter("always")
 
-        info = get_info(ticker=ticker) or {}
-        avg_volume_3m = info.get("averageDailyVolume3Month")
-        avg_value_eur = (avg_volume_3m * series.iloc[-1]) if avg_volume_3m is not None else 0
+            # <-- MODIFICA 2: Estrai solo la colonna 'Close' per i calcoli
+            if 'Close' not in series_full.columns:
+                log_entry.append("ERRORE: La colonna 'Close' non è presente nei dati.")
+                return None
 
-        series_12m = series[series.index >= (end_date - pd.DateOffset(months=12))]
-        if len(series_12m) < 250:
-            log_entry.append("Storico inferiore a 12 mesi.")
-            return None
+            close_prices_full = series_full['Close']
 
-        series_6m = series_12m[series_12m.index >= (end_date - pd.DateOffset(months=6))]
-        series_3m = series_6m[series_6m.index >= (end_date - pd.DateOffset(months=3))]
+            # <-- MODIFICA 3: Usa la serie di prezzi di chiusura, non l'intero DataFrame
+            end_date = pd.to_datetime(as_of_date)
+            series = close_prices_full[close_prices_full.index <= end_date]
 
-        metrics_12m = compute_metrics_from_series(series_12m)
-        cagr, mdd = metrics_12m.get("cagr"), metrics_12m.get("mdd")
-        calmar_ratio = -cagr / mdd if cagr is not None and mdd is not None and mdd != 0 else None
+            if series.empty or len(series) < 252:
+                log_entry.append("Dati storici insufficienti alla data selezionata.")
+                return None
 
-        roc_12m = (series_12m.iloc[-1] / series_12m.iloc[0] - 1)
-        roc_6m = (series_6m.iloc[-1] / series_6m.iloc[0] - 1)
-        roc_3m = (series_3m.iloc[-1] / series_3m.iloc[0] - 1)
+            info = get_info(ticker=ticker) or {}
+            avg_volume_3m = info.get("averageDailyVolume3Month")
+            # Ora series.iloc[-1] è un singolo numero (l'ultimo prezzo di chiusura)
+            avg_value_eur = (avg_volume_3m * series.iloc[-1]) if avg_volume_3m is not None else 0
 
-        high_52w = series_12m.max()
-        proximity_to_high = series.iloc[-1] / high_52w if high_52w > 0 else None
+            series_12m = series[series.index >= (end_date - pd.DateOffset(months=12))]
+            if len(series_12m) < 250:
+                log_entry.append("Storico inferiore a 12 mesi.")
+                return None
 
-        sma20 = series.rolling(window=20).mean()
-        std20 = series.rolling(window=20).std()
-        bollinger_width = ((sma20 + std20 * 2) - (sma20 - std20 * 2)) / sma20
-        min_bw_6m = bollinger_width[bollinger_width.index >= (end_date - pd.DateOffset(months=6))].min()
-        volatility_compression = bollinger_width.iloc[-1] / min_bw_6m if min_bw_6m > 0 else None
+            series_6m = series_12m[series_12m.index >= (end_date - pd.DateOffset(months=6))]
+            series_3m = series_6m[series_6m.index >= (end_date - pd.DateOffset(months=3))]
 
-        returns_6m = series_6m.pct_change().dropna()
-        volatility_6m = returns_6m.std(ddof=1) * np.sqrt(252) if len(returns_6m) >= 2 else None
+            # Ora tutti i calcoli vengono eseguiti sulla serie di prezzi, producendo singoli valori
+            metrics_12m = compute_metrics_from_series(series_12m)
+            cagr, mdd = metrics_12m.get("cagr"), metrics_12m.get("mdd")
+            calmar_ratio = -cagr / mdd if cagr is not None and mdd is not None and mdd != 0 else None
 
-        log_entry.append("OK")
-        return {
-            "ticker": ticker, "isin": get_info(ticker=ticker).get("isin"), "name": info.get("longName", ticker),
-            "avg_value_eur": avg_value_eur, "calmar_ratio": calmar_ratio, "roc_12m": roc_12m,
-            "roc_6m": roc_6m, "roc_3m": roc_3m, "proximity_to_high": proximity_to_high,
-            "volatility_compression": volatility_compression, "volatility_6m": volatility_6m,
-        }
+            roc_12m = (series_12m.iloc[-1] / series_12m.iloc[0] - 1)
+            roc_6m = (series_6m.iloc[-1] / series_6m.iloc[0] - 1)
+            roc_3m = (series_3m.iloc[-1] / series_3m.iloc[0] - 1)
+
+            high_52w = series_12m.max()
+            proximity_to_high = series.iloc[-1] / high_52w if high_52w > 0 else None
+
+            sma20 = series.rolling(window=20).mean()
+            std20 = series.rolling(window=20).std()
+
+            bollinger_width = (4 * std20) / sma20
+
+            min_bw_6m = bollinger_width[bollinger_width.index >= (end_date - pd.DateOffset(months=6))].min()
+            volatility_compression = bollinger_width.iloc[-1] / min_bw_6m if min_bw_6m > 0 else None
+
+            returns_6m = series_6m.pct_change().dropna()
+            volatility_6m = returns_6m.std(ddof=1) * np.sqrt(252) if len(returns_6m) >= 2 else None
+
+            if caught_warnings:
+                for warn in caught_warnings:
+                    log_entry.append(f"AVVISO: {warn.message}")
+                    print(f"DEBUG - Avviso per il ticker {ticker}: {warn.message}")
+
+            log_entry.append("OK")
+            return {
+                "ticker": ticker, "isin": get_info(ticker=ticker).get("isin"), "name": info.get("longName", ticker),
+                "avg_value_eur": avg_value_eur, "calmar_ratio": calmar_ratio, "roc_12m": roc_12m,
+                "roc_6m": roc_6m, "roc_3m": roc_3m, "proximity_to_high": proximity_to_high,
+                "volatility_compression": volatility_compression, "volatility_6m": volatility_6m,
+            }
+
     except Exception as e:
-        log_entry.append(f"Errore: {e}")
+        log_entry.append(f"ERRORE per il ticker **{ticker}**: {e}")
+        print(f"DEBUG - Errore bloccante per il ticker {ticker}: {e}")
         return None
 
 

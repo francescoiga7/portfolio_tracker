@@ -40,7 +40,7 @@ def render_momentum_ui():
         * **Max Drawdown (MDD):** Il calo massimo subito dall'ETF nel periodo di lookback. È un'altra misura di rischio, cruciale per la gestione del capitale.
         * **Segnale Operativo:** Basato sulla posizione del prezzo rispetto alla media mobile a lungo termine (es. 200 giorni).
         """)
-    st.sidebar.header("Impostazioni Momentum")
+    st.sidebar.header("⚙️ Impostazioni")
 
     with st.sidebar.expander("1. Carica l'universo di ETF", expanded=True):
         momentum_isins = st.text_area(
@@ -85,7 +85,7 @@ def render_momentum_ui():
 
         lookback = st.sidebar.slider("Periodo di lookback (mesi)", 1, 24, 6, 1)
         rf_ann_momentum = st.sidebar.number_input(
-            "Risk-free annuo (%) per Sharpe", -5.0, 10.0, 3.9, 0.25, key="rf_momentum"
+            "Risk-free annuo (%)", -5.0, 10.0, 3.9, 0.25, key="rf_momentum"
         )
 
         if enable_time_travel:

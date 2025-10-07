@@ -36,8 +36,8 @@ def render_single_etf_ui():
         - **Confrontare la performance** dell'ETF con il suo benchmark.
         """)
 
-    st.sidebar.header("Impostazioni Analisi")
-    isin = st.sidebar.text_input("ISIN", value="IE00BK5BQT80").strip().upper()
+    st.sidebar.header("⚙️ Impostazioni")
+    isin = st.sidebar.text_input("ISIN o Ticker", value="IE00BK5BQT80").strip().upper()
     bench_override = st.sidebar.text_input("Override Benchmark (Ticker Yahoo)", "").strip() or None
     rf_ann = st.sidebar.number_input("Risk-free annuo (%)", -5.0, 10.0, 3.95, 0.25)
 
