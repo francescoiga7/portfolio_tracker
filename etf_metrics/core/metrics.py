@@ -251,85 +251,113 @@ def get_trend_signal(series: pd.Series) -> str:
     else:
         return "Laterale"
 
-def get_tactical_buy_signal_v2(series_df: pd.DataFrame) -> Tuple[Optional[Dict[str, str]], List[str]]:
+
+def get_monday_buy_signal(series_df: pd.DataFrame, vix_series: pd.Series) -> Tuple[Optional[Dict[str, str]], List[str]]:
     """
-    Genera un segnale di acquisto tattico basato su momentum e volumi, con logging dettagliato.
+    Genera un segnale di acquisto di lunedì basato su una confluenza di fattori
+    quantitativi ed economici.
     """
     ticker = series_df.attrs.get('ticker', 'N/A')
-    logs = [f"⚪ **{ticker}**: Inizio analisi..."]
+    logs = [f"⚪ **{ticker}**: Analisi per 'Monday Buy'..."]
 
-    if not isinstance(series_df, pd.DataFrame) or 'Close' not in series_df.columns or len(series_df) < 30:
-        logs.append("❌ Dati storici insufficienti (meno di 30 giorni).")
+    # --- Validazione Dati ---
+    today = series_df.index[-1]
+    if today.weekday() != 0:  # 0 = Lunedì
+        logs.append("❌ Non è lunedì.")
         return None, logs
 
-    # Indicatori
+    if not isinstance(series_df, pd.DataFrame) or 'Close' not in series_df.columns or len(series_df) < 51:
+        logs.append("❌ Dati storici insufficienti (meno di 51 giorni).")
+        return None, logs
+
+    # --- Calcolo Indicatori ---
     price = series_df['Close'].iloc[-1]
-    sma10 = series_df['Close'].rolling(window=10).mean().iloc[-1]
+    sma50 = series_df['Close'].rolling(window=50).mean().iloc[-1]
     volume = series_df['Volume'].iloc[-1]
     volume_sma20 = series_df['Volume'].rolling(window=20).mean().iloc[-1]
-    roc_5 = (series_df['Close'].iloc[-1] / series_df['Close'].iloc[-6] - 1) * 100 if len(series_df) > 5 else 0
 
-    # Condizioni
-    price_above_sma = price > sma10
-    volume_above_sma = volume > volume_sma20
-    roc_positive = roc_5 > 0
+    # Trova l'ultimo venerdì in modo robusto
+    fridays = series_df.index[(series_df.index < today) & (series_df.index.weekday == 4)]
+    if fridays.empty:
+        logs.append("❌ Impossibile trovare il venerdì precedente.")
+        return None, logs
+    last_friday = fridays[-1]
 
-    # Logging
-    logs.append(f"  - Prezzo > SMA10: **{'Sì' if price_above_sma else 'No'}** (Prezzo: {price:.2f}, SMA10: {sma10:.2f})")
-    logs.append(f"  - Volume > Media Volume 20gg: **{'Sì' if volume_above_sma else 'No'}** (Volume: {volume:,.0f}, Media: {volume_sma20:,.0f})")
-    logs.append(f"  - ROC 5gg > 0: **{'Sì' if roc_positive else 'No'}** (ROC: {roc_5:.2f}%)")
+    friday_return = (series_df.loc[last_friday, 'Close'] / series_df.loc[last_friday, 'Open'] - 1) * 100
+    current_vix = vix_series.iloc[-1]
 
-    if price_above_sma and volume_above_sma and roc_positive:
+    # --- Applicazione dei Criteri ---
+    is_risk_on = current_vix < 25
+    is_uptrend = price > sma50
+    had_friday_dip = friday_return < 0
+    has_volume_confirmation = volume > volume_sma20
+
+    # Logging dettagliato
+    logs.append(f"  - Regime di Rischio: **{'Favorevole' if is_risk_on else 'Avverso'}** (VIX: {current_vix:.2f})")
+    logs.append(
+        f"  - Trend di Medio Termine: **{'Rialzista' if is_uptrend else 'Ribassista'}** (Prezzo: {price:.2f}, SMA50: {sma50:.2f})")
+    logs.append(
+        f"  - 'Effetto Weekend': **{'Sì' if had_friday_dip else 'No'}** (Rendimento Venerdì: {friday_return:.2f}%)")
+    logs.append(
+        f"  - Conferma Volumi: **{'Sì' if has_volume_confirmation else 'No'}** (Volume: {volume:,.0f}, Media 20gg: {volume_sma20:,.0f})")
+
+    if is_risk_on and is_uptrend and had_friday_dip and has_volume_confirmation:
         signal = {
-            "signal": "Compra",
-            "reason": f"Momentum positivo con Prezzo > SMA10, Volume > Media e ROC 5gg a +{roc_5:.2f}%."
+            "signal": "Compra (Monday Buy)",
+            "reason": f"Confluenza di segnali: trend rialzista, VIX basso, dip di venerdì e volumi in aumento."
         }
-        logs.append(f"✅ **Segnale di ACQUISTO trovato!**")
+        logs.append(f"✅ **Segnale di ACQUISTO 'Monday Buy' trovato!**")
         return signal, logs
 
     logs.append("❌ Nessuna condizione di acquisto soddisfatta.")
     return None, logs
 
-def monitor_simulated_trade_v2(
+
+def monitor_weekly_trade(
         purchase_price: float,
         series: pd.Series,
-        take_profit_pct: float,
-        stop_loss_pct: float,
         commission: float,
-        tax_rate: float
+        tax_rate: float,
+        stop_loss_pct: float
 ) -> Optional[Dict[str, str]]:
-    """Monitora una posizione aperta e genera segnali di vendita con logica fiscale."""
+    """
+    Monitora una posizione aperta con la strategia settimanale.
+    Genera segnali di vendita il venerdì o per gestione del rischio.
+    """
     if series is None or len(series) < 2:
         return None
 
     current_price = series.iloc[-1]
-    gross_pnl = current_price - purchase_price
+    today = series.index[-1]
 
-    # 1. Take Profit
-    if current_price >= purchase_price * (1 + take_profit_pct / 100):
-        return {"signal": "Vendi (Take Profit)", "reason": f"Obiettivo di profitto (+{take_profit_pct}%) raggiunto."}
-
-    # 2. Stop Loss
-    if current_price <= purchase_price * (1 - stop_loss_pct / 100):
+    # 1. Stop Loss (Controllo prioritario)
+    stop_loss_price = purchase_price * (1 - stop_loss_pct / 100)
+    if current_price <= stop_loss_price:
         return {"signal": "Vendi (Stop Loss)", "reason": f"Stop loss (-{stop_loss_pct}%) raggiunto."}
 
-    # 3. Condizione Fiscale e Commissioni
-    if gross_pnl > 0:
-        taxable_amount = gross_pnl
-        tax_paid = taxable_amount * (tax_rate / 100.0)
-        net_pnl = gross_pnl - commission - tax_paid
-        if net_pnl <= 0: # Se il profitto non copre tasse e commissioni, non è un segnale di vendita "ideale"
-             pass # Potresti voler aggiungere una logica qui, ma per ora non genera segnale
-    else: # Se in perdita, non ci sono tasse sulla plusvalenza
-        net_pnl = gross_pnl - commission
+    # 2. Segnale Tecnico di Uscita (es. sotto la media a 10gg)
+    if len(series) > 10:
+        sma10 = series.rolling(window=10).mean().iloc[-1]
+        if current_price < sma10:
+            return {"signal": "Vendi (Segnale Tecnico)",
+                    "reason": "Il prezzo è sceso sotto la media mobile a 10 giorni."}
 
-    # Esempio di segnale di vendita basato sul PNL Netto (puoi adattarlo)
-    # Questa è una logica di esempio, potresti volerla più complessa
-    # Per ora, la vendita è guidata solo da TP e SL.
+    # 3. Logica di Vendita del Venerdì
+    if today.weekday() == 4:  # 4 = Venerdì
+        # Calcola il profitto lordo per azione
+        gross_pnl_per_share = current_price - purchase_price
 
-    # Potresti aggiungere altre condizioni qui, es. incrocio ribassista di medie mobili
-    sma10 = series.rolling(window=10).mean().iloc[-1]
-    if current_price < sma10:
-         return {"signal": "Vendi (Segnale Tecnico)", "reason": "Il prezzo è sceso sotto la media mobile a 10 giorni."}
+        # Stima le tasse solo se c'è un profitto
+        tax_per_share = max(0, gross_pnl_per_share) * (tax_rate / 100.0)
+
+        # Calcola il P&L netto per azione
+        net_pnl_per_share = gross_pnl_per_share - (commission * 2) - tax_per_share
+
+        if net_pnl_per_share > 0:
+            return {"signal": "Vendi (Fine Settimana)",
+                    "reason": f"Obiettivo settimanale raggiunto con profitto netto."}
+        else:
+            return {"signal": "Mantieni (Non Profittevole)",
+                    "reason": f"Venerdì, ma la vendita non copre costi e tasse."}
 
     return None
