@@ -32,7 +32,7 @@ def render_etf_comparison_ui():
         - **Scegliere il periodo di analisi** per il confronto.
         """)
 
-    st.sidebar.header("⚙️ Impostazioni Confronto")
+    st.sidebar.header("⚙️ Impostazioni")
     compare_input = st.sidebar.text_area(
         "ISIN o Ticker da confrontare",
         "IE00B4L5Y983, SPY, QQQ",

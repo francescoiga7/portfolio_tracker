@@ -28,6 +28,8 @@ def init_session_state():
         if key not in st.session_state:
             st.session_state[key] = value
 
+# etf_metrics/ui/main.py
+
 def run_app():
     """Avvia l'applicazione Streamlit."""
     init_session_state()
@@ -47,14 +49,14 @@ def run_app():
         ],
     )
 
-    if app_mode == "💼 Portfolio Tracker":
-        render_portfolio_tracker_ui()
-    elif app_mode == "⏳ Portfolio Backtester":
-        render_portfolio_backtester_ui()
-    elif app_mode == "🔎 Analisi ETF":
+    if app_mode == "🔎 Analisi ETF":
         render_single_etf_ui()
     elif app_mode == "⚖️ Confronta ETF":
         render_etf_comparison_ui()
+    elif app_mode == "💼 Portfolio Tracker":
+        render_portfolio_tracker_ui()
+    elif app_mode == "⏳ Portfolio Backtester":
+        render_portfolio_backtester_ui()
     elif app_mode == "🎯 Screener PAC":
         render_pac_screener_ui()
     elif app_mode == "⚡ Verifica Momentum":

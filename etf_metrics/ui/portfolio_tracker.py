@@ -144,7 +144,7 @@ def render_portfolio_tracker_ui():
         - **Consultare lo storico delle transazioni** e il cassetto fiscale con il P&L realizzato.
         """)
 
-    st.sidebar.header("📂 Gestione Portafogli")
+    st.sidebar.header("⚙️ Impostazioni")
     saved_portfolios = PortfolioTracker.get_saved_portfolio_names()
     current_portfolio_name = st.session_state.get("current_portfolio_name", "")
     with st.sidebar.expander("Carica o Crea Portafoglio", expanded=not current_portfolio_name):

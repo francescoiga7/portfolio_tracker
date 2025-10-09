@@ -7,7 +7,7 @@ from pathlib import Path
 
 from etf_metrics.core.pac_screener import fetch_screener_data
 from etf_metrics.clients.yahoo_client import get_series
-from etf_metrics.core.metrics import get_tactical_buy_signal_v2, monitor_simulated_trade_v2
+from etf_metrics.core.metrics import get_monday_buy_signal, monitor_weekly_trade
 from etf_metrics.shared.config import TACTICAL_TRADING_SEED_QUERIES
 
 TRADES_JSON_FILE = "simulated_trades.json"
@@ -39,8 +39,8 @@ def load_simulated_trades_once():
 
 
 def render_trading_ui():
-    st.title("💹 Trading")
-    st.caption("Identifica segnali di acquisto su azioni ed ETF e simula operazioni di trading.")
+    st.title("💹 Trading Tattico Settimanale")
+    st.caption("Identifica segnali di acquisto al lunedì e simula operazioni con vendita al venerdì, basato su un modello quantitativo.")
 
     # Inizializzazione e caricamento dello stato
     if 'simulated_trades' not in st.session_state:
@@ -54,22 +54,23 @@ def render_trading_ui():
 
     with st.expander("📖 Metodologia e Funzionamento"):
         st.markdown("""
-        Questa sezione è stata potenziata per identificare opportunità di crescita rapida a breve termine.
+        Questa sezione implementa una strategia di **swing trading settimanale** basata sull'anomalia del "weekend effect", arricchita con filtri quantitativi per aumentare le probabilità di successo.
 
         **Fase 1: Caricamento dell'Universo**
         Puoi scoprire un vasto universo di azioni ed ETF tramite la **Scoperta Automatica** o analizzare una tua **lista manuale** di Ticker.
 
-        **Fase 2: Ricerca dei Segnali di Momentum**
-        L'applicazione cerca segnali di "Compra" basati su una **confluenza di indicatori di momentum**:
-        1.  **Trend di Brevissimo Termine**: Il prezzo deve essere superiore alla sua media mobile a 10 giorni.
-        2.  **Conferma dei Volumi**: Il volume di scambio deve essere superiore alla sua media a 20 giorni, indicando un forte interesse.
-        3.  **Crescita Rapida**: Il Rate of Change (ROC) a 5 giorni deve essere positivo, a conferma di una spinta rialzista recente.
+        **Fase 2: Ricerca dei Segnali di "Monday Buy"**
+        L'applicazione cerca segnali di acquisto solo di **lunedì**, basandosi su una **confluenza di 4 fattori**:
+        1.  **Regime di Mercato Favorevole**: Il VIX (indice di volatilità) deve essere basso, per evitare di comprare durante fasi di panico.
+        2.  **Trend di Fondo Rialzista**: Il prezzo dell'asset deve trovarsi al di sopra della sua media mobile a 50 giorni (SMA50).
+        3.  **Condizione "Weekend Effect"**: Il rendimento del venerdì precedente deve essere stato negativo, aumentando le probabilità di un prezzo di ingresso vantaggioso.
+        4.  **Conferma dei Volumi**: I volumi di scambio del lunedì devono essere superiori alla media per confermare l'interesse degli acquirenti.
 
         **Fase 3: Simulazione e Gestione della Posizione**
         Una volta simulato un acquisto, la posizione viene monitorata con strategie di uscita chiare:
-        - **Take Profit**: Chiusura automatica al raggiungimento del profitto desiderato.
-        - **Stop Loss**: Protezione dal ribasso con un limite di perdita.
-        - **Copertura Costi**: Assicura che la vendita copra almeno le tasse sulla plusvalenza e le commissioni.
+        - **Vendita il Venerdì**: L'obiettivo è chiudere la posizione il venerdì, ma solo se il profitto atteso copre i costi di transazione (commissioni) e le tasse.
+        - **Stop Loss**: Protezione dal ribasso con un limite di perdita predefinito.
+        - **Uscita Tecnica Anticipata**: Se il trend di breve termine si inverte (es. prezzo sotto la media a 10 giorni), viene suggerita un'uscita per proteggere il capitale.
         """)
 
     # --- Sidebar ---
@@ -108,17 +109,23 @@ def render_trading_ui():
             st.rerun()
 
     st.sidebar.header("2. Strategia di Uscita")
-    take_profit = st.sidebar.number_input("Take Profit (%)", 1.0, 100.0, 50.0, 1.0)
     stop_loss = st.sidebar.number_input("Stop Loss (%)", 1.0, 100.0, 10.0, 1.0)
     commission = st.sidebar.number_input("Commissioni per operazione (€)", 0.0, 100.0, 1.0, 0.5)
     tax_rate = st.sidebar.number_input("Tassazione plusvalenze (%)", 0.0, 100.0, 26.0, 1.0)
 
     if st.session_state.tactical_universe_data is not None:
-        if st.sidebar.button("Cerca Segnali Tattici"):
+        if st.sidebar.button("Cerca Segnali 'Monday Buy'"):
             st.session_state.tactical_log = []
             universe_data = st.session_state.tactical_universe_data
             signals = []
             progress_bar = st.progress(0, text="Analisi segnali in corso...")
+
+            with st.spinner("Caricamento dati di mercato (VIX)..."):
+                vix_series = get_series("^VIX", period="1y")
+
+            if vix_series is None or vix_series.empty:
+                st.error("Impossibile caricare i dati del VIX. L'analisi non può procedere.")
+                return
 
             for i, data in enumerate(universe_data):
                 ticker = data['ticker']
@@ -128,11 +135,11 @@ def render_trading_ui():
                 progress_bar.progress((i + 1) / len(universe_data), text=f"Analisi: {ticker}")
 
                 if series_df is None or not isinstance(series_df, pd.DataFrame) or series_df.empty or len(
-                        series_df) < 30:
+                        series_df) < 51:
                     st.session_state.tactical_log.append(f"⚠️ **{ticker}**: Dati storici insufficienti. Saltato.")
                     continue
 
-                buy_signal, log_messages = get_tactical_buy_signal_v2(series_df)
+                buy_signal, log_messages = get_monday_buy_signal(series_df, vix_series)
                 st.session_state.tactical_log.extend(log_messages)
 
                 if buy_signal:
@@ -147,7 +154,7 @@ def render_trading_ui():
         st.info("👈 Inizia caricando un universo di strumenti dalla barra laterale.")
 
     if 'tactical_signals' in st.session_state:
-        st.subheader("🚨 Segnali di Acquisto Identificati Oggi")
+        st.subheader("🚨 Segnali di Acquisto 'Monday Buy' Identificati")
         signals = st.session_state.tactical_signals
         if signals:
             for signal in signals:
@@ -169,7 +176,7 @@ def render_trading_ui():
                         st.success(f"Acquisto di {signal['ticker']} simulato a {signal['price']:.2f}!")
                         st.rerun()
         elif st.session_state.tactical_universe_data:
-            st.info("Nessun segnale di acquisto tattico identificato oggi nell'universo caricato.")
+            st.info("Nessun segnale di acquisto 'Monday Buy' identificato oggi nell'universo caricato.")
 
     st.subheader("📈 Posizioni Simulate Aperte")
     open_trades_data = []
@@ -183,9 +190,9 @@ def render_trading_ui():
 
                 current_price = series_df['Close'].iloc[-1]
                 pnl_pct = (current_price / trade_info['purchase_price'] - 1) * 100
-                sell_signal = monitor_simulated_trade_v2(
+                sell_signal = monitor_weekly_trade(
                     trade_info['purchase_price'], series_df['Close'],
-                    take_profit, stop_loss, commission, tax_rate
+                    commission, tax_rate, stop_loss
                 )
 
                 open_trades_data.append({
@@ -220,7 +227,7 @@ def render_trading_ui():
             "P&L (%)": "{:,.2f}%"
         })
 
-        st.dataframe(styler, hide_index=True, width='stretch')
+        st.dataframe(styler, hide_index=True, width="stretch")
 
         # Logica per chiudere le posizioni
         sell_candidates = [trade['Ticker'] for trade in open_trades_data if "Vendi" in trade['Segnale Vendita']]

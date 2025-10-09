@@ -54,7 +54,7 @@ def render_pac_screener_ui():
 
               """)
 
-    st.sidebar.header("⚙️ Parametri Screener")
+    st.sidebar.header("⚙️ Impostazioni")
 
     # --- Sezione 1: Caricamento Dati ---
     with st.sidebar.expander("1. Carica Universo Dati", expanded=True):
