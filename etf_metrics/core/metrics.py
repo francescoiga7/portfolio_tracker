@@ -262,9 +262,9 @@ def get_monday_buy_signal(series_df: pd.DataFrame, vix_series: pd.Series) -> Tup
 
     # --- Validazione Dati ---
     today = series_df.index[-1]
-    if today.weekday() != 0:  # 0 = Lunedì
-        logs.append("❌ Non è lunedì.")
-        return None, logs
+    #if today.weekday() != 0:  # 0 = Lunedì
+    #   logs.append("❌ Non è lunedì.")
+    #   return None, logs
 
     if not isinstance(series_df, pd.DataFrame) or 'Close' not in series_df.columns or len(series_df) < 51:
         logs.append("❌ Dati storici insufficienti (meno di 51 giorni).")

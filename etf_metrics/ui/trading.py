@@ -39,7 +39,7 @@ def load_simulated_trades_once():
 
 
 def render_trading_ui():
-    st.title("💹 Trading Tattico Settimanale")
+    st.title("💹 Trading Settimanale")
     st.caption("Identifica segnali di acquisto al lunedì e simula operazioni con vendita al venerdì, basato su un modello quantitativo.")
 
     # Inizializzazione e caricamento dello stato
