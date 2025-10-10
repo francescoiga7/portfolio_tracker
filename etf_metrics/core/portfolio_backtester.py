@@ -190,30 +190,47 @@ def get_all_portfolios_for_backtest(
         monthly_investment: float = 500,
         rebalancing: str = 'mai'
 ) -> Dict[str, pd.Series]:
-    """Prepara le serie storiche per tutti i portafogli da confrontare."""
+    """
+    Prepara le serie storiche per tutti i portafogli da confrontare,
+    allineando la data di inizio a quella del portafoglio utente.
+    """
     all_series_dict: Dict[str, pd.Series] = {}
+    user_series = None
+    start_date = None
 
-    # Valore fisso per l'investimento iniziale dei portafogli modello (per confronto)
-    famous_initial_investment = 10000
-
-    # 1) Simulazione del portafoglio utente
+    # 1) Simulazione del portafoglio utente per determinare la data di inizio
     if strategy == "lump_sum_(pic)":
         user_series_norm = get_portfolio_series(user_portfolio_def, rebalancing=rebalancing)
-        if user_series_norm is not None:
-            # Usa l'investimento iniziale definito dall'utente per il suo portafoglio
+        if user_series_norm is not None and not user_series_norm.empty:
             user_series = user_series_norm * initial_investment
             all_series_dict["Il Tuo Portafoglio"] = user_series
+            start_date = user_series.index.min()
     else:  # PAC
         user_series = simulate_pac_investment(user_portfolio_def, monthly_investment)
-        if user_series is not None:
+        if user_series is not None and not user_series.empty:
             all_series_dict["Il Tuo Portafoglio (PAC)"] = user_series
+            start_date = user_series.index.min()
 
-    # 2) Simulazione dei portafogli "famosi" (sempre in modalità Lump Sum per confronto)
+    # Valore fisso per l'investimento iniziale dei portafogli modello
+    famous_initial_investment = 10000
+
+    # 2) Simulazione dei portafogli "famosi" allineati
     for name in famous_portfolios_to_compare:
         if name in config:
-            famous_series_norm = get_portfolio_series(config[name], rebalancing=rebalancing)
-            if famous_series_norm is not None:
-                # Usa un investimento iniziale fisso per i portafogli modello
-                all_series_dict[name] = famous_series_norm * famous_initial_investment
+            # Ottieni la serie storica completa per il portafoglio modello
+            famous_series_full = get_portfolio_series(config[name], rebalancing=rebalancing)
+
+            if famous_series_full is not None and not famous_series_full.empty:
+                # Se abbiamo una data di inizio dal portafoglio utente, allinea la serie
+                if start_date:
+                    famous_series_aligned = famous_series_full[famous_series_full.index >= start_date]
+                else:
+                    famous_series_aligned = famous_series_full
+
+                if not famous_series_aligned.empty:
+                    # Ri-normalizza la serie allineata per farla partire da 1 e poi scala
+                    # per l'investimento iniziale, garantendo un confronto equo.
+                    renormalized_series = (famous_series_aligned / famous_series_aligned.iloc[0])
+                    all_series_dict[name] = renormalized_series * famous_initial_investment
 
     return all_series_dict
