@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime
 import json
 from pathlib import Path
+import math
 
 from etf_metrics.core.pac_screener import fetch_screener_data
 from etf_metrics.clients.yahoo_client import get_series
@@ -33,14 +34,32 @@ def load_simulated_trades_once():
             trades = json.loads(path.read_text(encoding="utf-8"))
             st.session_state.simulated_trades = trades
         except Exception as e:
-            st.error(f"Errore durante il caricamento delle operazioni: {e}")
+            st.error(f"Errore during il caricamento delle operazioni: {e}")
             st.session_state.simulated_trades = {}
     st.session_state["_trades_loaded_once"] = True
 
 
+def calculate_min_shares(price, commission, tax_rate, target_profit_pct=1.0):
+    """
+    Calcola il numero minimo di quote per coprire costi e tasse ipotizzando un certo profitto.
+    """
+    if price <= 0 or target_profit_pct <= 0:
+        return float('inf')
+
+    profit_per_share = price * (target_profit_pct / 100.0)
+    profit_after_tax = profit_per_share * (1 - tax_rate / 100.0)
+    total_commission = 2 * commission
+
+    if profit_after_tax <= 0:
+        return float('inf')
+
+    return math.ceil(total_commission / profit_after_tax)
+
+
 def render_trading_ui():
     st.title("💹 Trading Settimanale")
-    st.caption("Identifica segnali di acquisto al lunedì e simula operazioni con vendita al venerdì, basato su un modello quantitativo.")
+    st.caption(
+        "Identifica segnali di acquisto al lunedì e simula operazioni con vendita al venerdì, basato su un modello quantitativo.")
 
     # Inizializzazione e caricamento dello stato
     if 'simulated_trades' not in st.session_state:
@@ -91,7 +110,8 @@ def render_trading_ui():
 
             specific_items = None
             if source_mode == "Inserimento Manuale" and specific_items_input.strip():
-                specific_items = [item.strip().upper() for item in specific_items_input.split('\n') if item.strip()]
+                specific_items = [item.strip().upper() for item in specific_items_input.split('\n') if
+                                  item.strip()]
 
             with st.spinner("Caricamento dati storici... L'operazione potrebbe richiedere alcuni minuti."):
                 log_list = []
@@ -157,24 +177,44 @@ def render_trading_ui():
         st.subheader("🚨 Segnali di Acquisto 'Monday Buy' Identificati")
         signals = st.session_state.tactical_signals
         if signals:
-            for signal in signals:
-                col1, col2, col3, col4 = st.columns([2, 2, 4, 2])
-                with col1:
-                    st.metric("Ticker", signal['ticker'])
-                with col2:
-                    st.metric("Prezzo", f"{signal['price']:.2f}")
-                with col3:
-                    st.info(f"**Motivazione:** {signal['reason']}")
-                with col4:
-                    if st.button("Simula Acquisto", key=f"buy_{signal['ticker']}"):
-                        st.session_state.simulated_trades[signal['ticker']] = {
-                            "purchase_price": signal['price'],
+            # Classifica i segnali. Un dip maggiore (più negativo) il venerdì è considerato migliore
+            sorted_signals = sorted(signals, key=lambda x: x.get('friday_return', 0))
+
+            df_signals = pd.DataFrame(sorted_signals)
+            df_signals['min_shares'] = df_signals.apply(
+                lambda row: calculate_min_shares(row['price'], commission, tax_rate), axis=1
+            )
+
+            col_config = {
+                "ticker": st.column_config.TextColumn("Ticker", width="small"),
+                "price": st.column_config.NumberColumn("Prezzo (€)", format="%.2f", width="small"),
+                "min_shares": st.column_config.NumberColumn("Quote Minime",
+                                                            help="Quote minime per coprire costi e tasse con un profitto dell'1%",
+                                                            format="%d", width="small"),
+                "action": st.column_config.CheckboxColumn("Simula Acquisto", width="small")
+            }
+
+            df_display = df_signals[['ticker', 'price', 'min_shares']].copy()
+            df_display['action'] = False
+
+            st.write("Classifica dei segnali con potenziale di rialzo, dal più promettente:")
+            edited_df = st.data_editor(df_display, column_config=col_config, hide_index=True, width="stretch",
+                                     key="signal_editor")
+
+            if st.button("Esegui Simulazioni Selezionate"):
+                for i, row in edited_df.iterrows():
+                    if row['action']:
+                        ticker = row['ticker']
+                        price = row['price']
+                        st.session_state.simulated_trades[ticker] = {
+                            "purchase_price": price,
                             "purchase_date": datetime.now().strftime("%Y-%m-%d"),
                             "status": "Aperta"
                         }
-                        save_simulated_trades()
-                        st.success(f"Acquisto di {signal['ticker']} simulato a {signal['price']:.2f}!")
-                        st.rerun()
+                        st.success(f"Acquisto di {ticker} simulato a {price:.2f}!")
+                save_simulated_trades()
+                st.rerun()
+
         elif st.session_state.tactical_universe_data:
             st.info("Nessun segnale di acquisto 'Monday Buy' identificato oggi nell'universo caricato.")
 
