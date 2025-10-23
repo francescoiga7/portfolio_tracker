@@ -21,7 +21,6 @@ def render_momentum_ui():
         ### 2. La Correzione per il Rischio (Sharpe Ratio)
         Un alto rendimento non è sempre "buono" se è ottenuto assumendo un rischio eccessivo (ad esempio, tramite un'alta volatilità o forti cali). Per questo, utilizziamo lo **Sharpe Ratio**, che è la metrica centrale di questa analisi.
         """)
-        # Modifica per usare la stringa raw (r"...") per risolvere il SyntaxWarning
         st.markdown(r"""
         $$
         Sharpe \: Ratio = \frac{Rendimento_{Asset} - Tasso_{Risk-Free}}{Volatilità_{Asset}}

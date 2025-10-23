@@ -10,7 +10,6 @@ def render_pac_screener_ui():
     st.title("🎯 Screener ETF")
     st.caption("Scopri ETP con potenziale di breakout quotati sulle principali borse europee.")
 
-    # Inizializza il log di debug nella sessione se non esiste
     if 'debug_log_loading' not in st.session_state:
         st.session_state.debug_log_loading = []
     if 'debug_log_processing' not in st.session_state:
@@ -56,7 +55,6 @@ def render_pac_screener_ui():
 
     st.sidebar.header("⚙️ Impostazioni")
 
-    # --- Sezione 1: Caricamento Dati ---
     with st.sidebar.expander("1. Carica Universo Dati", expanded=True):
 
         source_mode = st.radio("Modalità di Ricerca", ["Scoperta Automatica Universo", "Inserisci ISIN Specifici"])
@@ -81,7 +79,6 @@ def render_pac_screener_ui():
             )
             st.session_state.debug_log_loading.extend(log_list_for_fetching)
 
-    # --- Sezione 2: Analisi Interattiva ---
     if 'pac_screener_raw_data' in st.session_state and st.session_state.pac_screener_raw_data:
         st.sidebar.header("2. Filtri e Time Travel")
 

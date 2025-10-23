@@ -27,14 +27,13 @@ def _normalize_name(name: str) -> str:
     """Normalizes an ETF name for better matching."""
     if not name:
         return ""
-    # Lowercase, remove common suffixes and special characters
     name = name.lower()
     name = re.sub(r'\bucits etf\b', '', name)
     name = re.sub(r'\b(usd|eur|gbp)\b', '', name)
     name = re.sub(r'\b(acc|dist|accumulating|distributing)\b', '', name)
-    name = re.sub(r'\bclass\s[a-z]\b', '', name) # remove 'class a', etc.
-    name = re.sub(r'[^\w\s]', '', name)  # Remove punctuation
-    return " ".join(name.split())  # Normalize whitespace
+    name = re.sub(r'\bclass\s[a-z]\b', '', name)
+    name = re.sub(r'[^\w\s]', '', name)
+    return " ".join(name.split())
 
 @lru_cache(maxsize=4096)
 def _get_isin_for_ticker(ticker: str) -> Optional[str]:
@@ -43,7 +42,6 @@ def _get_isin_for_ticker(ticker: str) -> Optional[str]:
     v = info.get("isin")
     if isinstance(v, str) and len(v) == 12:
         return v.strip().upper()
-    # Fallback for other keys if needed
     for k, val in info.items():
         if "isin" in k.lower() and isinstance(val, str) and len(val) == 12:
             return val.strip().upper()

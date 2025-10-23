@@ -40,10 +40,9 @@ def _safe_division(numerator: float, denominator: float, default: Optional[float
 def _as_price_series(s: pd.Series) -> Optional[pd.Series]:
     if s is None: return None
     s = _normalize_timezone(s).sort_index()
-    # Ensure volume is also numeric if present
     if isinstance(s, pd.DataFrame) and 'Volume' in s.columns:
         s['Volume'] = pd.to_numeric(s['Volume'], errors='coerce')
-        s = s.dropna(subset=['Close'])  # Drop rows where Close is NaN
+        s = s.dropna(subset=['Close'])
 
     values = pd.to_numeric(s if isinstance(s, pd.Series) else s['Close'], errors='coerce').replace([np.inf, -np.inf],
                                                                                                    np.nan).dropna()
@@ -260,23 +259,20 @@ def get_monday_buy_signal(series_df: pd.DataFrame, vix_series: pd.Series) -> Tup
     ticker = series_df.attrs.get('ticker', 'N/A')
     logs = [f"⚪ **{ticker}**: Analisi per 'Monday Buy'..."]
 
-    # --- Validazione Dati ---
     today = series_df.index[-1]
-    #if today.weekday() != 0:  # 0 = Lunedì
-    #   logs.append("❌ Non è lunedì.")
-    #   return None, logs
+    if today.weekday() != 0:
+       logs.append("❌ Non è lunedì.")
+       return None, logs
 
     if not isinstance(series_df, pd.DataFrame) or 'Close' not in series_df.columns or len(series_df) < 51:
         logs.append("❌ Dati storici insufficienti (meno di 51 giorni).")
         return None, logs
 
-    # --- Calcolo Indicatori ---
     price = series_df['Close'].iloc[-1]
     sma50 = series_df['Close'].rolling(window=50).mean().iloc[-1]
     volume = series_df['Volume'].iloc[-1]
     volume_sma20 = series_df['Volume'].rolling(window=20).mean().iloc[-1]
 
-    # Trova l'ultimo venerdì in modo robusto
     fridays = series_df.index[(series_df.index < today) & (series_df.index.weekday == 4)]
     if fridays.empty:
         logs.append("❌ Impossibile trovare il venerdì precedente.")
@@ -286,13 +282,11 @@ def get_monday_buy_signal(series_df: pd.DataFrame, vix_series: pd.Series) -> Tup
     friday_return = (series_df.loc[last_friday, 'Close'] / series_df.loc[last_friday, 'Open'] - 1) * 100
     current_vix = vix_series.iloc[-1]
 
-    # --- Applicazione dei Criteri ---
     is_risk_on = current_vix < 25
     is_uptrend = price > sma50
     had_friday_dip = friday_return < 0
     has_volume_confirmation = volume > volume_sma20
 
-    # Logging dettagliato
     logs.append(f"  - Regime di Rischio: **{'Favorevole' if is_risk_on else 'Avverso'}** (VIX: {current_vix:.2f})")
     logs.append(
         f"  - Trend di Medio Termine: **{'Rialzista' if is_uptrend else 'Ribassista'}** (Prezzo: {price:.2f}, SMA50: {sma50:.2f})")
@@ -330,27 +324,21 @@ def monitor_weekly_trade(
     current_price = series.iloc[-1]
     today = series.index[-1]
 
-    # 1. Stop Loss (Controllo prioritario)
     stop_loss_price = purchase_price * (1 - stop_loss_pct / 100)
     if current_price <= stop_loss_price:
         return {"signal": "Vendi (Stop Loss)", "reason": f"Stop loss (-{stop_loss_pct}%) raggiunto."}
 
-    # 2. Segnale Tecnico di Uscita (es. sotto la media a 10gg)
     if len(series) > 10:
         sma10 = series.rolling(window=10).mean().iloc[-1]
         if current_price < sma10:
             return {"signal": "Vendi (Segnale Tecnico)",
                     "reason": "Il prezzo è sceso sotto la media mobile a 10 giorni."}
 
-    # 3. Logica di Vendita del Venerdì
-    if today.weekday() == 4:  # 4 = Venerdì
-        # Calcola il profitto lordo per azione
+    if today.weekday() == 4:
         gross_pnl_per_share = current_price - purchase_price
 
-        # Stima le tasse solo se c'è un profitto
         tax_per_share = max(0, gross_pnl_per_share) * (tax_rate / 100.0)
 
-        # Calcola il P&L netto per azione
         net_pnl_per_share = gross_pnl_per_share - (commission * 2) - tax_per_share
 
         if net_pnl_per_share > 0:
@@ -361,3 +349,38 @@ def monitor_weekly_trade(
                     "reason": f"Venerdì, ma la vendita non copre costi e tasse."}
 
     return None
+
+def calculate_atr(df: pd.DataFrame, window: int = 20) -> Optional[float]:
+    """Calcola l'Average True Range (ATR)."""
+    if df is None or not all(col in df.columns for col in ['High', 'Low', 'Close']) or len(df) < window:
+        return None
+
+    high_low = df['High'] - df['Low']
+    high_close_prev = np.abs(df['High'] - df['Close'].shift())
+    low_close_prev = np.abs(df['Low'] - df['Close'].shift())
+
+    tr = pd.DataFrame({'hl': high_low, 'hc': high_close_prev, 'lc': low_close_prev}).max(axis=1)
+    atr = tr.rolling(window=window).mean().iloc[-1] # Simple Moving Average for ATR
+    # Alternative: Exponential Moving Average
+    # atr = tr.ewm(alpha=1/window, adjust=False).mean().iloc[-1]
+
+    return atr if np.isfinite(atr) else None
+
+def get_satellite_signal(series_df: pd.DataFrame, atr_multiplier: int = 3, atr_window: int = 20) -> Dict[str, str]:
+    """Genera segnale per asset satellite usando trailing stop ATR."""
+    if series_df is None or len(series_df) < atr_window + 1 or 'Close' not in series_df.columns:
+         return {"signal": "Dati Insufficienti", "reason": f"Servono almeno {atr_window+1} giorni di storico OHLC."}
+
+    current_price = series_df['Close'].iloc[-1]
+    atr = calculate_atr(series_df, window=atr_window)
+
+    if atr is None:
+         return {"signal": "Dati Insufficienti", "reason": "Impossibile calcolare ATR."}
+
+    recent_high = series_df['High'].rolling(window=atr_window*2).max().iloc[-1]
+    stop_level = recent_high - atr_multiplier * atr
+
+    if current_price < stop_level:
+        return {"signal": "Vendi (Trailing Stop ATR)", "reason": f"Prezzo sotto trailing stop ({stop_level:.2f}) basato su ATR({atr_window})={atr:.2f} e Max recente={recent_high:.2f}."}
+    else:
+         return {"signal": "Mantieni (Satellite)", "reason": f"Prezzo sopra trailing stop ({stop_level:.2f})."}

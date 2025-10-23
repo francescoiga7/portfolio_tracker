@@ -20,13 +20,12 @@ class YahooClient(BaseFinancialClient):
 
     def __init__(self):
         super().__init__("YahooFinance", base_timeout=12)
-        self._search_hosts = ("query2", "query1")  # fallback sequence
+        self._search_hosts = ("query2", "query1")
 
     def validate_input(self, input_data: str) -> bool:
         """Accetta qualsiasi stringa non vuota (ticker, query o ISIN)."""
         return isinstance(input_data, str) and input_data.strip() != ""
 
-    # ---- SEARCH ----
     def _search_once(self, host: str, query: str, quotes_count: int) -> List[Dict]:
         url = f"https://{host}.finance.yahoo.com/v1/finance/search"
         params = {"q": query, "quotesCount": quotes_count, "newsCount": 0, "listsCount": 0}
@@ -39,7 +38,7 @@ class YahooClient(BaseFinancialClient):
             return []
         return data.get("quotes", []) or []
 
-    def search(self, query: str, quotes_count: int = 100) -> List[Dict]:  # AUMENTATO A 100
+    def search(self, query: str, quotes_count: int = 100) -> List[Dict]:
         if not self.validate_input(query):
             return []
         for host in self._search_hosts:
@@ -48,7 +47,6 @@ class YahooClient(BaseFinancialClient):
                 return quotes
         return []
 
-    # ---- ISIN <-> Ticker Resolution ----
     def resolve_isin_one(self, isin: str) -> Optional[str]:
         if isin in MANUAL_ISIN_MAP:
             return pick_preferred_symbol(MANUAL_ISIN_MAP[isin])
@@ -66,7 +64,6 @@ class YahooClient(BaseFinancialClient):
             pass
         return None
 
-    # ---- Serie storiche ----
     def get_series(self, ticker: str, period: str, as_dataframe: bool = False) -> Optional[
         Union[pd.Series, pd.DataFrame]]:
         """
@@ -81,19 +78,16 @@ class YahooClient(BaseFinancialClient):
                 logger.warning(f"Nessun dato storico per {ticker} nel periodo {period}")
                 return None
 
-            # Pulisce e normalizza l'indice
             if hasattr(df.index, "tz") and df.index.tz is not None:
                 df.index = df.index.tz_localize(None)
             df = df.sort_index()
 
             if as_dataframe:
-                # Per il dataframe, ci assicuriamo che le colonne necessarie ci siano
                 required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
                 if not all(col in df.columns for col in required_cols):
                     return None
                 return df[required_cols]
 
-            # Logica per restituire una Series (comportamento precedente)
             col = "Adj Close" if ("Adj Close" in df.columns and not df["Adj Close"].isna().all()) else "Close"
             s = df[col].dropna().copy()
             s.name = ticker
@@ -108,7 +102,6 @@ class YahooClient(BaseFinancialClient):
             logger.error(f"Errore nel recupero dati per {ticker}: {e}")
             return None
 
-    # ---- Info ----
     def get_info(self, isin: Optional[str] = None, ticker: Optional[str] = None) -> Dict:
         if not isin and not ticker:
             return {}

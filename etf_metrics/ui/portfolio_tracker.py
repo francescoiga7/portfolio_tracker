@@ -87,8 +87,8 @@ def _render_allocation_pie(labels: List[str], values: List[float], title: str, k
 
         st.plotly_chart(
             fig,
-            use_container_width=True, # Recommended way to make it full width
-            key="comparison_chart"    # Keep Streamlit component arguments
+            use_container_width=True,
+            key="comparison_chart"
         )
 
 def _display_backtest_results(all_series: Dict[str, pd.Series], rf_ann: float, key_prefix="backtest"):
@@ -175,9 +175,11 @@ def render_portfolio_tracker_ui():
                 qty = st.number_input("Quantità", min_value=0.000001, step=0.0001, format="%.6f")
                 price = st.number_input(f"Prezzo {trans_type} (€)", min_value=0.01, step=0.01, format="%.2f")
                 date = st.date_input(f"Data {trans_type}", datetime.now().date())
+                is_satellite = st.checkbox("Satellite?", key=f"satellite_flag_{form_key}")
                 if st.form_submit_button(f"Registra {trans_type}"):
                     trans_data = {"type": "buy" if trans_type == "Acquisto" else "sell", "isin": isin.strip().upper(),
-                                  "quantity": qty, "price": price, "date": date}
+                                  "quantity": qty, "price": price, "date": date,
+                                  "satellite": is_satellite if trans_type == "Acquisto" else False}
                     PortfolioTracker.add_transaction_to_portfolio(current_portfolio_name, trans_data)
                     st.rerun()
         with st.sidebar.expander("⚙️ Impostazioni Fiscali"):

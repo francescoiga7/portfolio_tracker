@@ -7,16 +7,15 @@ import streamlit as st
 from collections import defaultdict
 
 from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series
-from .metrics import get_trend_signal
+from .metrics import get_trend_signal, get_satellite_signal
 
 logger = logging.getLogger(__name__)
 
-
-def _calculate_open_positions(transactions: List[Dict[str, Any]]) -> DefaultDict[str, Dict[str, float]]:
+def _calculate_open_positions(transactions: List[Dict[str, Any]]) -> DefaultDict[str, Dict[str, Any]]:
     """
-    Calcola le quantità e i costi totali delle posizioni aperte a partire da una lista di transazioni.
+    Calcola le quantità, i costi totali e lo stato 'satellite' delle posizioni aperte.
     """
-    positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0})
+    positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0, 'satellite': False})
     sorted_trans = sorted(transactions, key=lambda x: x['date'])
 
     for t in sorted_trans:
@@ -27,15 +26,25 @@ def _calculate_open_positions(transactions: List[Dict[str, Any]]) -> DefaultDict
         if t['type'] == 'buy':
             positions[isin]['quantity'] += qty
             positions[isin]['total_cost'] += qty * price
+            if t.get('satellite', False):
+                positions[isin]['satellite'] = True
         elif t['type'] == 'sell':
             if positions[isin]['quantity'] > 0:
+                if positions[isin]['quantity'] < 1e-9: continue
                 avg_buy_price = positions[isin]['total_cost'] / positions[isin]['quantity']
-                cost_of_sold_shares = qty * avg_buy_price
-                positions[isin]['quantity'] -= qty
-                positions[isin]['total_cost'] -= cost_of_sold_shares
+
+                sell_qty = min(qty, positions[isin]['quantity'])
+
+                cost_of_sold_shares = sell_qty * avg_buy_price
+                positions[isin]['quantity'] -= sell_qty
+                if positions[isin]['quantity'] < 1e-9:
+                    positions[isin]['quantity'] = 0
+                    positions[isin]['total_cost'] = 0
+                else:
+                    positions[isin]['total_cost'] -= cost_of_sold_shares
+                    if positions[isin]['total_cost'] < 0: positions[isin]['total_cost'] = 0
 
     return positions
-
 
 def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: float, tax_rate: float) -> \
         List[Dict[str, Any]]:
@@ -82,46 +91,64 @@ def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: floa
 
     return sales_gains
 
-
 def _fetch_current_prices_and_series(isins: List[str]) -> Dict[str, Dict[str, Any]]:
     """
-    Recupera il prezzo più recente e la serie storica per una lista di ISIN.
+    Recupera il prezzo più recente, la serie storica 'Close' e il DataFrame OHLCV
+    per una lista di ISIN.
     """
     data = {}
+    fetch_period = "2y"
+
     for isin in isins:
         ticker = resolve_isin_one(isin)
-        series = get_series(ticker, "1y") if ticker else None
-        if series is not None and not series.empty:
+        series_df = get_series(ticker, fetch_period, as_dataframe=True) if ticker else None
+
+        if series_df is not None and not series_df.empty and 'Close' in series_df.columns:
+            close_series = series_df['Close'].copy()
+            close_series.name = ticker
             data[isin] = {
-                "price": series.iloc[-1],
-                "series": series
+                "price": close_series.iloc[-1],
+                "series": close_series,
+                "series_df": series_df
             }
         else:
             data[isin] = {
                 "price": 0,
-                "series": None
+                "series": None,
+                "series_df": None
             }
-            logger.warning(f"Impossibile recuperare i dati per {isin} ({ticker})")
+            logger.warning(f"Impossibile recuperare i dati OHLCV completi per {isin} ({ticker})")
     return data
 
 
-def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, float]],
+def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, Any]],
                                     market_data: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Arricchisce i dati delle posizioni aperte con P&L e segnale di trend.
+    Arricchisce i dati delle posizioni aperte con P&L e segnale di trend/satellite.
     """
     enriched_positions = []
     for isin, data in open_positions.items():
         if data['quantity'] > 1e-9:
             current_price = market_data.get(isin, {}).get("price", 0)
-            series = market_data.get(isin, {}).get("series", None)
 
             invested_amount = data['total_cost']
             current_amount = data['quantity'] * current_price
             unrealized_pnl = current_amount - invested_amount
-            avg_buy_price = invested_amount / data['quantity'] if data['quantity'] > 0 else 0
+            avg_buy_price = invested_amount / data['quantity'] if data['quantity'] > 1e-9 else 0
+            unrealized_pnl_pct = (unrealized_pnl / invested_amount * 100) if invested_amount > 1e-9 else 0.0
 
-            trend_signal = get_trend_signal(series)
+            is_satellite_asset = data.get('satellite', False)
+
+            if is_satellite_asset:
+                series_df = market_data.get(isin, {}).get("series_df", None)
+                if series_df is not None:
+                    trend_signal_info = get_satellite_signal(series_df)
+                else:
+                    trend_signal_info = {"signal": "Dati Insufficienti", "reason": "Mancano dati OHLCV."}
+            else:
+                series = market_data.get(isin, {}).get("series", None)
+                original_signal_string = get_trend_signal(series)
+                trend_signal_info = {"signal": original_signal_string, "reason": ""}
 
             enriched_positions.append({
                 'isin': isin,
@@ -131,11 +158,12 @@ def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, f
                 'invested_amount': invested_amount,
                 'current_amount': current_amount,
                 'unrealized_pnl': unrealized_pnl,
-                'unrealized_pnl_pct': (unrealized_pnl / invested_amount * 100) if invested_amount > 0 else 0,
-                'trend_signal': trend_signal
+                'unrealized_pnl_pct': unrealized_pnl_pct,
+                'trend_signal': trend_signal_info.get("signal", "N/D"),
+                'trend_reason': trend_signal_info.get("reason", ""),
+                'satellite': is_satellite_asset
             })
     return enriched_positions
-
 
 def _aggregate_portfolio_summary(
         open_positions_details: List[Dict[str, Any]],

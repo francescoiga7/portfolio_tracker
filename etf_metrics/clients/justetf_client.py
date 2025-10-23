@@ -24,8 +24,7 @@ class JustETFClient(BaseFinancialClient):
         """Valida l'ISIN fornito con controlli avanzati."""
         if not DataValidator.validate_isin(isin):
             return False
-        # Controlla se l'ISIN è nella blacklist (es. fondi non supportati)
-        blacklist_prefixes = ["LU", "CH"]  # Aggiungi prefissi problematici se necessario
+        blacklist_prefixes = ["LU", "CH"]
         if any(isin.startswith(prefix) for prefix in blacklist_prefixes):
             logger.warning(f"ISIN {isin} potrebbe non essere supportato completamente")
         return True
@@ -50,7 +49,6 @@ class JustETFClient(BaseFinancialClient):
             logger.error(f"ISIN non valido: {isin}")
             return None
 
-        # Cache
         cached_data = self._get_from_cache(isin)
         if cached_data:
             return cached_data
@@ -60,7 +58,6 @@ class JustETFClient(BaseFinancialClient):
                 url = f"{self.base_url}/{lang}/etf-profile.html?isin={isin}"
                 response = self.safe_request(url, headers=REQUEST_HEADERS, timeout=timeout or self.base_timeout)
                 if response and response.text.strip():
-                    # Verifica che la pagina contenga dati reali
                     if self._validate_page_content(response.text):
                         logger.info(f"Dati JustETF recuperati per {isin} in {lang}")
                         self._cache_data(isin, response.text)
@@ -79,7 +76,6 @@ class JustETFClient(BaseFinancialClient):
         """Valida che la pagina HTML contenga dati ETF reali."""
         if not html or len(html) < 1000:
             return False
-        # Richiede almeno 'vallabel' e 'val'; in alternativa segnali generici
         h = html.lower()
         if "vallabel" in h and "val" in h:
             return True

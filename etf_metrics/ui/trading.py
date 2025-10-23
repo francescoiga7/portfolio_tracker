@@ -61,7 +61,6 @@ def render_trading_ui():
     st.caption(
         "Identifica segnali di acquisto al lunedì e simula operazioni con vendita al venerdì, basato su un modello quantitativo.")
 
-    # Inizializzazione e caricamento dello stato
     if 'simulated_trades' not in st.session_state:
         st.session_state.simulated_trades = {}
     load_simulated_trades_once()
@@ -92,7 +91,6 @@ def render_trading_ui():
         - **Uscita Tecnica Anticipata**: Se il trend di breve termine si inverte (es. prezzo sotto la media a 10 giorni), viene suggerita un'uscita per proteggere il capitale.
         """)
 
-    # --- Sidebar ---
     st.sidebar.header("⚙️ Parametri di Trading")
 
     with st.sidebar.expander("1. Carica Universo di Analisi", expanded=True):
@@ -169,7 +167,6 @@ def render_trading_ui():
             st.session_state.tactical_signals = signals
             st.rerun()
 
-    # --- Area Principale ---
     if not st.session_state.tactical_universe_data and not st.session_state.simulated_trades:
         st.info("👈 Inizia caricando un universo di strumenti dalla barra laterale.")
 
@@ -177,7 +174,6 @@ def render_trading_ui():
         st.subheader("🚨 Segnali di Acquisto 'Monday Buy' Identificati")
         signals = st.session_state.tactical_signals
         if signals:
-            # Classifica i segnali. Un dip maggiore (più negativo) il venerdì è considerato migliore
             sorted_signals = sorted(signals, key=lambda x: x.get('friday_return', 0))
 
             df_signals = pd.DataFrame(sorted_signals)
@@ -269,7 +265,6 @@ def render_trading_ui():
 
         st.dataframe(styler, hide_index=True, width="stretch")
 
-        # Logica per chiudere le posizioni
         sell_candidates = [trade['Ticker'] for trade in open_trades_data if "Vendi" in trade['Segnale Vendita']]
         if sell_candidates:
             trades_to_close = st.multiselect(
@@ -289,7 +284,6 @@ def render_trading_ui():
     else:
         st.info("Nessuna posizione simulata aperta.")
 
-    # Visualizzazione del log
     if st.session_state.tactical_log:
         with st.expander("🔍 Log Dettagliato dell'Analisi"):
             st.markdown("\n".join(f"- {entry}" for entry in st.session_state.tactical_log))

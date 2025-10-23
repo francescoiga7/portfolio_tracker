@@ -50,11 +50,11 @@ def fetch_screener_data(
         with st.spinner("Risoluzione ISIN/Ticker..."):
             resolved_tickers = []
             for item in specific_isins:
-                if len(item) == 12:  # Assumiamo sia un ISIN
+                if len(item) == 12:
                     ticker = resolve_isin_one(item)
                     if ticker:
                         resolved_tickers.append(ticker)
-                else:  # Assumiamo sia già un ticker
+                else:
                     resolved_tickers.append(item)
             unique_tickers = list(filter(None, resolved_tickers))
         log_area.append(f"- Trovati {len(unique_tickers)} ticker validi.")
@@ -69,10 +69,8 @@ def fetch_screener_data(
     fetched_data = []
     progress_bar = st.progress(0, text=f"Download dati per {len(unique_tickers)} strumenti...")
     for i, ticker in enumerate(unique_tickers):
-        # Per il trading tattico serve il DataFrame completo
         series_full = get_series(ticker, period="5y", as_dataframe=True)
         if series_full is not None and not series_full.empty:
-            # Per mantenere la compatibilità, salviamo il df ma lo chiamiamo 'series'
             fetched_data.append({"ticker": ticker, "series": series_full})
         progress_bar.progress((i + 1) / len(unique_tickers), text=f"Download: {ticker}")
     progress_bar.empty()
@@ -83,21 +81,18 @@ import warnings
 
 
 def _calculate_metrics_from_series(ticker: str, series_full: pd.DataFrame, as_of_date: date, log_entry: List[str]) -> \
-        Optional[Dict]:  # <-- MODIFICA 1: Il tipo corretto è DataFrame
+        Optional[Dict]:
     """Calcola le metriche per un singolo ETF a partire dalla sua serie storica completa."""
     try:
-        # --- Blocco per catturare i warnings ---
         with warnings.catch_warnings(record=True) as caught_warnings:
             warnings.simplefilter("always")
 
-            # <-- MODIFICA 2: Estrai solo la colonna 'Close' per i calcoli
             if 'Close' not in series_full.columns:
                 log_entry.append("ERRORE: La colonna 'Close' non è presente nei dati.")
                 return None
 
             close_prices_full = series_full['Close']
 
-            # <-- MODIFICA 3: Usa la serie di prezzi di chiusura, non l'intero DataFrame
             end_date = pd.to_datetime(as_of_date)
             series = close_prices_full[close_prices_full.index <= end_date]
 
@@ -107,7 +102,6 @@ def _calculate_metrics_from_series(ticker: str, series_full: pd.DataFrame, as_of
 
             info = get_info(ticker=ticker) or {}
             avg_volume_3m = info.get("averageDailyVolume3Month")
-            # Ora series.iloc[-1] è un singolo numero (l'ultimo prezzo di chiusura)
             avg_value_eur = (avg_volume_3m * series.iloc[-1]) if avg_volume_3m is not None else 0
 
             series_12m = series[series.index >= (end_date - pd.DateOffset(months=12))]
@@ -118,7 +112,6 @@ def _calculate_metrics_from_series(ticker: str, series_full: pd.DataFrame, as_of
             series_6m = series_12m[series_12m.index >= (end_date - pd.DateOffset(months=6))]
             series_3m = series_6m[series_6m.index >= (end_date - pd.DateOffset(months=3))]
 
-            # Ora tutti i calcoli vengono eseguiti sulla serie di prezzi, producendo singoli valori
             metrics_12m = compute_metrics_from_series(series_12m)
             cagr, mdd = metrics_12m.get("cagr"), metrics_12m.get("mdd")
             calmar_ratio = -cagr / mdd if cagr is not None and mdd is not None and mdd != 0 else None
@@ -169,7 +162,7 @@ def process_screener_rankings(fetched_data: List[Dict], min_avg_value: float, as
     log_area.append(f"\n**3. Analisi e Ranking alla data {as_of_date.strftime('%d/%m/%Y')}...**")
 
     all_metrics = []
-    st.session_state.debug_log_processing = []  # Pulisce il log di elaborazione
+    st.session_state.debug_log_processing = []
     for data in fetched_data:
         log_entry = [data['ticker']]
         metrics = _calculate_metrics_from_series(data['ticker'], data['series'], as_of_date, log_entry)

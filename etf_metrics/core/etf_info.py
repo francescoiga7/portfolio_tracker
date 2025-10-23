@@ -10,7 +10,6 @@ from etf_metrics.clients.justetf_client import fetch_justetf_page, parse_etf_det
 logger = logging.getLogger(__name__)
 
 UNKNOWN = "Sconosciuto"
-# Regex condivise per inferire la distribuzione (evita duplicazioni)
 ACCUM_RE = re.compile(r"\bacc(?:umulating)?\b", re.IGNORECASE)
 DIST_RE = re.compile(r"\bdist(?:ributing|ribuzione)?\b", re.IGNORECASE)
 
@@ -19,17 +18,14 @@ def get_etf_extended_info(isin: str) -> Dict:
     """Recupera informazioni estese su un ETF con approccio universale"""
     info: Dict = {}
 
-    # 1) Yahoo Finance
     yf_info = get_yahoo_info(isin)
     if yf_info:
         info.update(yf_info)
 
-    # 2) JustETF (parsing HTML più robusto)
     try:
         html = fetch_justetf_page(isin, timeout=15)
         if html:
             jt = parse_etf_details_from_html(html)
-            # aggiorna solo i campi mancanti o "Sconosciuto"
             for k in ("category", "fund_size", "replication_method", "distribution", "provider"):
                 v = jt.get(k)
                 if v and (k not in info or not info[k] or info[k] == UNKNOWN):
@@ -37,11 +33,9 @@ def get_etf_extended_info(isin: str) -> Dict:
     except Exception as e:
         logger.debug(f"Errore nel recupero informazioni JustETF per {isin}: {e}")
 
-    # 3) Fallback leggeri
     if "category" not in info or not info["category"] or info["category"] == UNKNOWN:
         info["category"] = get_category_from_name(info.get("longName", "") or info.get("shortName", ""))
 
-    # Distribuzione dai nomi se non presente
     if "distribution" not in info or not info["distribution"] or info["distribution"] == UNKNOWN:
         nm = f"{info.get('longName', '')} {info.get('shortName', '')}".lower()
         if ACCUM_RE.search(nm):
@@ -51,7 +45,6 @@ def get_etf_extended_info(isin: str) -> Dict:
         else:
             info["distribution"] = UNKNOWN
 
-    # fund_size derivato se assente e abbiamo totalAssets
     if "fund_size" not in info and "totalAssets" in info and info["totalAssets"]:
         try:
             ta = float(info["totalAssets"])
@@ -61,7 +54,6 @@ def get_etf_extended_info(isin: str) -> Dict:
                 info["fund_size"] = f"{ta / 1e6:.2f} Milioni USD"
         except Exception:
             pass
-    # Placeholder per alternative ETF con TD migliore (richiede dati esterni)
     info["alternative_etfs"] = get_better_td_alternatives(isin, info.get("category", ""))
 
     return info
@@ -79,11 +71,9 @@ def get_yahoo_info(isin: str) -> Dict:
             info["category"] = yf_info.get("category", UNKNOWN)
             info["morningStarOverallRating"] = yf_info.get("morningStarOverallRating", UNKNOWN)
 
-            # Preserva anche totalAssets per derivazioni successive
             total_assets = yf_info.get("totalAssets")
             if total_assets is not None:
                 info["totalAssets"] = total_assets
-                # Formatta la dimensione del fondo
                 try:
                     ta = float(total_assets)
                     if ta > 1e9:
@@ -93,7 +83,6 @@ def get_yahoo_info(isin: str) -> Dict:
                 except Exception:
                     pass
 
-            # Evita di dedurre la distribuzione solo dal "Yield": controlla nomi
             long_short = f"{yf_info.get('longName','')} {yf_info.get('shortName','')}".lower()
             if ACCUM_RE.search(long_short):
                 info["distribution"] = "Ad accumulazione"
@@ -124,8 +113,6 @@ def get_category_from_name(name: str) -> str:
 
 def get_better_td_alternatives(isin: str, category: str) -> List[Dict]:
     """Trova ETF alternativi nella stessa categoria con tracking difference migliore"""
-    # In un'implementazione reale, questi dati verrebbero da un database
-    # Per ora restituiamo una lista vuota
     return []
 
 
@@ -143,10 +130,9 @@ def fallback_ter_from_yahoo_info(etf_info: Dict) -> Optional[float]:
         if v is None:
             continue
         try:
-            # Gestisci sia valori decimali (0.0025) sia stringhe con '%'
             s = str(v).strip().replace("%", "")
             f = float(s)
-            if f <= 0.05:  # probabile valore frazionario
+            if f <= 0.05:
                 f *= 100.0
             if 0.0 < f < 3.0:
                 return round(f, 4)

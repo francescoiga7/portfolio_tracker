@@ -13,7 +13,7 @@ def fetch_momentum_data(isins: List[str]) -> List[Dict]:
     Carica i dati storici completi e calcola il segnale di trading una sola volta.
     """
     fetched_data = []
-    period = "5y"  # Carica uno storico sufficientemente lungo per il backtesting
+    period = "5y"
 
     for isin in isins:
         isin = (isin or "").strip().upper()
@@ -51,14 +51,11 @@ def process_momentum_rankings(
     start_date = end_date - pd.DateOffset(months=lookback_months)
 
     for data in fetched_data:
-        # Filtra la serie storica fino alla data specificata
         series_as_of = data["series"][data["series"].index <= end_date]
         if series_as_of.empty: continue
 
-        # Calcola il segnale usando i dati fino a "end_date"
         signal_info = get_trading_signal(series_as_of)
 
-        # Filtra per il periodo di lookback per le metriche di performance
         series_filtered = series_as_of.loc[start_date:end_date]
         if series_filtered.shape[0] < 21: continue
 

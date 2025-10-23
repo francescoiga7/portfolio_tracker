@@ -2,7 +2,6 @@
 import streamlit as st
 import pandas as pd
 
-# Import dei renderer
 from etf_metrics.ui.single_etf import render_single_etf_ui
 from etf_metrics.ui.momentum import render_momentum_ui
 from etf_metrics.ui.portfolio_tracker import render_portfolio_tracker_ui
@@ -27,8 +26,6 @@ def init_session_state():
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
-
-# etf_metrics/ui/main.py
 
 def run_app():
     """Avvia l'applicazione Streamlit."""

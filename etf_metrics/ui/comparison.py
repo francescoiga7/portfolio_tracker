@@ -45,7 +45,6 @@ def render_etf_comparison_ui():
 
     with st.spinner("Risoluzione ISIN/Ticker in corso..."):
         for item in inputs:
-            # Controllo semplificato per ISIN (2 lettere, 9 alfanumerici, 1 cifra)
             if re.match(r'^[A-Z]{2}[A-Z0-9]{9}[0-9]$', item):
                 ticker = resolve_isin_one(item)
                 if ticker:
@@ -53,10 +52,8 @@ def render_etf_comparison_ui():
                 else:
                     st.sidebar.warning(f"ISIN {item} non trovato, verrà saltato.")
             else:
-                # Tratta il resto come Ticker (es. SPY, QQQ)
                 tickers_to_compare.append(item)
 
-    # Rimuovi i duplicati
     tickers = list(set(tickers_to_compare))
 
     if not tickers:
@@ -73,19 +70,16 @@ def render_etf_comparison_ui():
     )
     period_yf = PERIOD_MAP_LABEL_TO_YF[selected_period_label]
 
-    # Recupera i dati
     data = {ticker: get_series(ticker, period_yf) for ticker in tickers}
 
     if HAS_PLOTLY:
         fig = go.Figure()
 
-        # Aggiungi tracce al grafico
         for ticker, series in data.items():
             if series is not None and not series.empty:
                 pct_series = to_percent_index(series)
                 fig.add_trace(go.Scatter(x=pct_series.index, y=pct_series.values, mode='lines', name=ticker))
 
-        # Aggiorna il layout del grafico
         fig.update_layout(
             title=f"Andamento Confrontato degli Asset ({selected_period_label})",
             yaxis_title="Performance (%)",
@@ -96,7 +90,6 @@ def render_etf_comparison_ui():
 
         st.plotly_chart(fig, use_container_width=True, key="comparison_chart")
     else:
-        # Codice di fallback per st.line_chart
         chart_data = pd.DataFrame({
             ticker: to_percent_index(series)
             for ticker, series in data.items()
