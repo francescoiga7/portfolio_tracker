@@ -54,16 +54,6 @@ class YahooClient(BaseFinancialClient):
         symbols = [q.get("symbol") for q in quotes if q.get("symbol")]
         return pick_preferred_symbol(symbols)
 
-    def resolve_ticker_to_isin(self, ticker: str) -> Optional[str]:
-        """Tenta di trovare l'ISIN per un dato ticker."""
-        try:
-            info = self.get_info(ticker=ticker)
-            if info and isinstance(info.get('isin'), str):
-                return info['isin']
-        except Exception:
-            pass
-        return None
-
     def get_series(self, ticker: str, period: str, as_dataframe: bool = False) -> Optional[
         Union[pd.Series, pd.DataFrame]]:
         """

@@ -26,13 +26,13 @@ def style_trend_signal(val: str) -> str:
     """Applica uno stile colorato alla colonna dei segnali di trend."""
     val_lower = val.lower()
     if "mantieni" in val_lower:
-        return 'background-color: #28a745; color: white; font-weight: bold;'
+        return 'background-color: #28a745; color: white; font-weight: bold;' # Verde per Mantieni
     elif "monitora" in val_lower:
-        return 'background-color: #ffc107; color: black; font-weight: bold;'
-    elif "vendita" in val_lower:
-        return 'background-color: #dc3545; color: white; font-weight: bold;'
-    return ''
-
+        return 'background-color: #ffc107; color: black; font-weight: bold;' # Giallo per Monitora
+    # Modificato per includere tutti i segnali che iniziano con "Vendi"
+    elif val_lower.startswith("vendi"):
+        return 'background-color: #dc3545; color: white; font-weight: bold;' # Rosso per Vendi
+    return '' # Default
 
 def format_dataframe(df: pd.DataFrame, column_config: Dict, pnl_cols: List[str] = [], bar_cols: List[str] = [],
                      trend_cols: List[str] = []):

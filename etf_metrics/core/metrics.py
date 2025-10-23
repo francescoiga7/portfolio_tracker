@@ -177,14 +177,6 @@ def compute_var(s: pd.Series, confidence_level: float = 0.95, holding_period_day
 
     return float(var_period * 100.0) if np.isfinite(var_period) else None
 
-
-def compute_current_drawdown(s: pd.Series) -> Optional[float]:
-    s_clean = _as_price_series(s)
-    if s_clean is None: return None
-    rel = s_clean / s_clean.cummax()
-    return float((rel.iloc[-1] - 1.0) * 100.0)
-
-
 def calculate_technical_indicators(series: pd.Series) -> Dict[str, float]:
     indicators = {'sma50': None, 'sma200': None, 'rsi': None}
     if series is None or len(series) < 200: return indicators

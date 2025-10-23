@@ -81,25 +81,6 @@ class JustETFClient(BaseFinancialClient):
             return True
         return any(element in h for element in ("etf", "fund"))
 
-    def clear_cache(self) -> None:
-        """Pulisce la cache."""
-        self.cache.clear()
-        logger.info("Cache JustETF pulita")
-
-    def get_cache_info(self) -> Dict[str, int]:
-        """Restituisce informazioni sulla cache."""
-        valid_entries = sum(
-            1
-            for _, (_, timestamp) in self.cache.items()
-            if datetime.now() - timestamp < self.cache_ttl
-        )
-        return {
-            "total_entries": len(self.cache),
-            "valid_entries": valid_entries,
-            "expired_entries": len(self.cache) - valid_entries,
-        }
-
-
 def _strip_tags(html: str) -> str:
     html = re.sub(r"(?is)\<(script|style).*?\>.*?\</\1\>", " ", html)
     text = re.sub(r"(?s)\<[^\>]+\>", " ", html)
@@ -155,27 +136,6 @@ def parse_ter_from_html(html: str) -> Optional[float]:
         except Exception:
             pass
     return None
-
-
-def parse_benchmark_name_from_html(html: str) -> Optional[str]:
-    name = None
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-        name = _find_value_by_labels_soup(soup, ["Indice", "Benchmark", "Index", "Reference index"])
-    except Exception:
-        return None
-    if name:
-        clean = re.sub(
-            r"\s*(?:Net\s*Total\s*Return|Total\s*Return|Price\s*Return|NR|TR|EUR)\s*$",
-            "",
-            name,
-            flags=re.IGNORECASE,
-        ).strip()
-        if clean.endswith("."):
-            clean = clean[:-1]
-        return clean
-    return None
-
 
 def parse_etf_details_from_html(html: str) -> dict:
     details: Dict[str, str] = {}
