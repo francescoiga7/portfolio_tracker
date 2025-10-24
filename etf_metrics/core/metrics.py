@@ -342,24 +342,52 @@ def monitor_weekly_trade(
 
     return None
 
+# Importa get_series se non è già presente nel file metrics.py
+from etf_metrics.clients.yahoo_client import get_series
+import pandas as pd
+import numpy as np # Assicurati che numpy sia importato
+
+# ... (altro codice in metrics.py) ...
+
 def calculate_atr(df: pd.DataFrame, window: int = 20) -> Optional[float]:
     """Calcola l'Average True Range (ATR)."""
-    if df is None or not all(col in df.columns for col in ['High', 'Low', 'Close']) or len(df) < window:
+    if df is None or not all(col in df.columns for col in ['High', 'Low', 'Close']) or len(df) < window + 1: # Aggiunto +1 per shift
         return None
 
     high_low = df['High'] - df['Low']
     high_close_prev = np.abs(df['High'] - df['Close'].shift())
     low_close_prev = np.abs(df['Low'] - df['Close'].shift())
 
-    tr = pd.DataFrame({'hl': high_low, 'hc': high_close_prev, 'lc': low_close_prev}).max(axis=1)
-    atr = tr.rolling(window=window).mean().iloc[-1] # Simple Moving Average for ATR
-    # Alternative: Exponential Moving Average
-    # atr = tr.ewm(alpha=1/window, adjust=False).mean().iloc[-1]
+    # Combina le tre componenti del True Range, ignorando NaN per il primo giorno
+    tr_df = pd.DataFrame({'hl': high_low, 'hc': high_close_prev, 'lc': low_close_prev})
+    tr = tr_df.max(axis=1)
+    tr = tr.dropna() # Rimuovi il primo NaN risultante dallo shift
 
-    return atr if np.isfinite(atr) else None
+    if len(tr) < window:
+        return None # Non abbastanza dati per la media mobile
 
-def get_satellite_signal(series_df: pd.DataFrame, atr_multiplier: int = 3, atr_window: int = 20) -> Dict[str, str]:
-    """Genera segnale per asset satellite usando trailing stop ATR."""
+    # Calcola l'ATR usando Simple Moving Average (SMA)
+    atr = tr.rolling(window=window, min_periods=window).mean().iloc[-1]
+    # Alternativa: Exponential Moving Average (EMA)
+    # atr = tr.ewm(span=window, adjust=False).mean().iloc[-1]
+
+    return atr if pd.notna(atr) and np.isfinite(atr) else None
+
+def get_dynamic_atr_multiplier(vix_value: Optional[float]) -> float:
+    """Determina il moltiplicatore ATR basato sul VIX."""
+    if vix_value is None or pd.isna(vix_value):
+        return 3.0 # Default se VIX non disponibile
+    elif vix_value < 15:
+        return 2.5 # Mercato calmo, stop più stretto
+    elif vix_value < 25:
+        return 3.0 # Volatilità normale
+    elif vix_value < 35:
+        return 3.5 # Volatilità elevata
+    else:
+        return 4.0 # Volatilità molto alta, stop più largo
+
+def get_satellite_signal(series_df: pd.DataFrame, vix_series: pd.Series, atr_window: int = 20) -> Dict[str, str]:
+    """Genera segnale per asset satellite usando trailing stop ATR dinamico basato su VIX."""
     if series_df is None or len(series_df) < atr_window + 1 or 'Close' not in series_df.columns:
          return {"signal": "Dati Insufficienti", "reason": f"Servono almeno {atr_window+1} giorni di storico OHLC."}
 
@@ -367,12 +395,33 @@ def get_satellite_signal(series_df: pd.DataFrame, atr_multiplier: int = 3, atr_w
     atr = calculate_atr(series_df, window=atr_window)
 
     if atr is None:
-         return {"signal": "Dati Insufficienti", "reason": "Impossibile calcolare ATR."}
+         return {"signal": "Dati Insufficienti", "reason": f"Impossibile calcolare ATR({atr_window})."}
 
-    recent_high = series_df['High'].rolling(window=atr_window*2).max().iloc[-1]
+    # Determina moltiplicatore dinamico
+    current_vix = vix_series.iloc[-1] if vix_series is not None and not vix_series.empty else None
+    atr_multiplier = get_dynamic_atr_multiplier(current_vix)
+    vix_info = f"(VIX: {current_vix:.2f}, Multiplier: {atr_multiplier:.1f})" if current_vix is not None else "(VIX N/D, Multiplier: Default)"
+
+    # Calcola lo stop level
+    lookback_period_high = atr_window * 2 # Periodo per trovare il massimo recente
+    if len(series_df) < lookback_period_high:
+        recent_high = series_df['High'].max() # Usa il massimo disponibile se lo storico è breve
+    else:
+        recent_high = series_df['High'].rolling(window=lookback_period_high).max().iloc[-1]
+
+    if pd.isna(recent_high):
+         return {"signal": "Dati Insufficienti", "reason": "Impossibile determinare il massimo recente."}
+
     stop_level = recent_high - atr_multiplier * atr
 
     if current_price < stop_level:
-        return {"signal": "Vendi (Trailing Stop ATR)", "reason": f"Prezzo sotto trailing stop ({stop_level:.2f}) basato su ATR({atr_window})={atr:.2f} e Max recente={recent_high:.2f}."}
+        return {
+            "signal": f"Vendi (ATR Dinamico)",
+            "reason": f"Prezzo sotto trailing stop ({stop_level:.2f}). {vix_info}"
+            #"reason": f"Prezzo sotto trailing stop ({stop_level:.2f}) basato su Max recente={recent_high:.2f}, ATR({atr_window})={atr:.2f}. {vix_info}"
+        }
     else:
-         return {"signal": "Mantieni (Satellite)", "reason": f"Prezzo sopra trailing stop ({stop_level:.2f})."}
+         return {
+             "signal": "Mantieni (Trend Forte)",
+             "reason": f"Prezzo sopra trailing stop ({stop_level:.2f}). {vix_info}"
+         }

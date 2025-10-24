@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Any, DefaultDict
 import streamlit as st
 from collections import defaultdict
+import pandas as pd
 
 from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series
 from .metrics import get_trend_signal, get_satellite_signal
@@ -93,11 +94,21 @@ def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: floa
 
 def _fetch_current_prices_and_series(isins: List[str]) -> Dict[str, Dict[str, Any]]:
     """
-    Recupera il prezzo più recente, la serie storica 'Close' e il DataFrame OHLCV
-    per una lista di ISIN.
+    Recupera il prezzo più recente, la serie storica 'Close', il DataFrame OHLCV
+    e la serie VIX per una lista di ISIN.
     """
     data = {}
-    fetch_period = "2y"
+    fetch_period = "2y" # Potrebbe servire uno storico adeguato per l'ATR e il max recente
+
+    # Recupera la serie VIX una sola volta
+    try:
+        vix_series = get_series("^VIX", fetch_period)
+        if vix_series is None or vix_series.empty:
+            logger.warning("Impossibile recuperare i dati del VIX.")
+            vix_series = pd.Series(dtype=float) # Serie vuota per evitare errori dopo
+    except Exception as e:
+        logger.error(f"Errore nel recupero dati VIX: {e}")
+        vix_series = pd.Series(dtype=float)
 
     for isin in isins:
         ticker = resolve_isin_one(isin)
@@ -109,13 +120,15 @@ def _fetch_current_prices_and_series(isins: List[str]) -> Dict[str, Dict[str, An
             data[isin] = {
                 "price": close_series.iloc[-1],
                 "series": close_series,
-                "series_df": series_df
+                "series_df": series_df,
+                "vix_series": vix_series # Aggiungi la serie VIX ai dati per ogni ISIN
             }
         else:
             data[isin] = {
                 "price": 0,
                 "series": None,
-                "series_df": None
+                "series_df": None,
+                "vix_series": vix_series # Aggiungi comunque la serie VIX
             }
             logger.warning(f"Impossibile recuperare i dati OHLCV completi per {isin} ({ticker})")
     return data
@@ -125,11 +138,16 @@ def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, A
                                     market_data: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Arricchisce i dati delle posizioni aperte con P&L e segnale di trend/satellite.
+    Modificato per passare la serie VIX a get_satellite_signal.
     """
     enriched_positions = []
     for isin, data in open_positions.items():
-        if data['quantity'] > 1e-9:
-            current_price = market_data.get(isin, {}).get("price", 0)
+        if data['quantity'] > 1e-9: # Usa una tolleranza piccola per evitare errori floating point
+            market_info = market_data.get(isin, {})
+            current_price = market_info.get("price", 0)
+            series = market_info.get("series", None)
+            series_df = market_info.get("series_df", None)
+            vix_series = market_info.get("vix_series", pd.Series(dtype=float)) # Recupera VIX
 
             invested_amount = data['total_cost']
             current_amount = data['quantity'] * current_price
@@ -139,16 +157,22 @@ def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, A
 
             is_satellite_asset = data.get('satellite', False)
 
+            trend_signal_info = {"signal": "N/D", "reason": "Dati insufficienti"} # Default
+
             if is_satellite_asset:
-                series_df = market_data.get(isin, {}).get("series_df", None)
-                if series_df is not None:
-                    trend_signal_info = get_satellite_signal(series_df)
+                if series_df is not None and vix_series is not None:
+                     # Passa vix_series alla funzione
+                    trend_signal_info = get_satellite_signal(series_df, vix_series)
                 else:
-                    trend_signal_info = {"signal": "Dati Insufficienti", "reason": "Mancano dati OHLCV."}
-            else:
-                series = market_data.get(isin, {}).get("series", None)
-                original_signal_string = get_trend_signal(series)
-                trend_signal_info = {"signal": original_signal_string, "reason": ""}
+                    reason = []
+                    if series_df is None: reason.append("Mancano dati OHLCV.")
+                    if vix_series is None or vix_series.empty : reason.append("Mancano dati VIX.")
+                    trend_signal_info = {"signal": "Dati Insufficienti", "reason": " ".join(reason)}
+            else: # Asset Core
+                if series is not None:
+                    original_signal_string = get_trend_signal(series)
+                    trend_signal_info = {"signal": original_signal_string, "reason": ""}
+                # else: mantiene il default "Dati insufficienti"
 
             enriched_positions.append({
                 'isin': isin,
