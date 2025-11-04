@@ -3,7 +3,7 @@ import datetime as dt
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
-from .yahoo_client import resolve_isin_one, get_series, get_info
+from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series, get_info
 from .metrics import (
     compute_metrics_from_series,
     compute_sharpe_ratio,
@@ -11,8 +11,8 @@ from .metrics import (
     compute_omega_ratio,
     compute_var
 )
-from .trackingdiff_client import fetch_tracking_difference
-from .etf_info import get_etf_extended_info, fetch_ter_justetf, fallback_ter_from_yahoo_info
+from etf_metrics.clients.trackingdiff_client import fetch_tracking_difference
+from etf_metrics.core.etf_info import get_etf_extended_info, fetch_ter_justetf, fallback_ter_from_yahoo_info
 from .benchmark import lookup_proxy_for_benchmark
 
 ND = "n.d."
@@ -24,7 +24,6 @@ def compute_etf_over_periods(
         bench_override: Optional[str] = None,
         rf_ann: float = 0.0,
 ) -> Tuple[Dict[str, Optional[str]], List[Dict], Dict[str, Optional[pd.DataFrame]]]:
-    # 1) Fetch dati preliminari
     td_external = fetch_tracking_difference(isin)
     ticker = resolve_isin_one(isin)
     if not ticker:
@@ -33,13 +32,11 @@ def compute_etf_over_periods(
     yf_info = get_info(isin=isin)
     ter_pct = fetch_ter_justetf(isin) or fallback_ter_from_yahoo_info(yf_info)
 
-    # 2) Determina benchmark
     bench_symbol, bench_name = lookup_proxy_for_benchmark(None, ticker, {**yf_info, "isin": isin})
     if bench_override:
         bench_symbol = bench_override.strip()
         bench_name = f"Override: {bench_symbol}"
 
-    # 3) Info estese e output
     extended_info = get_etf_extended_info(isin)
     info_out: Dict[str, Optional[str]] = {
         "isin": isin, "yahoo_symbol": ticker,
@@ -53,7 +50,6 @@ def compute_etf_over_periods(
         **yf_info,
     }
 
-    # 4) Calcolo metriche per periodo
     rows: List[Dict] = []
     aligned_frames: Dict[str, Optional[pd.DataFrame]] = {}
     timestamp = dt.datetime.now().isoformat(timespec="seconds")
@@ -65,7 +61,6 @@ def compute_etf_over_periods(
         if etf_s is not None and len(etf_s) >= 2:
             metrics = compute_metrics_from_series(etf_s)
             sharpe = compute_sharpe_ratio(etf_s, rf_ann)
-            # --- INTEGRAZIONE NUOVE METRICHE ---
             sortino = compute_sortino_ratio(etf_s, rf_ann)
             omega = compute_omega_ratio(etf_s)
             var = compute_var(etf_s, confidence_level=0.95, holding_period_days=1)
@@ -95,7 +90,6 @@ def compute_etf_over_periods(
             "vol_ann_pct": metrics.get("vol_ann"), "mdd_pct": metrics.get("mdd"),
             "ter_pct": ter_pct, "benchmark_symbol": bench_symbol, "benchmark_name": bench_name,
             "tracking_diff_pct": td_val, "sharpe_ratio": sharpe, "calmar_ratio": calmar,
-            # --- AGGIUNTA NUOVE METRICHE AL REPORT ---
             "sortino_ratio": sortino, "omega_ratio": omega, "var_95_1d_pct": var
         })
 

@@ -3,11 +3,12 @@ import streamlit as st
 import pandas as pd
 import re
 
-from .yahoo_client import resolve_isin_one, get_series
-from .utils import to_percent_index
+from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series
+from etf_metrics.shared.utils import to_percent_index
 
 try:
     import plotly.graph_objects as go
+
     HAS_PLOTLY = True
 except ImportError:
     HAS_PLOTLY = False
@@ -17,9 +18,10 @@ PERIOD_MAP_LABEL_TO_YF = {
     "1A": "1y", "3A": "3y", "5A": "5y", "Max": "max"
 }
 
+
 def render_etf_comparison_ui():
     """Renderizza la UI per la comparazione di più ETF."""
-    st.title("🔍 Confronto Multi-ETF")
+    st.title("⚖️ Confronto Multi-ETF")
     st.caption("Visualizza e confronta le performance di più ETF o azioni su diversi orizzonti temporali.")
 
     with st.expander("📖 Metodologia e Funzionamento"):
@@ -30,7 +32,7 @@ def render_etf_comparison_ui():
         - **Scegliere il periodo di analisi** per il confronto.
         """)
 
-    st.sidebar.header("⚙️ Impostazioni Confronto")
+    st.sidebar.header("⚙️ Impostazioni")
     compare_input = st.sidebar.text_area(
         "ISIN o Ticker da confrontare",
         "IE00B4L5Y983, SPY, QQQ",
@@ -72,10 +74,12 @@ def render_etf_comparison_ui():
 
     if HAS_PLOTLY:
         fig = go.Figure()
+
         for ticker, series in data.items():
             if series is not None and not series.empty:
                 pct_series = to_percent_index(series)
                 fig.add_trace(go.Scatter(x=pct_series.index, y=pct_series.values, mode='lines', name=ticker))
+
         fig.update_layout(
             title=f"Andamento Confrontato degli Asset ({selected_period_label})",
             yaxis_title="Performance (%)",
@@ -83,7 +87,8 @@ def render_etf_comparison_ui():
             hovermode='x unified',
             height=500
         )
-        st.plotly_chart(fig,width="stretch", key="comparison_chart")
+
+        st.plotly_chart(fig, use_container_width=True, key="comparison_chart")
     else:
         chart_data = pd.DataFrame({
             ticker: to_percent_index(series)

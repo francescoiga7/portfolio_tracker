@@ -30,6 +30,5 @@ def to_percent_index(s: pd.Series) -> pd.Series:
         return s
     base = s.iloc[0]
     if base == 0:
-        # Evita divisione per zero: restituisce la serie originale
         return s
     return (s / base - 1.0) * 100.0

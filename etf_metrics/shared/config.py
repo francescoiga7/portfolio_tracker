@@ -8,7 +8,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Preferenze per i suffissi dei ticker Yahoo
-PREFERRED_SUFFIXES = [".MI", ".DE", ".AS", ".L", ""]
+PREFERRED_SUFFIXES = [".DE", ".MI", ".AS", ".L", ""]
 
 # Mappatura manuale ISIN -> ticker candidati
 MANUAL_ISIN_MAP: Dict[str, List[str]] = {
@@ -91,11 +91,13 @@ themes_sectors = [
     "Technology", "Healthcare", "Financials", "Energy", "Clean Energy", "AI & Robotics", "Cybersecurity",
     "Digitalisation", "Water", "Uranium", "Nuclear", "Defense", "Infrastructure", "Semiconductors",
     "Biotechnology", "Automation", "ESG", "SRI", "Climate", "Megatrends", "Megatrend Equal Weight",
-    "Aerospace", "Quantum Computing", "Innovation", "Artificial Intelligence & Robotics"
+    "Aerospace", "Quantum Computing", "Innovation", "Artificial Intelligence & Robotics",
+    "Active ETF", "Disruptive Innovation", "Genomics", "Space Exploration", "Metaverse", "Fintech",
+    "Future of Food", "Next Generation Internet", "E-commerce", "Gaming & Esports"
 ]
 factors = ["Value", "Growth", "Momentum", "Quality", "Minimum Volatility", "Size"]
 providers = ["iShares", "Xtrackers", "Amundi", "Lyxor", "Invesco", "VanEck", "Vanguard", "SPDR", "HANetf", "ARK", "JPMorgan"]
-specific_commodities = ["Gold ETC", "Silver ETC", "Oil ETC", "Bitcoin ETP", "Ethereum ETP"]
+specific_commodities = ["Gold ETC", "Silver ETC", "Oil ETC", "Bitcoin ETP", "Ethereum ETP", "Crypto ETP"]
 
 # Generazione delle query a matrice
 generated_queries = set()
@@ -149,3 +151,16 @@ FAMOUS_PORTFOLIOS = {
         "VIOV": 0.20
     }
 }
+
+TACTICAL_TRADING_SEED_QUERIES: Tuple[str, ...] = (
+    # Indici principali (per ETF)
+    "MSCI World UCITS ETF", "S&P 500 UCITS ETF", "NASDAQ 100 UCITS ETF", "STOXX 600 UCITS ETF",
+    # Azioni ad alta capitalizzazione e popolari in Europa
+    "DAX 40 stocks", "CAC 40 stocks", "AEX stocks",
+    # Titoli Growth e Tech popolari su Trade Republic
+    "popular tech stocks NASDAQ", "high growth stocks NYSE", "trending fintech stocks",
+    # Query generiche per scoprire titoli caldi
+    "most active stocks XETRA", # Borsa di Francoforte
+    "top performing stocks Borsa Italiana", # Borsa di Milano
+    "breakout stocks USA",
+)

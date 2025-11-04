@@ -11,7 +11,7 @@ try:
 except Exception:
     HAS_PLOTLY = False
 
-from .metrics import compute_metrics_from_series, compute_sharpe_ratio
+from etf_metrics.core.metrics import compute_metrics_from_series, compute_sharpe_ratio
 
 
 def style_pnl_columns(val):
@@ -26,13 +26,13 @@ def style_trend_signal(val: str) -> str:
     """Applica uno stile colorato alla colonna dei segnali di trend."""
     val_lower = val.lower()
     if "mantieni" in val_lower:
-        return 'background-color: #28a745; color: white; font-weight: bold;'
+        return 'background-color: #28a745; color: white; font-weight: bold;' # Verde per Mantieni
     elif "monitora" in val_lower:
-        return 'background-color: #ffc107; color: black; font-weight: bold;'
-    elif "vendita" in val_lower:
-        return 'background-color: #dc3545; color: white; font-weight: bold;'
-    return ''
-
+        return 'background-color: #ffc107; color: black; font-weight: bold;' # Giallo per Monitora
+    # Modificato per includere tutti i segnali che iniziano con "Vendi"
+    elif val_lower.startswith("vendi"):
+        return 'background-color: #dc3545; color: white; font-weight: bold;' # Rosso per Vendi
+    return '' # Default
 
 def format_dataframe(df: pd.DataFrame, column_config: Dict, pnl_cols: List[str] = [], bar_cols: List[str] = [],
                      trend_cols: List[str] = []):
@@ -84,8 +84,12 @@ def _render_allocation_pie(labels: List[str], values: List[float], title: str, k
         )
         fig.update_layout(title_text=title, margin=dict(t=50, b=10, l=10, r=10),
                           legend=dict(orientation="h", yanchor="bottom", y=-0.4))
-        st.plotly_chart(fig,width="stretch", key=key)
 
+        st.plotly_chart(
+            fig,
+            width="stretch",
+            key="comparison_chart"
+        )
 
 def _display_backtest_results(all_series: Dict[str, pd.Series], rf_ann: float, key_prefix="backtest"):
     if not all_series:
@@ -124,7 +128,7 @@ def _display_backtest_results(all_series: Dict[str, pd.Series], rf_ann: float, k
 
 
 def render_portfolio_tracker_ui():
-    from .portfolio_tracker import PortfolioTracker
+    from etf_metrics.core.portfolio_tracker import PortfolioTracker
     PortfolioTracker.init_session_from_json_once(filename="saved_portfolio.json")
 
     st.title("💼 Portfolio Tracker")
@@ -140,7 +144,7 @@ def render_portfolio_tracker_ui():
         - **Consultare lo storico delle transazioni** e il cassetto fiscale con il P&L realizzato.
         """)
 
-    st.sidebar.header("📂 Gestione Portafogli")
+    st.sidebar.header("⚙️ Impostazioni")
     saved_portfolios = PortfolioTracker.get_saved_portfolio_names()
     current_portfolio_name = st.session_state.get("current_portfolio_name", "")
     with st.sidebar.expander("Carica o Crea Portafoglio", expanded=not current_portfolio_name):
@@ -171,9 +175,11 @@ def render_portfolio_tracker_ui():
                 qty = st.number_input("Quantità", min_value=0.000001, step=0.0001, format="%.6f")
                 price = st.number_input(f"Prezzo {trans_type} (€)", min_value=0.01, step=0.01, format="%.2f")
                 date = st.date_input(f"Data {trans_type}", datetime.now().date())
+                is_satellite = st.checkbox("Satellite?", key=f"satellite_flag_{form_key}")
                 if st.form_submit_button(f"Registra {trans_type}"):
                     trans_data = {"type": "buy" if trans_type == "Acquisto" else "sell", "isin": isin.strip().upper(),
-                                  "quantity": qty, "price": price, "date": date}
+                                  "quantity": qty, "price": price, "date": date,
+                                  "satellite": is_satellite if trans_type == "Acquisto" else False}
                     PortfolioTracker.add_transaction_to_portfolio(current_portfolio_name, trans_data)
                     st.rerun()
         with st.sidebar.expander("⚙️ Impostazioni Fiscali"):

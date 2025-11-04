@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
-from .portfolio_backtester import parse_portfolio_input, get_all_portfolios_for_backtest
-from .config import FAMOUS_PORTFOLIOS
-from .ui_portfolio_tracker_app import _display_backtest_results
-from .portfolio_tracker import PortfolioTracker
+from etf_metrics.core.portfolio_backtester import parse_portfolio_input, get_all_portfolios_for_backtest
+from etf_metrics.shared.config import FAMOUS_PORTFOLIOS
+from etf_metrics.ui.portfolio_tracker import _display_backtest_results
+from etf_metrics.core.portfolio_tracker import PortfolioTracker
 
 
 def get_weights_from_portfolio(portfolio_name: str) -> str:
@@ -31,7 +31,7 @@ def get_weights_from_portfolio(portfolio_name: str) -> str:
 
 
 def render_portfolio_backtester_ui():
-    st.title("🔙 Portfolio Backtester")
+    st.title("⏳ Portfolio Backtester")
     st.caption("Simula e confronta le performance di portafogli personalizzati nel tempo.")
 
     with st.expander("📖 Metodologia e Funzionamento"):
@@ -44,7 +44,7 @@ def render_portfolio_backtester_ui():
         - **Eseguire il backtest** e visualizzare i risultati.
         """)
 
-    st.sidebar.header("⚙️ Impostazioni Backtest")
+    st.sidebar.header("⚙️ Impostazioni")
 
     strategy = st.sidebar.selectbox("Strategia di Investimento", ["Lump Sum (PIC)", "PAC"])
 
@@ -95,7 +95,7 @@ def render_portfolio_backtester_ui():
         default=(["Classic 60/40"] if "Classic 60/40" in famous_all else [])
     )
 
-    rf_ann_backtest = st.sidebar.number_input("Risk-free annuo (%) per Sharpe", min_value=-5.0, max_value=10.0,
+    rf_ann_backtest = st.sidebar.number_input("Risk-free annuo (%)", min_value=-5.0, max_value=10.0,
                                               value=3.95, step=0.25)
 
     if st.sidebar.button("▶️ Esegui Backtest"):

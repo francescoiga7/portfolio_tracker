@@ -126,17 +126,13 @@ class DataValidator:
 
         if value is None:
             return None
-        # Normalizza spazi/simboli; preserva il segno
         cleaned = re.sub(r'[^\d.,\-]', '', str(value).replace('\xa0', ' ').strip())
-        # Gestione formati EU/US
         if ',' in cleaned and '.' in cleaned:
-            # Se ci sono virgola e punto, considera separatore decimale quello che appare per ultimo
             if cleaned.rfind(',') > cleaned.rfind('.'):
                 cleaned = cleaned.replace('.', '').replace(',', '.')
             else:
                 cleaned = cleaned.replace(',', '')
         elif ',' in cleaned:
-            # Solo virgole: decimale se la parte finale ha <=2 cifre, altrimenti migliaia
             if len(cleaned.split(',')[-1]) <= 2:
                 cleaned = cleaned.replace(',', '.')
             else:

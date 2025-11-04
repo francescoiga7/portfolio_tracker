@@ -10,11 +10,11 @@ try:
 except Exception:
     HAS_PLOTLY = False
 
-from .config import PERIODS_ALL
-from .pipeline import compute_etf_over_periods
-from .utils import to_percent_index
-from .yahoo_client import get_series
-from .metrics import get_trading_signal
+from etf_metrics.shared.config import PERIODS_ALL
+from etf_metrics.core.pipeline import compute_etf_over_periods
+from etf_metrics.shared.utils import to_percent_index
+from etf_metrics.clients.yahoo_client import get_series
+from etf_metrics.core.metrics import get_trading_signal
 
 PERIOD_MAP_LABEL_TO_YF = {
     "1M": "1mo", "3M": "3mo", "6M": "6mo", "YTD": "ytd",
@@ -23,7 +23,7 @@ PERIOD_MAP_LABEL_TO_YF = {
 
 
 def render_single_etf_ui():
-    st.title("Analisi Singolo ETF")
+    st.title("🔎 Analisi ETF")
     st.caption("Analizza le performance e le metriche di rischio di un singolo ETF.")
 
     with st.expander("📖 Metodologia e Funzionamento"):
@@ -36,8 +36,8 @@ def render_single_etf_ui():
         - **Confrontare la performance** dell'ETF con il suo benchmark.
         """)
 
-    st.sidebar.header("Impostazioni Analisi")
-    isin = st.sidebar.text_input("ISIN", value="IE00BK5BQT80").strip().upper()
+    st.sidebar.header("⚙️ Impostazioni")
+    isin = st.sidebar.text_input("ISIN o Ticker", value="IE00BK5BQT80").strip().upper()
     bench_override = st.sidebar.text_input("Override Benchmark (Ticker Yahoo)", "").strip() or None
     rf_ann = st.sidebar.number_input("Risk-free annuo (%)", -5.0, 10.0, 3.95, 0.25)
 
@@ -105,19 +105,23 @@ def display_single_etf_results():
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Rendimento Totale", f"{row.get('total_return_pct', 0):.2f}%")
-        c2.metric("CAGR", f"{row.get('cagr_pct', 0):.2f}%")
-        c3.metric("Volatilità Ann.", f"{row.get('vol_ann_pct', 0):.2f}%")
-        c4.metric("Max Drawdown", f"{row.get('mdd_pct', 0):.2f}%")
+        c2.metric("CAGR", f"{row.get('cagr_pct', 0):.2f}%",
+                  help="Il Compound Annual Growth Rate (CAGR) è il tasso di rendimento annuale composto su un periodo specificato.")
+        c3.metric("Volatilità Ann.", f"{row.get('vol_ann_pct', 0):.2f}%",
+                  help="Misura della deviazione standard annualizzata dei rendimenti. Indica quanto il prezzo dell'asset fluttua attorno alla sua media.")
+        c4.metric("Max Drawdown", f"{row.get('mdd_pct', 0):.2f}%",
+                  help="La massima perdita percentuale da un picco al successivo minimo durante il periodo. Misura il rischio di ribasso.")
 
         st.markdown("---")
         c5, c6, c7, c8 = st.columns(4)
-        c5.metric("Sharpe Ratio", f"{row.get('sharpe_ratio', 0):.2f}")
+        c5.metric("Sharpe Ratio", f"{row.get('sharpe_ratio', 0):.2f}",
+                  help="Misura il rendimento corretto per il rischio. Un valore più alto indica una migliore performance a parità di rischio (volatilità).")
         c6.metric("Sortino Ratio", f"{row.get('sortino_ratio', 0):.2f}",
-                  help="Simile allo Sharpe, ma considera solo la volatilità negativa. Più alto è, meglio è.")
+                  help="Simile allo Sharpe, ma considera solo la volatilità negativa (deviazione dei rendimenti al di sotto di un target). Più alto è, meglio è.")
         c7.metric("Omega Ratio", f"{row.get('omega_ratio', 0):.2f}",
                   help="Rapporto tra probabilità di guadagni e perdite. Valori > 1 indicano un profilo favorevole.")
         c8.metric("VaR 95% (1 giorno)", f"{row.get('var_95_1d_pct', 0):.2f}%",
-                  help="Massima perdita attesa in 1 giorno con il 95% di confidenza.")
+                  help="Massima perdita attesa in 1 giorno con il 95% di confidenza, basata sui dati storici.")
 
     st.subheader(f"📈 Grafico Performance - {selected_period_label}")
     frame = aligned_frames.get(selected_period)

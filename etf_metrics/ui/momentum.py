@@ -4,23 +4,42 @@ import pandas as pd
 import streamlit as st
 from datetime import date
 
-from .momentum import fetch_momentum_data, process_momentum_rankings
+from etf_metrics.core.momentum import fetch_momentum_data, process_momentum_rankings
 
 
 def render_momentum_ui():
-    st.title("Verifica Momentum Corretto per il Rischio")
+    st.title("⚡ Verifica Momentum")
     st.caption("Analizza il momentum di un elenco di ETF, correggendolo per il rischio.")
 
-    with st.expander("📖 Metodologia e Funzionamento"):
+    with st.expander("📖 Metodologia: Momentum Corretto per il Rischio"):
         st.markdown("""
-        Questa sezione ti permette di analizzare il momentum di un elenco di ETF, correggendolo per il rischio. Puoi:
-        - **Inserire un elenco di ISIN** da confrontare.
-        - **Impostare il periodo di lookback** per il calcolo delle metriche.
-        - **Impostare il tasso risk-free** per il calcolo dello Sharpe Ratio.
-        - **Visualizzare la classifica** degli ETF per Sharpe Ratio.
-        """)
+        Questa sezione esegue un'analisi quantitativa per classificare gli asset (ETF) non solo in base al loro rendimento passato (Momentum), ma anche in base alla qualità di quel rendimento (rischio).
 
-    st.sidebar.header("Impostazioni Momentum")
+        ### 1. Il Concetto di Momentum
+        Il Momentum è un'anomalia di mercato ampiamente studiata che suggerisce che gli asset con performance recenti (es. 3-12 mesi) superiore tendono a continuare a sovraperformare. **Il Momentum Assoluto** è semplicemente il **Rendimento Annualizzato (CAGR)** calcolato sul periodo di *lookback* selezionato.
+
+        ### 2. La Correzione per il Rischio (Sharpe Ratio)
+        Un alto rendimento non è sempre "buono" se è ottenuto assumendo un rischio eccessivo (ad esempio, tramite un'alta volatilità o forti cali). Per questo, utilizziamo lo **Sharpe Ratio**, che è la metrica centrale di questa analisi.
+        """)
+        st.markdown(r"""
+        $$
+        Sharpe \: Ratio = \frac{Rendimento_{Asset} - Tasso_{Risk-Free}}{Volatilità_{Asset}}
+        $$
+        """)
+        st.markdown("""
+        * **Rendimento:** Si usa il CAGR (Compound Annual Growth Rate) sull'orizzonte di lookback.
+        * **Tasso Risk-Free:** È il rendimento di un investimento "privo di rischio" (es. titoli di stato a breve termine) che imposti tu. Questo viene sottratto dal rendimento dell'asset.
+        * **Volatilità:** Misura la deviazione standard del rendimento dell'asset. Rappresenta il rischio.
+
+        **Obiettivo:** Lo Sharpe Ratio classifica gli asset in base al **maggior rendimento per unità di rischio**. Un ETF con un Momentum leggermente inferiore ma una volatilità molto più bassa può classificarsi più in alto rispetto a un ETF con rendimento elevato ma turbolento.
+
+        ### 3. Filtri e Parametri
+
+        * **Periodo di Lookback:** Definisce l'orizzonte temporale (in mesi) utilizzato per calcolare tutte le metriche (Rendimento, Volatilità, Sharpe Ratio, Max Drawdown).
+        * **Max Drawdown (MDD):** Il calo massimo subito dall'ETF nel periodo di lookback. È un'altra misura di rischio, cruciale per la gestione del capitale.
+        * **Segnale Operativo:** Basato sulla posizione del prezzo rispetto alla media mobile a lungo termine (es. 200 giorni).
+        """)
+    st.sidebar.header("⚙️ Impostazioni")
 
     with st.sidebar.expander("1. Carica l'universo di ETF", expanded=True):
         momentum_isins = st.text_area(
@@ -65,7 +84,7 @@ def render_momentum_ui():
 
         lookback = st.sidebar.slider("Periodo di lookback (mesi)", 1, 24, 6, 1)
         rf_ann_momentum = st.sidebar.number_input(
-            "Risk-free annuo (%) per Sharpe", -5.0, 10.0, 3.9, 0.25, key="rf_momentum"
+            "Risk-free annuo (%)", -5.0, 10.0, 3.9, 0.25, key="rf_momentum"
         )
 
         if enable_time_travel:

@@ -3,8 +3,8 @@ import logging
 from typing import Dict, Optional, List
 import pandas as pd
 
-from .yahoo_client import resolve_isin_one, get_series
-from .base_client import DataValidator
+from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series
+from etf_metrics.clients.base_client import DataValidator
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,6 @@ def _load_series_and_mapping(portfolio_def: Dict[str, float], period: str):
     if not all_series:
         return None, {}
 
-    # Allinea tutte le serie su un indice di date comune
     df = pd.DataFrame(all_series).dropna()
     if df.shape[0] < 2:
         logger.error("Dati storici insufficienti per costruire il portafoglio dopo l'allineamento.")
@@ -47,30 +46,25 @@ def _rebalance_portfolio(prices_df: pd.DataFrame, weights: pd.Series) -> pd.Seri
     Applica una strategia di ribilanciamento annuale.
     """
     capitals = pd.Series(0.0, index=prices_df.index)
-    capitals.iloc[0] = 1.0  # Inizia con un capitale di 1.0
+    capitals.iloc[0] = 1.0
 
     last_rebalance_year = prices_df.index[0].year
 
-    # Ritorno giornaliero dei singoli asset
     returns = prices_df.pct_change().fillna(0)
 
-    # Pesature correnti, inizializzate con i pesi target
     current_weights = weights.copy()
 
     for i in range(1, len(prices_df)):
         date = prices_df.index[i]
 
-        # Aggiorna il capitale con i ritorni del giorno precedente
         portfolio_return = (returns.iloc[i] * current_weights).sum()
         capitals.iloc[i] = capitals.iloc[i - 1] * (1 + portfolio_return)
 
-        # Aggiorna i pesi in base ai ritorni
         new_weights = current_weights * (1 + returns.iloc[i])
         current_weights = new_weights / new_weights.sum()
 
-        # Controlla se è necessario ribilanciare (inizio anno)
         if date.year > last_rebalance_year:
-            current_weights = weights.copy()  # Ripristina i pesi target
+            current_weights = weights.copy()
             last_rebalance_year = date.year
 
     return capitals
@@ -123,20 +117,15 @@ def simulate_pac_investment(
     shares = pd.DataFrame(0.0, index=df.index, columns=df.columns)
     monthly_dates = pd.date_range(start=df.index.min(), end=df.index.max(), freq="MS")
 
-    # Trova gli indici dei giorni di negoziazione effettivi corrispondenti all'inizio del mese
-    # 'side="left"' assicura di prendere il primo giorno valido ON or AFTER l'inizio del mese
     purchase_indices = df.index.searchsorted(monthly_dates, side='left')
 
-    # Rimuovi indici duplicati se più inizi di mese mappano allo stesso giorno di negoziazione
     valid_indices = [idx for idx in purchase_indices if idx < len(df.index)]
     actual_purchase_dates = df.index[valid_indices].unique()
 
     for purchase_date in actual_purchase_dates:
-        # Prezzi validi nel giorno di acquisto
         prices_on_day = df.loc[purchase_date]
         alloc = monthly_investment * weights_series
 
-        # Aggiungi le quote acquistate nel giorno di negoziazione corretto
         shares.loc[purchase_date] += alloc.div(prices_on_day).fillna(0)
 
     cumulative_shares = shares.cumsum()
@@ -190,30 +179,40 @@ def get_all_portfolios_for_backtest(
         monthly_investment: float = 500,
         rebalancing: str = 'mai'
 ) -> Dict[str, pd.Series]:
-    """Prepara le serie storiche per tutti i portafogli da confrontare."""
+    """
+    Prepara le serie storiche per tutti i portafogli da confrontare,
+    allineando la data di inizio a quella del portafoglio utente.
+    """
     all_series_dict: Dict[str, pd.Series] = {}
+    user_series = None
+    start_date = None
 
-    # Valore fisso per l'investimento iniziale dei portafogli modello (per confronto)
-    famous_initial_investment = 10000
-
-    # 1) Simulazione del portafoglio utente
     if strategy == "lump_sum_(pic)":
         user_series_norm = get_portfolio_series(user_portfolio_def, rebalancing=rebalancing)
-        if user_series_norm is not None:
-            # Usa l'investimento iniziale definito dall'utente per il suo portafoglio
+        if user_series_norm is not None and not user_series_norm.empty:
             user_series = user_series_norm * initial_investment
             all_series_dict["Il Tuo Portafoglio"] = user_series
-    else:  # PAC
+            start_date = user_series.index.min()
+    else:
         user_series = simulate_pac_investment(user_portfolio_def, monthly_investment)
-        if user_series is not None:
+        if user_series is not None and not user_series.empty:
             all_series_dict["Il Tuo Portafoglio (PAC)"] = user_series
+            start_date = user_series.index.min()
 
-    # 2) Simulazione dei portafogli "famosi" (sempre in modalità Lump Sum per confronto)
+    famous_initial_investment = 10000
+
     for name in famous_portfolios_to_compare:
         if name in config:
-            famous_series_norm = get_portfolio_series(config[name], rebalancing=rebalancing)
-            if famous_series_norm is not None:
-                # Usa un investimento iniziale fisso per i portafogli modello
-                all_series_dict[name] = famous_series_norm * famous_initial_investment
+            famous_series_full = get_portfolio_series(config[name], rebalancing=rebalancing)
+
+            if famous_series_full is not None and not famous_series_full.empty:
+                if start_date:
+                    famous_series_aligned = famous_series_full[famous_series_full.index >= start_date]
+                else:
+                    famous_series_aligned = famous_series_full
+
+                if not famous_series_aligned.empty:
+                    renormalized_series = (famous_series_aligned / famous_series_aligned.iloc[0])
+                    all_series_dict[name] = renormalized_series * famous_initial_investment
 
     return all_series_dict

@@ -1,36 +1,60 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
 from datetime import date
-from .pac_screener import fetch_screener_data, process_screener_rankings, get_market_regime
+from etf_metrics.core.pac_screener import fetch_screener_data, process_screener_rankings, get_market_regime
 import pandas as pd
 
 
 def render_pac_screener_ui():
     """Renderizza la UI per il Screener Tattico con logica di caching avanzata."""
-    st.title("🎯 Screener ETF Tattico")
+    st.title("🎯 Screener ETF")
     st.caption("Scopri ETP con potenziale di breakout quotati sulle principali borse europee.")
 
-    # Inizializza il log di debug nella sessione se non esiste
     if 'debug_log_loading' not in st.session_state:
         st.session_state.debug_log_loading = []
     if 'debug_log_processing' not in st.session_state:
         st.session_state.debug_log_processing = []
 
-    with st.expander("📖 Leggi la Metodologia"):
+    with st.expander("📖 Metodologia e Analisi Quantitativa (Approccio Multi-Fattore)"):
         st.markdown("""
-           Questo screener è ottimizzato per la parte **satellite** di un portafoglio e utilizza un approccio multi-fattore per identificare ETP con alto potenziale a breve-medio termine.
+              Questo screener è progettato per la parte **satellite (tattica)** di un portafoglio. Utilizza un approccio **multi-fattore** per identificare ETP (Exchange Traded Products) che mostrano contemporaneamente forte **Momentum**, **Qualità del Trend** e **Potenziale di Breakout** in regimi di mercato favorevoli.
 
-           **1. Contesto di Mercato (Filtro VIX):** Lo screener opera solo in regimi di mercato favorevoli al rischio (VIX < 20).
-           **2. Filtro di Liquidità:** Vengono considerati solo ETP con un volume medio giornaliero scambiato superiore alla soglia impostata.
-           **3. Filtro di Momentum Assoluto:** Vengono considerati solo ETP con performance a 6 e 12 mesi positiva.
-           **4. Punteggio Composito:** Basato su Momentum, Qualità del Trend (Calmar Ratio), Compressione di Volatilità e Bassa Volatilità.
+              ---
 
-           *Questo screener non costituisce una raccomandazione di investimento.*
-           """)
+              ### 1. Filtri Preliminari
 
-    st.sidebar.header("⚙️ Parametri Screener")
+              * **Contesto di Mercato (Filtro VIX):** L'analisi viene eseguita solo quando il mercato è in un regime **"Favorevole al Rischio"** (VIX < 20 o soglia dinamica). Questo riduce il rischio di acquistare durante crolli di panico, focalizzando la ricerca su fasi di espansione o stabilità.
+              * **Filtro di Liquidità:** Vengono considerati solo ETP con un **Valore Medio Giornaliero Scambiato** superiore alla soglia impostata. L'alta liquidità garantisce che l'ETP sia facile da acquistare e vendere, riducendo i costi impliciti di transazione (spread bid-ask).
 
-    # --- Sezione 1: Caricamento Dati ---
+              ### 2. Analisi Quantitative e Fattori di Ranking
+
+              Lo screener calcola metriche quantitative per assegnare un punteggio a ciascun ETP. Vengono analizzati i seguenti fattori:
+
+              | Fattore di Punteggio | Metrica Quantitativa | Importanza nell'Algoritmo |
+              | :--- | :--- | :--- |
+              | **Momentum Assoluto** | Performance a 6 e 12 Mesi (ROC - Rate of Change) | Individua ETP che hanno sovraperformato il mercato, coerente con l'anomalia di Momentum. |
+              | **Qualità del Trend** | Calmar Ratio (12 Mesi) | Misura l'efficienza dei rendimenti rispetto al *Massimo Drawdown* (MDD). Un trend di alta qualità offre rendimenti consistenti con basse flessioni. |
+              | **Breakout/Compressione** | Volatilità di Breve Termine vs. Lungo Termine | Identifica situazioni di **volatilità compressa**, dove l'ETP sta consolidando. Una bassa volatilità recente (es. 20 giorni) rispetto a quella storica può segnalare un imminente movimento direzionale (breakout). |
+              | **Bassa Volatilità Relativa** | Volatilità a 6 Mesi | In combinazione con gli altri fattori, premia gli ETP che hanno ottenuto Momentum con minore *stress* di prezzo, un elemento tipico delle strategie "low-vol". |
+
+              ---
+
+              ### 3. Punteggio Composito e Pesi
+
+              Il **Punteggio Finale** è una media pesata dei singoli punteggi. Questo garantisce che l'ETP non sia classificato solo in base al Momentum, ma anche in base alla sostenibilità e al potenziale.
+
+              * **Formula:** $Punteggio \: Finale = \sum (Score_{Fattore} \times Peso_{Fattore})$
+
+              I pesi attuali assegnati sono (per scopi illustrativi):
+              * **Momentum Score:** ${ALGORITHM\_WEIGHTS['Momentum Score'] * 100}\%$ (Priorità)
+              * **Trend Quality Score (Calmar):** ${ALGORITHM\_WEIGHTS['Trend Quality Score (Calmar)'] * 100}\%$
+              * **Breakout Score:** ${ALGORITHM\_WEIGHTS['Breakout Score (Volatilità Compressa)'] * 100}\%$
+              * **Low Volatility Score:** ${ALGORITHM\_WEIGHTS['Low Volatility Score'] * 100}\%$
+
+              """)
+
+    st.sidebar.header("⚙️ Impostazioni")
+
     with st.sidebar.expander("1. Carica Universo Dati", expanded=True):
 
         source_mode = st.radio("Modalità di Ricerca", ["Scoperta Automatica Universo", "Inserisci ISIN Specifici"])
@@ -55,7 +79,6 @@ def render_pac_screener_ui():
             )
             st.session_state.debug_log_loading.extend(log_list_for_fetching)
 
-    # --- Sezione 2: Analisi Interattiva ---
     if 'pac_screener_raw_data' in st.session_state and st.session_state.pac_screener_raw_data:
         st.sidebar.header("2. Filtri e Time Travel")
 
