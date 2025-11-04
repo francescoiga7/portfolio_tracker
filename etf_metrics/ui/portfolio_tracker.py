@@ -87,7 +87,7 @@ def _render_allocation_pie(labels: List[str], values: List[float], title: str, k
 
         st.plotly_chart(
             fig,
-            use_container_width=True,
+            width="stretch",
             key="comparison_chart"
         )
 
