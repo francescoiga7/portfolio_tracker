@@ -101,6 +101,7 @@ def simulate_pac_investment(
         portfolio_def: Dict[str, float],
         monthly_investment: float,
         period: str = "max",
+        start_date: Optional[pd.Timestamp] = None
 ) -> Optional[pd.Series]:
     """
     Simula un Piano di Accumulo (PAC).
@@ -115,7 +116,12 @@ def simulate_pac_investment(
     weights_series /= weights_series.sum()
 
     shares = pd.DataFrame(0.0, index=df.index, columns=df.columns)
-    monthly_dates = pd.date_range(start=df.index.min(), end=df.index.max(), freq="MS")
+
+    simulation_start_date = df.index.min()
+    if start_date is not None:
+        simulation_start_date = max(simulation_start_date, pd.to_datetime(start_date))
+
+    monthly_dates = pd.date_range(start=simulation_start_date, end=df.index.max(), freq="MS")
 
     purchase_indices = df.index.searchsorted(monthly_dates, side='left')
 
@@ -130,6 +136,8 @@ def simulate_pac_investment(
 
     cumulative_shares = shares.cumsum()
     portfolio_values = (cumulative_shares * df).sum(axis=1)
+
+    portfolio_values = portfolio_values[portfolio_values.index >= simulation_start_date]
 
     portfolio_values.name = "Portfolio PAC"
     return portfolio_values
@@ -199,20 +207,36 @@ def get_all_portfolios_for_backtest(
             all_series_dict["Il Tuo Portafoglio (PAC)"] = user_series
             start_date = user_series.index.min()
 
-    famous_initial_investment = 10000
-
     for name in famous_portfolios_to_compare:
         if name in config:
-            famous_series_full = get_portfolio_series(config[name], rebalancing=rebalancing)
+            famous_series_full = None
+            series_to_add = None
+            series_name = name
 
-            if famous_series_full is not None and not famous_series_full.empty:
-                if start_date:
-                    famous_series_aligned = famous_series_full[famous_series_full.index >= start_date]
-                else:
+            if strategy == "lump_sum_(pic)":
+                famous_series_full = get_portfolio_series(config[name], rebalancing=rebalancing)
+
+                if famous_series_full is not None and not famous_series_full.empty:
                     famous_series_aligned = famous_series_full
+                    if start_date:
+                        famous_series_aligned = famous_series_full[famous_series_full.index >= start_date]
 
-                if not famous_series_aligned.empty:
-                    renormalized_series = (famous_series_aligned / famous_series_aligned.iloc[0])
-                    all_series_dict[name] = renormalized_series * famous_initial_investment
+                    if not famous_series_aligned.empty:
+                        renormalized_series = (famous_series_aligned / famous_series_aligned.iloc[0])
+                        series_to_add = renormalized_series * initial_investment
+
+            else:
+                series_name = f"{name} (PAC)"
+                famous_series_full = simulate_pac_investment(
+                    config[name],
+                    monthly_investment,
+                    start_date=start_date
+                )
+
+                if famous_series_full is not None and not famous_series_full.empty:
+                    series_to_add = famous_series_full
+
+            if series_to_add is not None and not series_to_add.empty:
+                all_series_dict[series_name] = series_to_add
 
     return all_series_dict
