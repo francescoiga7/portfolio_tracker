@@ -129,4 +129,4 @@ def render_momentum_ui():
         else:
             st.warning(f"Nessun ETF con dati sufficienti per il lookback di {lookback} mesi alla data selezionata.")
     else:
-        st.info("Inserisci gli ISIN e premi 'Carica Dati Storici' per iniziare.")
+        st.info("👈 Inserisci gli ISIN e premi 'Carica Dati Storici' per iniziare.")

@@ -57,7 +57,7 @@ def render_etf_comparison_ui():
     tickers = list(set(tickers_to_compare))
 
     if not tickers:
-        st.info("Aggiungi ISIN o Ticker validi nella sidebar per avviare il confronto.")
+        st.info("👈 Aggiungi ISIN o Ticker validi nella sidebar per avviare il confronto.")
         return
 
     st.subheader("Grafico di Performance Normalizzato")

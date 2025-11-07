@@ -8,7 +8,6 @@ from etf_metrics.ui.portfolio_tracker import render_portfolio_tracker_ui
 from etf_metrics.ui.portfolio_backtester import render_portfolio_backtester_ui
 from .comparison import render_etf_comparison_ui
 from etf_metrics.ui.pac_screener import render_pac_screener_ui
-from etf_metrics.ui.trading import render_trading_ui
 
 
 def init_session_state():
@@ -58,8 +57,6 @@ def run_app():
         render_pac_screener_ui()
     elif app_mode == "⚡ Verifica Momentum":
         render_momentum_ui()
-    elif app_mode == "💹 Trading":
-        render_trading_ui()
 
 if __name__ == '__main__':
     run_app()
