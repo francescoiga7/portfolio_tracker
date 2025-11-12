@@ -88,7 +88,7 @@ def render_etf_comparison_ui():
             height=500
         )
 
-        st.plotly_chart(fig, use_container_width=True, key="comparison_chart")
+        st.plotly_chart(fig, width="stretch", key="comparison_chart")
     else:
         chart_data = pd.DataFrame({
             ticker: to_percent_index(series)
