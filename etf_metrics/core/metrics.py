@@ -192,6 +192,9 @@ def calculate_technical_indicators(series: pd.Series) -> Dict[str, float]:
 
 
 def get_trading_signal(series: pd.Series) -> Dict[str, str]:
+    """
+    Genera segnali operativi inclusi scenari Short/Vendita.
+    """
     if series is None or len(series) < 200:
         return {"signal": "Dati Insufficienti", "reason": "Servono almeno 200 giorni di storico."}
 
@@ -200,20 +203,49 @@ def get_trading_signal(series: pd.Series) -> Dict[str, str]:
     sma50, sma200, rsi = indicators.get('sma50'), indicators.get('sma200'), indicators.get('rsi')
 
     if any(v is None or np.isnan(v) for v in [sma50, sma200, rsi]):
-        return {"signal": "Non Disponibile", "reason": "Impossibile calcolare indicatori."}
+        return {"signal": "Non Disponibile", "reason": "Impossibile calcolare indicatori tecnici."}
 
     is_uptrend = sma50 > sma200
     is_price_above_sma50 = current_price > sma50
+    is_price_above_sma200 = current_price > sma200
 
     if is_uptrend and is_price_above_sma50 and rsi < 70:
-        return {"signal": "Compra Ora",
-                "reason": "Trend rialzista (SMA50>SMA200), prezzo sopra SMA50 e non in ipercomprato."}
-    elif not is_uptrend and not is_price_above_sma50:
-        return {"signal": "Vendi Ora", "reason": "Incrocio ribassista (SMA50<SMA200) e prezzo sotto SMA50."}
+        return {
+            "signal": "Compra (Trend Follow)",
+            "reason": "Trend rialzista solido (Prezzo > SMA50 > SMA200) e RSI non in eccesso."
+        }
 
-    reason = f"Trend: {'Positivo' if is_uptrend else 'Negativo'}. RSI: {'Ipercomprato' if rsi >= 70 else 'Ipervenduto' if rsi <= 30 else 'Neutrale'}."
-    return {"signal": "Mantieni/Monitora", "reason": reason}
+    if is_uptrend and not is_price_above_sma50 and rsi < 40:
+        return {
+            "signal": "Compra (Dip)",
+            "reason": "Il prezzo ha ritracciato in un trend rialzista (Oversold). Possibile rimbalzo."
+        }
 
+    if not is_uptrend and not is_price_above_sma200:
+        return {
+            "signal": "Vendi / Short (Trend Ribassista)",
+            "reason": "Trend negativo confermato (SMA50 < SMA200) e prezzo sotto la media a 200 giorni."
+        }
+
+    if rsi > 75:
+        return {
+            "signal": "Vendi / Short (Ipercomprato)",
+            "reason": f"RSI estremo ({rsi:.1f}). Probabilità statistica di correzione o pullback imminente."
+        }
+
+    if is_uptrend and current_price < sma50 and current_price > sma200:
+        return {
+            "signal": "Chiudi Long / Attenzione",
+            "reason": "Il prezzo ha rotto al ribasso la SMA50. Il momentum rialzista si sta indebolendo."
+        }
+
+    trend_status = "Positivo" if is_uptrend else "Negativo"
+    rsi_status = "Alto" if rsi >= 60 else "Basso" if rsi <= 40 else "Neutrale"
+
+    return {
+        "signal": "Mantieni / Laterale",
+        "reason": f"Nessun segnale direzionale chiaro. Trend: {trend_status}. RSI: {rsi_status} ({rsi:.1f})."
+    }
 
 def get_trend_signal(series: pd.Series) -> str:
     """

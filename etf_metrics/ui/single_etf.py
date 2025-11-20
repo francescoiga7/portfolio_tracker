@@ -63,7 +63,6 @@ def render_single_etf_ui():
 def _cached_compute(isin_: str, periods_: Tuple[str, ...], bench_override_: Optional[str], rf_ann_: float):
     return compute_etf_over_periods(isin_, list(periods_), bench_override_, rf_ann_)
 
-
 def display_single_etf_results():
     info_out, rows, aligned_frames = st.session_state.data_out
     etf_ticker = info_out.get("yahoo_symbol")
@@ -72,14 +71,19 @@ def display_single_etf_results():
         full_series = get_series(etf_ticker, "2y")
         signal_info = get_trading_signal(full_series) if full_series is not None and not full_series.empty else {}
         signal, reason = signal_info.get("signal", "N/A"), signal_info.get("reason", "")
-        if "Compra" in signal:
-            st.success(f"**Segnale Operativo: {signal}** - *{reason}*")
-        elif "Vendi" in signal:
-            st.error(f"**Segnale Operativo: {signal}** - *{reason}*")
-        else:
-            st.info(f"**Segnale Operativo: {signal}** - *{reason}*")
-    st.markdown("---")
 
+        signal_lower = signal.lower()
+
+        if "compra" in signal_lower:
+            st.success(f"**Segnale Operativo: {signal}**\n\n*{reason}*")
+        elif "vendi" in signal_lower or "short" in signal_lower:
+            st.error(f"**Segnale Operativo: {signal}**\n\n*{reason}*")
+        elif "chiudi" in signal_lower or "attenzione" in signal_lower:
+            st.warning(f"**Segnale Operativo: {signal}**\n\n*{reason}*")
+        else:
+            st.info(f"**Segnale Operativo: {signal}**\n\n*{reason}*")
+
+    st.markdown("---")
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("ISIN", info_out.get("isin", "n.d."))

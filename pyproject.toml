@@ -20,9 +20,12 @@ beautifulsoup4 = "*"
 matplotlib = "*"
 scipy = "*"
 pyarrow = "*"
+huggingface_hub = "*"
+poetry = "*"
+certifi = "^2025.11.12"
 
 [tool.poetry.group.dev.dependencies]
-poe-the-poet = "*"
+poethepoet = "*"
 black = "*"
 pytest = "*"
 
