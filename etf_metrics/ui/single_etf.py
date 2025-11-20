@@ -56,7 +56,7 @@ def render_single_etf_ui():
     if 'data_out' in st.session_state and st.session_state.data_out:
         display_single_etf_results()
     else:
-        st.info("Inserisci un ISIN e premi 'Analizza ETF'.")
+        st.info("👈 Inserisci un ISIN e premi 'Analizza ETF'.")
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
