@@ -3,9 +3,9 @@ import streamlit as st
 import pandas as pd
 from datetime import date
 from etf_metrics.clients.yahoo_client import get_series
-from etf_metrics.core.trading import analyze_ticker_alpha
+from etf_metrics.core.trading import analyze_ticker
+from etf_metrics.core.automated_backtest import run_market_aware_backtest
 
-# Titoli di default ad alta volatilità
 DEFAULT_TRADING_LIST = """NVDA
 TSLA
 AMD
@@ -41,7 +41,6 @@ def render_trading_ui():
 
     st.sidebar.header("⚙️ Radar Settings")
 
-    # --- SEZIONE TIME TRAVEL ---
     st.sidebar.subheader("⏳ Macchina del Tempo")
     enable_time_travel = st.sidebar.checkbox("Abilita Backtest Storico", value=False)
 
@@ -66,40 +65,29 @@ def render_trading_ui():
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        # Data di cutoff per il slicing
         cutoff_date = pd.to_datetime(analysis_date)
 
         for i, ticker in enumerate(tickers):
             status_text.text(f"Analisi {ticker} al {analysis_date}...")
 
-            # 1. SCARICO STORICO AMPIO
-            # Scarichiamo 5 anni per essere sicuri di avere dati anche se l'utente va indietro nel tempo
-            # e per calcolare correttamente la SMA200 alla data del backtest.
             full_df = get_series(ticker, period="5y", as_dataframe=True)
 
             if full_df is not None and not full_df.empty:
-                # 2. TIME TRAVEL SLICING (Il trucco è qui)
-                # Prendiamo solo i dati FINO alla data selezionata inclusa
                 df_slice = full_df[full_df.index <= cutoff_date].copy()
 
-                # Verifica: abbiamo abbastanza dati ALLA data del backtest?
-                # Servono almeno 200 giorni prima della data scelta per le medie mobili
                 if len(df_slice) > 200:
-                    # L'algoritmo analizzerà l'ultima riga di df_slice (che è la data del backtest)
-                    signal_data = analyze_ticker_alpha(ticker, df_slice)
+                    signal_data = analyze_ticker(ticker, df_slice)
 
                     if signal_data and signal_data['signal'] != "NEUTRAL":
                         results.append(signal_data)
                 else:
-                    # Se non ci sono dati sufficienti a quella data (es. titolo non ancora quotato)
-                    pass  # Ignora silenziosamente o logga
+                    pass
 
             progress_bar.progress((i + 1) / len(tickers))
 
         status_text.empty()
         progress_bar.empty()
 
-        # --- VISUALIZZAZIONE RISULTATI ---
         date_label = analysis_date.strftime('%d/%m/%Y')
         if enable_time_travel:
             st.subheader(f"📅 Risultati Storici al {date_label}")
@@ -115,35 +103,28 @@ def render_trading_ui():
 
         st.success(f"Trovate {len(results)} opportunità operative!")
 
-        # Ordina per "Confidenza"
         results.sort(key=lambda x: x['confidence'], reverse=True)
 
         for res in results:
-            # Colore dinamico in base al tipo di segnale
             signal_color = "green" if "LONG" in res['signal'] else "red"
 
             with st.container():
-                # Intestazione con Ticker e Segnale
                 st.markdown(f"### {res['ticker']} : :{signal_color}[{res['signal']}]")
                 st.caption(f"Prezzo alla data {date_label}: **{res['price']:.2f}** | Confidence: {res['confidence']}/5")
 
-                # Metriche Chiave
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Prezzo Ingresso", f"{res['price']:.2f}")
 
-                # Stop Loss e Take Profit
                 sl_delta = res['stop_loss'] - res['price']
                 tp_delta = res['take_profit'] - res['price']
 
                 c2.metric("Stop Loss (ATR)", f"{res['stop_loss']:.2f}", delta=f"{sl_delta:.2f}", delta_color="inverse")
                 c3.metric("Take Profit", f"{res['take_profit']:.2f}", delta=f"{tp_delta:.2f}", delta_color="normal")
 
-                # Indicatore RSI
                 rsi_val = res['indicators']['RSI']
                 rsi_state = "Ipercomprato" if rsi_val > 70 else "Ipervenduto" if rsi_val < 30 else "Neutrale"
                 c4.metric("RSI (14)", f"{rsi_val:.1f}", delta=rsi_state, delta_color="off")
 
-                # Spiegazione
                 with st.expander("Dettagli Strategici"):
                     st.write("**Motivazioni del Segnale:**")
                     for reason in res['reasons']:
@@ -161,3 +142,48 @@ def render_trading_ui():
             st.info(f"👈 Imposta la data storica ({analysis_date.strftime('%d/%m/%Y')}) e premi 'Scansiona'.")
         else:
             st.info("👈 Inserisci i ticker e premi 'Scansiona Mercato' per l'analisi live.")
+
+        st.markdown("---")
+        st.subheader("🤖 Backtest Strategia (Fixed Target)")
+        st.caption(
+            "Simula l'acquisto sui segnali e la vendita automatica su Stop Loss o Take Profit predefiniti (Bracket Order).")
+
+        default_backtest_list = "NVDA\nTSLA\nAMD\nCOIN\nMARA\nPLTR\nMETA\nAMZN\nNFLX\nQQQ\nTQQQ\nSQQQ"
+        backtest_tickers_txt = st.text_area("Ticker per Backtest (2025)", default_backtest_list, height=100)
+
+        if st.button("Esegui Backtest 2025"):
+            t_list = [t.strip().upper() for t in backtest_tickers_txt.split('\n') if t.strip()]
+
+            with st.spinner("Simulazione con Scaling Out & Breakeven in corso..."):
+                df_trades, final_cap = run_market_aware_backtest(t_list, start_date="2021-01-01")
+            if not df_trades.empty:
+                total_return = ((final_cap - 10000) / 10000) * 100
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Capitale Finale", f"€{final_cap:,.2f}")
+                c2.metric("Rendimento", f"{total_return:.2f}%", delta_color="normal")
+
+                closed_trades = df_trades[df_trades['Action'] == 'SELL (100%)']
+                if not closed_trades.empty:
+                    wins = len(closed_trades[closed_trades['PnL_Eur'] > 0])
+                    total_closed = len(closed_trades)
+                    win_rate = (wins / total_closed) * 100
+                    c3.metric("Win Rate", f"{win_rate:.1f}% ({wins}/{total_closed})")
+
+                st.subheader("Giornale delle Operazioni")
+
+                def style_trades(row):
+                    action = row['Action']
+                    if "BUY" in action: return ['background-color: #000000'] * len(row)
+                    if "SELL" in action:
+                        if "PROFIT" in str(row['Reason']): return ['background-color: #f0fff4; color: green'] * len(row)
+                        return ['background-color: #fff5f5; color: red'] * len(row)
+                    return [''] * len(row)
+
+                st.dataframe(
+                    df_trades.style.apply(style_trades, axis=1)
+                    .format({"Price": "{:.2f}", "PnL_Eur": "{:+.2f}", "PnL_Pct": "{:+.2f}%", "Capital": "€{:,.0f}"}),
+                    use_container_width=True
+                )
+            else:
+                st.warning("Nessun trade generato nel periodo.")

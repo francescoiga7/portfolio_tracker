@@ -8,31 +8,26 @@ def calculate_advanced_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Calcola indicatori avanzati per lo swing trading."""
     df = df.copy()
 
-    # 1. Medie Mobili
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
     df['SMA_50'] = df['Close'].rolling(window=50).mean()
     df['SMA_200'] = df['Close'].rolling(window=200).mean()
 
-    # 2. Bollinger Bands (20, 2)
     df['BB_Std'] = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['SMA_20'] + (df['BB_Std'] * 2)
     df['BB_Lower'] = df['SMA_20'] - (df['BB_Std'] * 2)
     df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['SMA_20']
 
-    # 3. RSI (14)
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # 4. MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
-    # 5. ATR (14)
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
@@ -40,13 +35,12 @@ def calculate_advanced_indicators(df: pd.DataFrame) -> pd.DataFrame:
     true_range = np.max(ranges, axis=1)
     df['ATR'] = true_range.rolling(14).mean()
 
-    # 6. Volume Moving Average (REINSERITO)
     df['Vol_SMA_20'] = df['Volume'].rolling(window=20).mean()
 
     return df
 
 
-def analyze_ticker_alpha(ticker: str, df: pd.DataFrame) -> Optional[Dict]:
+def analyze_ticker(ticker: str, df: pd.DataFrame) -> Optional[Dict]:
     """Analizza un ticker e genera un segnale di trading."""
     if df is None or len(df) < 50:
         return None
@@ -62,11 +56,9 @@ def analyze_ticker_alpha(ticker: str, df: pd.DataFrame) -> Optional[Dict]:
     atr = last['ATR'] if pd.notna(last['ATR']) else (last['Close'] * 0.02)
     price = last['Close']
 
-    # Calcolo Volume Relativo (Fondamentale per la UI)
     vol_sma = last.get('Vol_SMA_20', 0)
     vol_rel = (last['Volume'] / vol_sma) if vol_sma > 0 else 0
 
-    # --- LOGICA SEGNALI ---
     if last['Close'] > last['BB_Upper'] and is_uptrend:
         signal_type = "LONG_BREAKOUT"
         confidence += 2
@@ -74,7 +66,6 @@ def analyze_ticker_alpha(ticker: str, df: pd.DataFrame) -> Optional[Dict]:
         if last['MACD'] > last['MACD_Signal']:
             confidence += 1
             reasons.append("MACD Positivo")
-        # Bonus se c'è volume
         if vol_rel > 1.5:
             confidence += 1
             reasons.append(f"Volume Esplosivo ({vol_rel:.1f}x media)")
@@ -89,13 +80,12 @@ def analyze_ticker_alpha(ticker: str, df: pd.DataFrame) -> Optional[Dict]:
         confidence += 2
         reasons.append("Rottura Banda Inferiore Bollinger")
 
-    # --- CALCOLO LIVELLI CHIAVE ---
     if "LONG" in signal_type:
-        stop_loss = price - (atr * 2.0)
-        take_profit = price + (atr * 3.0)
+        stop_loss = price - (atr * 3.0)
+        take_profit = price + (atr * 4.0)
     elif "SHORT" in signal_type:
-        stop_loss = price + (atr * 2.0)
-        take_profit = price - (atr * 3.0)
+        stop_loss = price + (atr * 3.0)
+        take_profit = price - (atr * 4.0)
     else:
         stop_loss = last['BB_Lower']
         take_profit = last['BB_Upper']
@@ -115,6 +105,6 @@ def analyze_ticker_alpha(ticker: str, df: pd.DataFrame) -> Optional[Dict]:
             "RSI": last['RSI'],
             "ATR": atr,
             "BB_Width": last['BB_Width'],
-            "Vol_Rel": vol_rel  # <-- REINSERITO: Questo eviterà il KeyError
+            "Vol_Rel": vol_rel
         }
     }
