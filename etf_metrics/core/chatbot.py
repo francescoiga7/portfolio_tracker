@@ -6,7 +6,7 @@ import logging
 from huggingface_hub import InferenceClient
 
 from etf_metrics.clients.yahoo_client import get_series, get_info, resolve_isin_one
-from etf_metrics.core.trading import analyze_ticker_alpha
+from etf_metrics.core.trading import analyze_ticker
 # IMPORTIAMO LE NUOVE METRICHE
 from etf_metrics.core.metrics import (
     compute_metrics_from_series,

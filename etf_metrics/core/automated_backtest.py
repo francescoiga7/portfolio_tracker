@@ -36,20 +36,26 @@ def calculate_adx_series(df, window=14):
 def calculate_position_size(capital, current_portfolio_value, vix_value, base_alloc_pct=0.20):
     """Money Management VIX-Adjusted."""
     if pd.isna(vix_value) or vix_value <= 0: vix_value = 20.0
-    adjusted_pct = min(0.35, base_alloc_pct * (20.0 / vix_value))
+    # Se il capitale è piccolo (es. < 2000), forziamo size più grandi per evitare ordini da 5 euro
+    if current_portfolio_value < 2000:
+        adjusted_pct = 1.0  # Max 3 posizioni
+    else:
+        adjusted_pct = min(0.35, base_alloc_pct * (20.0 / vix_value))
+
     target_amount = current_portfolio_value * adjusted_pct
     return min(capital, target_amount)
 
 
-def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_capital=10000):
+def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_capital=1000, use_tp_only=False):
     """
-    Versione 4.0: "Market Guard" & "Smart Trend"
-    1. Market Filter: Niente nuovi Long se S&P500 < SMA200.
-    2. Trend Filter: Breakout validi solo se ADX > 20.
-    3. Trailing Progressivo: Lo stop si stringe man mano che il profitto aumenta.
+    Versione 4.2: "Quality Ranking"
+    - Raccoglie tutti i segnali del giorno.
+    - Li ordina per Score (ADX + Volume).
+    - Compra i migliori fino a esaurimento cash.
     """
     market_data = {}
 
+    # 1. PREPARAZIONE DATI
     for t in tickers:
         df = get_series(t, period="5y", as_dataframe=True)
         if df is not None and not df.empty:
@@ -86,6 +92,7 @@ def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_ca
     trade_log = []
     progress_bar = st.progress(0)
 
+    # 2. LOOP GIORNALIERO
     for i, current_date in enumerate(sim_dates):
         progress_bar.progress((i + 1) / len(sim_dates))
 
@@ -94,12 +101,14 @@ def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_ca
         except:
             curr_vix = 20.0
 
+        # Controllo Trend Mercato (SP500)
         market_is_bullish = True
         if sp500_df is not None and current_date in sp500_df.index:
             sp_today = sp500_df.loc[current_date]
             if sp_today['Close'] < sp_today['SMA200']:
                 market_is_bullish = False
 
+        # Calcolo valore portafoglio corrente
         portfolio_value = cash
         for t, p in positions.items():
             if current_date in market_data[t].index:
@@ -107,9 +116,13 @@ def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_ca
             else:
                 portfolio_value += p['qty'] * p['entry_price']
 
-        for ticker, df in market_data.items():
-            if current_date not in df.index: continue
+        # --- FASE A: GESTIONE POSIZIONI APERTE (VENDITE) ---
+        # Eseguiamo prima le vendite per liberare liquidità per i nuovi acquisti
+        tickers_with_data = [t for t in positions.keys() if current_date in market_data[t].index]
 
+        for ticker in tickers_with_data:
+            pos = positions[ticker]
+            df = market_data[ticker]
             daily = df.loc[current_date]
             curr_close = daily['Close']
             curr_high = daily['High']
@@ -117,91 +130,163 @@ def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_ca
 
             if pd.isna(curr_atr): continue
 
-            if ticker in positions:
-                pos = positions[ticker]
+            should_sell = False
+            sell_price = curr_close
+            sell_reason = ""
 
+            if use_tp_only:
+                # LOGICA 1: SOLO TAKE PROFIT (O STOP LOSS INIZIALE)
+                # Check TP
+                if curr_high >= pos['take_profit']:
+                    should_sell = True
+                    sell_price = pos['take_profit']
+                    sell_reason = f"🎯 TARGET PROFIT ({pos['take_profit']:.2f})"
+                # Check Stop Loss Fisso (di sicurezza)
+               # elif curr_close < pos['trailing_stop']:
+                #    should_sell = True
+                 #   sell_price = curr_close
+                  #  sell_reason = f"🛑 STOP LOSS INITIAL ({pos['trailing_stop']:.2f})"
+            else:
+                # LOGICA 2: TRAILING STOP DINAMICO
                 current_roi_pct = ((curr_high / pos['entry_price']) - 1) * 100
-
                 dynamic_mult = max(1.5, 3.0 - (current_roi_pct / 20.0))
 
                 if curr_high > pos['highest_price']:
                     positions[ticker]['highest_price'] = curr_high
 
                 potential_stop = positions[ticker]['highest_price'] - (curr_atr * dynamic_mult)
-
                 if potential_stop > pos['trailing_stop']:
                     positions[ticker]['trailing_stop'] = potential_stop
 
                 if curr_close < pos['trailing_stop']:
-                    qty = pos['qty']
-                    revenue = qty * curr_close
-                    pnl = revenue - (qty * pos['entry_price'])
-                    pnl_pct = (pnl / (qty * pos['entry_price'])) * 100
+                    should_sell = True
+                    sell_price = curr_close
+                    sell_reason = f"📉 TRAILING STOP (Mult {dynamic_mult:.1f})"
 
-                    cash += revenue
-                    trade_log.append({
-                        "Date": current_date.date(), "Ticker": ticker, "Action": "SELL (100%)",
-                        "Price": curr_close, "Qty": qty,
-                        "Reason": f"TRAILING STOP (Mult {dynamic_mult:.1f})",
-                        "PnL_Eur": pnl, "PnL_Pct": pnl_pct, "Capital": cash
-                    })
-                    del positions[ticker]
+            if should_sell:
+                qty = pos['qty']
+                revenue = qty * sell_price
+                pnl = revenue - (qty * pos['entry_price'])
+                pnl_pct = (pnl / (qty * pos['entry_price'])) * 100
+
+                cash += revenue
+                trade_log.append({
+                    "Date": current_date.date(), "Ticker": ticker, "Action": "SELL (100%)",
+                    "Price": sell_price, "Qty": qty,
+                    "Reason": sell_reason,
+                    "PnL_Eur": pnl, "PnL_Pct": pnl_pct, "Capital": cash
+                })
+                del positions[ticker]
+
+        # --- FASE B: RACCOLTA CANDIDATI (ACQUISTI) ---
+        # Invece di comprare subito, mettiamo i candidati in una lista con un punteggio
+        daily_candidates = []
+
+        for ticker, df in market_data.items():
+            if ticker in positions: continue  # Già in portafoglio
+            if current_date not in df.index: continue
+
+            daily = df.loc[current_date]
+            curr_close = daily['Close']
+
+            # Filtri Macro e Tecnici Base
+            if curr_vix > 40: continue
+            if not market_is_bullish: continue
+            if pd.isna(daily['SMA200']): continue
+            if curr_close < daily['SMA200']: continue
+
+            # Logica Segnali
+            upper_band = daily['SMA20'] + (2 * daily['STD20'])
+            vol_sma = daily['Vol_SMA20']
+            # Evita divisione per zero
+            vol_rel = (daily['Volume'] / vol_sma) if (pd.notna(vol_sma) and vol_sma > 0) else 1.0
+            adx_val = daily['ADX'] if pd.notna(daily['ADX']) else 0
+
+            vol_ok = vol_rel > 1.2
+            adx_ok = adx_val > 20
+
+            is_breakout = (curr_close > upper_band) and (curr_close > daily['SMA50']) and vol_ok and adx_ok
+            is_dip = (curr_close > daily['SMA50']) and (daily['RSI'] < 35)
+
+            if is_breakout or is_dip:
+                # === CALCOLO SCORE DI QUALITA' ===
+                # Un breakout con ADX 50 e Volumi 3x è meglio di uno con ADX 20 e Volumi 1.2x
+                # Score formula: ADX + (Volume_Relativo * 10)
+                # Esempio: ADX 40 + (2.5 * 10) = 65 punti
+                quality_score = adx_val + (vol_rel * 10)
+
+                # Bonus per i Dip: se RSI è molto basso (es. 20), aumenta priorità
+                if is_dip:
+                    quality_score += (50 - daily['RSI'])  # Più basso è l'RSI, più alto il bonus
+
+                daily_candidates.append({
+                    'ticker': ticker,
+                    'price': curr_close,
+                    'atr': daily['ATR'],
+                    'high': daily['High'],
+                    'type': "BREAKOUT" if is_breakout else "DIP",
+                    'score': quality_score,
+                    'adx': adx_val,
+                    'vol_rel': vol_rel
+                })
+
+        # --- FASE C: SELEZIONE ED ESECUZIONE ---
+        # Ordiniamo i candidati per punteggio decrescente (i migliori primi)
+        daily_candidates.sort(key=lambda x: x['score'], reverse=True)
+
+        for cand in daily_candidates:
+            # Money Management
+            alloc = calculate_position_size(cash, portfolio_value, curr_vix)
+            # Se ho poco cash residuo (es. < 200 euro), non apro nuove posizioni
+            if cash < 200: break
+
+            qty = int(alloc / cand['price'])
+
+            if qty >= 1:
+                cost = qty * cand['price']
+                if cost > cash:
+                    # Riprova con qty ridotta se proprio vogliamo entrare,
+                    # oppure (meglio) salta al prossimo se non abbiamo fondi
                     continue
 
-            else:
-                if curr_vix > 40: continue
+                cash -= cost
 
-                if not market_is_bullish: continue
+                curr_atr = cand['atr'] if pd.notna(cand['atr']) else (cand['price'] * 0.02)
+                initial_stop = cand['price'] - (curr_atr * 3.0)
+                take_profit_target = cand['price'] + (curr_atr * 4.0)
 
-                if pd.isna(daily['SMA200']): continue
-                if curr_close < daily['SMA200']: continue
+                positions[cand['ticker']] = {
+                    'qty': qty,
+                    'entry_price': cand['price'],
+                    'trailing_stop': initial_stop,
+                    'highest_price': cand['high'],
+                    'take_profit': take_profit_target
+                }
 
-                upper_band = daily['SMA20'] + (2 * daily['STD20'])
-                vol_ok = daily['Volume'] > (daily['Vol_SMA20'] * 1.2)
-                adx_ok = daily['ADX'] > 20
+                reason_str = f"Score: {cand['score']:.0f} (ADX:{cand['adx']:.0f}, Vol:{cand['vol_rel']:.1f}x)"
+                if use_tp_only:
+                    reason_str += f" | TP: {take_profit_target:.2f}"
 
-                is_breakout = (curr_close > upper_band) and (curr_close > daily['SMA50']) and vol_ok and adx_ok
-
-                is_dip = (curr_close > daily['SMA50']) and (daily['RSI'] < 35)
-
-                if is_breakout or is_dip:
-                    alloc = calculate_position_size(cash, portfolio_value, curr_vix)
-                    qty = int(alloc / curr_close)
-
-                    if qty >= 1:
-                        cost = qty * curr_close
-                        cash -= cost
-
-                        initial_stop = curr_close - (curr_atr * 3.0)
-
-                        positions[ticker] = {
-                            'qty': qty,
-                            'entry_price': curr_close,
-                            'trailing_stop': initial_stop,
-                            'highest_price': curr_high,
-                        }
-
-                        signal_type = "BREAKOUT" if is_breakout else "DIP"
-                        reason_str = f"VIX: {curr_vix:.1f}"
-                        if is_breakout: reason_str += f" | ADX: {daily['ADX']:.1f}"
-
-                        trade_log.append({
-                            "Date": current_date.date(), "Ticker": ticker,
-                            "Action": f"BUY ({signal_type}) 🛰️",
-                            "Price": curr_close, "Qty": qty,
-                            "Reason": reason_str,
-                            "PnL_Eur": 0, "PnL_Pct": 0, "Capital": cash
-                        })
+                trade_log.append({
+                    "Date": current_date.date(), "Ticker": cand['ticker'],
+                    "Action": f"BUY ({cand['type']}) 🚀",
+                    "Price": cand['price'], "Qty": qty,
+                    "Reason": reason_str,
+                    "PnL_Eur": 0, "PnL_Pct": 0, "Capital": cash
+                })
 
     progress_bar.empty()
 
+    # Chiusura forzata finale
     for ticker, pos in positions.items():
         last_price = market_data[ticker]['Close'].iloc[-1]
         val = pos['qty'] * last_price
+        reason_hold = f"Open (Waiting TP: {pos['take_profit']:.2f})" if use_tp_only else f"Open (Stop: {pos['trailing_stop']:.2f})"
+
         trade_log.append({
-            "Date": sim_dates[-1].date(), "Ticker": ticker, "Action": "HELD (Open)",
+            "Date": sim_dates[-1].date(), "Ticker": ticker, "Action": "HELD (End)",
             "Price": last_price, "Qty": pos['qty'],
-            "Reason": f"Stop: {pos['trailing_stop']:.2f}",
+            "Reason": reason_hold,
             "PnL_Eur": val - (pos['qty'] * pos['entry_price']),
             "PnL_Pct": ((last_price / pos['entry_price']) - 1) * 100, "Capital": cash + val
         })

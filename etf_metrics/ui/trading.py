@@ -144,20 +144,28 @@ def render_trading_ui():
             st.info("👈 Inserisci i ticker e premi 'Scansiona Mercato' per l'analisi live.")
 
         st.markdown("---")
-        st.subheader("🤖 Backtest Strategia (Fixed Target)")
+        st.subheader("🤖 Backtest Strategia")
         st.caption(
-            "Simula l'acquisto sui segnali e la vendita automatica su Stop Loss o Take Profit predefiniti (Bracket Order).")
+            "Simula l'acquisto sui segnali. Puoi scegliere tra Trailing Stop dinamico o uscita fissa a Target.")
 
         default_backtest_list = "NVDA\nTSLA\nAMD\nCOIN\nMARA\nPLTR\nMETA\nAMZN\nNFLX\nQQQ\nTQQQ\nSQQQ"
-        backtest_tickers_txt = st.text_area("Ticker per Backtest (2025)", default_backtest_list, height=100)
+        backtest_tickers_txt = st.text_area("Ticker per Backtest (dal 2021)", default_backtest_list, height=100)
 
-        if st.button("Esegui Backtest 2025"):
+        # NUOVO FLAG
+        use_tp_only = st.checkbox("🎯 Usa Strategia 'Solo Take Profit'",
+                                  help="Se attivo, ignora il Trailing Stop. Vende SOLTANTO se il prezzo tocca il Take Profit (Entry + 4*ATR). Più rischioso ma evita stop prematuri.")
+
+        if st.button("Esegui Backtest"):
             t_list = [t.strip().upper() for t in backtest_tickers_txt.split('\n') if t.strip()]
 
-            with st.spinner("Simulazione con Scaling Out & Breakeven in corso..."):
-                df_trades, final_cap = run_market_aware_backtest(t_list, start_date="2021-01-01")
+            strategy_name = "Target Fisso (Take Profit)" if use_tp_only else "Trailing Stop Dinamico"
+            with st.spinner(f"Simulazione con strategia {strategy_name} in corso..."):
+                # Passiamo il flag alla funzione
+                df_trades, final_cap = run_market_aware_backtest(t_list, start_date="2021-01-01",
+                                                                 use_tp_only=use_tp_only)
+
             if not df_trades.empty:
-                total_return = ((final_cap - 10000) / 10000) * 100
+                total_return = ((final_cap - 1000) / 1000) * 100
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Capitale Finale", f"€{final_cap:,.2f}")
@@ -176,7 +184,8 @@ def render_trading_ui():
                     action = row['Action']
                     if "BUY" in action: return ['background-color: #000000'] * len(row)
                     if "SELL" in action:
-                        if "PROFIT" in str(row['Reason']): return ['background-color: #f0fff4; color: green'] * len(row)
+                        if "PROFIT" in str(row['Reason']) or "TARGET" in str(row['Reason']): return [
+                            'background-color: #f0fff4; color: green'] * len(row)
                         return ['background-color: #fff5f5; color: red'] * len(row)
                     return [''] * len(row)
 
