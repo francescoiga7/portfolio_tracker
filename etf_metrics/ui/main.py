@@ -10,6 +10,7 @@ from .comparison import render_etf_comparison_ui
 from etf_metrics.ui.pac_screener import render_pac_screener_ui
 from etf_metrics.ui.trading import render_trading_ui
 from etf_metrics.ui.chatbot import render_chatbot_ui
+from etf_metrics.ui.robustness import render_robustness_ui
 
 
 def init_session_state():
@@ -44,7 +45,8 @@ def run_app():
             "🎯 Screener PAC",
             "⚡ Verifica Momentum",
             "💹 Trading",
-            "🤖 Chatbot Advisor"
+            "🤖 Chatbot Advisor",
+            "🛡️ Robustness Testing"
         ],
     )
 
@@ -64,6 +66,8 @@ def run_app():
         render_trading_ui()
     elif app_mode == "🤖 Chatbot Advisor":
         render_chatbot_ui()
+    elif app_mode == "🛡️ Robustness Testing":
+        render_robustness_ui()
 
 if __name__ == '__main__':
     run_app()

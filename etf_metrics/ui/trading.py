@@ -149,23 +149,24 @@ def render_trading_ui():
             "Simula l'acquisto sui segnali. Puoi scegliere tra Trailing Stop dinamico o uscita fissa a Target.")
 
         default_backtest_list = "NVDA\nTSLA\nAMD\nCOIN\nMARA\nPLTR\nMETA\nAMZN\nNFLX\nQQQ\nTQQQ\nSQQQ"
-        backtest_tickers_txt = st.text_area("Ticker per Backtest (dal 2021)", default_backtest_list, height=100)
+        backtest_tickers_txt = st.text_area("Ticker per Backtest", default_backtest_list, height=100)
 
         # NUOVO FLAG
         use_tp_only = st.checkbox("🎯 Usa Strategia 'Solo Take Profit'",
                                   help="Se attivo, ignora il Trailing Stop. Vende SOLTANTO se il prezzo tocca il Take Profit (Entry + 4*ATR). Più rischioso ma evita stop prematuri.")
+
+        start_date = st.sidebar.date_input("Data Inizio Backtest", pd.to_datetime("2021-01-01"))
 
         if st.button("Esegui Backtest"):
             t_list = [t.strip().upper() for t in backtest_tickers_txt.split('\n') if t.strip()]
 
             strategy_name = "Target Fisso (Take Profit)" if use_tp_only else "Trailing Stop Dinamico"
             with st.spinner(f"Simulazione con strategia {strategy_name} in corso..."):
-                # Passiamo il flag alla funzione
-                df_trades, final_cap = run_market_aware_backtest(t_list, start_date="2021-01-01",
+                df_trades, final_cap = run_market_aware_backtest(t_list, start_date=start_date,
                                                                  use_tp_only=use_tp_only)
 
             if not df_trades.empty:
-                total_return = ((final_cap - 1000) / 1000) * 100
+                total_return = ((final_cap - 10000) / 10000) * 100
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Capitale Finale", f"€{final_cap:,.2f}")
@@ -192,7 +193,7 @@ def render_trading_ui():
                 st.dataframe(
                     df_trades.style.apply(style_trades, axis=1)
                     .format({"Price": "{:.2f}", "PnL_Eur": "{:+.2f}", "PnL_Pct": "{:+.2f}%", "Capital": "€{:,.0f}"}),
-                    use_container_width=True
+                    width="stretch",
                 )
             else:
                 st.warning("Nessun trade generato nel periodo.")
