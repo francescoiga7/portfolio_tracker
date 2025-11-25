@@ -21,179 +21,114 @@ SQQQ"""
 
 
 def render_trading_ui():
-    st.title("💹 Trading")
-    st.caption("Algoritmo quantitativo per Swing Trading e Breakout di Volatilità.")
+    st.title("💹 Trading Reale & Tasse")
+    st.caption("Simulazione professionale con impatto Fiscale (26%) e Commissionale (1€).")
 
-    with st.expander("🧠 Logica Operativa e Backtest"):
+    with st.expander("🧠 Come ottimizzare per 1.000€ vs 10.000€"):
         st.markdown("""
-        Questa sezione identifica setup di **Breakout** e **Reversion** basati su volatilità e volumi.
+        **La sfida dei piccoli capitali (1.000€):**
+        - Ogni trade costa **2€** (1€ acquisto + 1€ vendita).
+        - Su un trade da 200€, il 2€ è l'**1%** di perdita secca immediata.
+        - **Strategia:** Devi fare **MENO trade** e più concentrati (All-In su 1-2 titoli) per diluire i costi fissi.
 
-        **Funzionalità Time Travel:**
-        Attivando il Backtest nella sidebar, puoi "tornare indietro nel tempo".
-        L'algoritmo vedrà SOLO i dati disponibili fino a quella data. È utile per rispondere alla domanda:
-        *"Se avessi usato questo algoritmo il 15 ottobre scorso, mi avrebbe dato il segnale giusto?"*
+        **La gestione dei grandi capitali (10.000€+):**
+        - Il costo commissionale è irrisorio (0.02% su 10k).
+        - **Strategia:** Puoi permetterti di **DIVERSIFICARE** su 4-5 titoli per ridurre il rischio specifico senza preoccuparti delle commissioni.
 
-        **Legenda Segnali:**
-        * 🟢 **LONG_BREAKOUT:** Prezzo rompe la Banda di Bollinger superiore con volumi.
-        * 🔵 **LONG_DIP:** Trend rialzista ma prezzo in ritracciamento (RSI basso).
-        * 🔴 **SHORT_BREAKDOWN:** Rottura violenta al ribasso dei supporti.
+        **Nota Fiscale:** Il backtest calcola il 26% di tasse su ogni profitto netto e usa lo zainetto fiscale per compensare le perdite.
         """)
 
-    st.sidebar.header("⚙️ Radar Settings")
+    # --- SIDEBAR ---
+    st.sidebar.header("⚙️ Configurazione")
 
-    st.sidebar.subheader("⏳ Macchina del Tempo")
-    enable_time_travel = st.sidebar.checkbox("Abilita Backtest Storico", value=False)
+    initial_capital = st.sidebar.number_input(
+        "💰 Capitale Iniziale (€)",
+        min_value=500, value=5000, step=500
+    )
 
+    enable_time_travel = st.sidebar.checkbox("Backtest Storico (Time Travel)")
     analysis_date = date.today()
     if enable_time_travel:
-        analysis_date = st.sidebar.date_input(
-            "Analizza come se fosse il:",
-            date.today(),
-            min_value=date(2020, 1, 1),
-            max_value=date.today()
-        )
-        st.sidebar.warning(f"⚠️ Analisi congelata al: {analysis_date.strftime('%d/%m/%Y')}")
-    else:
-        st.sidebar.caption("Analisi in tempo reale (Dati odierni)")
+        analysis_date = st.sidebar.date_input("Data Analisi:", date.today())
+        st.sidebar.warning(f"Data congelata: {analysis_date}")
 
-    tickers_input = st.sidebar.text_area("Watchlist (Ticker Yahoo)", DEFAULT_TRADING_LIST, height=200)
+    st.sidebar.subheader("📋 Watchlist")
+    tickers_input = st.sidebar.text_area("Ticker", DEFAULT_TRADING_LIST, height=150)
 
+    # --- SCANNER ---
     if st.sidebar.button("🔥 Scansiona Mercato"):
         tickers = [t.strip().upper() for t in tickers_input.split('\n') if t.strip()]
-
         results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        cutoff = pd.to_datetime(analysis_date)
 
-        cutoff_date = pd.to_datetime(analysis_date)
-
-        for i, ticker in enumerate(tickers):
-            status_text.text(f"Analisi {ticker} al {analysis_date}...")
-
-            full_df = get_series(ticker, period="5y", as_dataframe=True)
-
-            if full_df is not None and not full_df.empty:
-                df_slice = full_df[full_df.index <= cutoff_date].copy()
-
-                if len(df_slice) > 200:
-                    signal_data = analyze_ticker(ticker, df_slice)
-
-                    if signal_data and signal_data['signal'] != "NEUTRAL":
-                        results.append(signal_data)
-                else:
-                    pass
-
-            progress_bar.progress((i + 1) / len(tickers))
-
-        status_text.empty()
-        progress_bar.empty()
-
-        date_label = analysis_date.strftime('%d/%m/%Y')
-        if enable_time_travel:
-            st.subheader(f"📅 Risultati Storici al {date_label}")
-        else:
-            st.subheader(f"📅 Segnali Live ({date_label})")
+        with st.spinner("Analisi in corso..."):
+            for t in tickers:
+                df = get_series(t, "10y", True)
+                if df is not None:
+                    df_slice = df[df.index <= cutoff].copy()
+                    if len(df_slice) > 200:
+                        res = analyze_ticker(t, df_slice)
+                        if res and res['signal'] != "NEUTRAL": results.append(res)
 
         if not results:
-            st.info(f"Nessun segnale operativo trovato alla data {date_label}.")
-            if enable_time_travel:
-                st.caption(
-                    "Suggerimento: Prova a cambiare data. I segnali di breakout sono rari e durano pochi giorni.")
-            return
+            st.info("Nessun segnale trovato.")
+        else:
+            st.success(f"Trovati {len(results)} segnali!")
+            results.sort(key=lambda x: x['confidence'], reverse=True)
 
-        st.success(f"Trovate {len(results)} opportunità operative!")
+            for res in results:
+                with st.container():
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric(res['ticker'], f"{res['price']:.2f}", res['signal'])
 
-        results.sort(key=lambda x: x['confidence'], reverse=True)
+                    # Calcolo Size ottimizzata per costi
+                    costo_fisso_incidenza = (2.0 / (initial_capital * 0.2)) * 100  # % costo su un trade medio del 20%
 
-        for res in results:
-            signal_color = "green" if "LONG" in res['signal'] else "red"
-
-            with st.container():
-                st.markdown(f"### {res['ticker']} : :{signal_color}[{res['signal']}]")
-                st.caption(f"Prezzo alla data {date_label}: **{res['price']:.2f}** | Confidence: {res['confidence']}/5")
-
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Prezzo Ingresso", f"{res['price']:.2f}")
-
-                sl_delta = res['stop_loss'] - res['price']
-                tp_delta = res['take_profit'] - res['price']
-
-                c2.metric("Stop Loss (ATR)", f"{res['stop_loss']:.2f}", delta=f"{sl_delta:.2f}", delta_color="inverse")
-                c3.metric("Take Profit", f"{res['take_profit']:.2f}", delta=f"{tp_delta:.2f}", delta_color="normal")
-
-                rsi_val = res['indicators']['RSI']
-                rsi_state = "Ipercomprato" if rsi_val > 70 else "Ipervenduto" if rsi_val < 30 else "Neutrale"
-                c4.metric("RSI (14)", f"{rsi_val:.1f}", delta=rsi_state, delta_color="off")
-
-                with st.expander("Dettagli Strategici"):
-                    st.write("**Motivazioni del Segnale:**")
-                    for reason in res['reasons']:
-                        st.markdown(f"- {reason}")
-
+                    rec_size = "Concentrata (1-2 asset)" if initial_capital < 2500 else "Diversificata (4-5 asset)"
+                    c2.metric("Strategia Consigliata", rec_size,
+                              help=f"Incidenza commissioni stimate: {costo_fisso_incidenza:.2f}% per trade")
+                    c3.metric("Stop Loss", f"{res['stop_loss']:.2f}")
+                    c4.metric("Confidence", f"{res['confidence']}/100")
                     st.markdown("---")
-                    st.markdown(f"**Dati Tecnici al {date_label}:**")
-                    st.markdown(f"- *Bande Bollinger Width:* {res['indicators']['BB_Width']:.4f} (Compressione)")
-                    st.markdown(f"- *Volume Relativo:* {res['indicators']['Vol_Rel']:.1f}x media")
-
-                st.markdown("---")
 
     else:
-        if enable_time_travel:
-            st.info(f"👈 Imposta la data storica ({analysis_date.strftime('%d/%m/%Y')}) e premi 'Scansiona'.")
-        else:
-            st.info("👈 Inserisci i ticker e premi 'Scansiona Mercato' per l'analisi live.")
-
         st.markdown("---")
-        st.subheader("🤖 Backtest Strategia")
-        st.caption(
-            "Simula l'acquisto sui segnali. Puoi scegliere tra Trailing Stop dinamico o uscita fissa a Target.")
+        st.subheader("🤖 Backtest Fiscale (Commissioni + Tax 26%)")
 
-        default_backtest_list = "NVDA\nTSLA\nAMD\nCOIN\nMARA\nPLTR\nMETA\nAMZN\nNFLX\nQQQ\nTQQQ\nSQQQ"
-        backtest_tickers_txt = st.text_area("Ticker per Backtest", default_backtest_list, height=100)
+        col_b1, col_b2 = st.columns(2)
+        commission = col_b1.number_input("Commissione Fissa (€)", 0.0, 10.0, 1.0, step=0.5)
+        tax_rate = col_b2.number_input("Aliquota Tasse (%)", 0.0, 50.0, 26.0, step=1.0)
 
-        # NUOVO FLAG
-        use_tp_only = st.checkbox("🎯 Usa Strategia 'Solo Take Profit'",
-                                  help="Se attivo, ignora il Trailing Stop. Vende SOLTANTO se il prezzo tocca il Take Profit (Entry + 4*ATR). Più rischioso ma evita stop prematuri.")
+        if st.button("Avvia Backtest Reale"):
+            t_list = [t.strip().upper() for t in tickers_input.split('\n') if t.strip()]
+            start_dt = pd.to_datetime(analysis_date)
 
-        start_date = st.sidebar.date_input("Data Inizio Backtest", pd.to_datetime("2021-01-01"))
-
-        if st.button("Esegui Backtest"):
-            t_list = [t.strip().upper() for t in backtest_tickers_txt.split('\n') if t.strip()]
-
-            strategy_name = "Target Fisso (Take Profit)" if use_tp_only else "Trailing Stop Dinamico"
-            with st.spinner(f"Simulazione con strategia {strategy_name} in corso..."):
-                df_trades, final_cap = run_market_aware_backtest(t_list, start_date=start_date,
-                                                                 use_tp_only=use_tp_only)
+            with st.spinner("Simulazione fiscale in corso..."):
+                df_trades, final = run_market_aware_backtest(
+                    t_list, start_date=start_dt,
+                    initial_capital=initial_capital,
+                    commission=commission, tax_rate=tax_rate
+                )
 
             if not df_trades.empty:
-                total_return = ((final_cap - 10000) / 10000) * 100
+                net_profit = final - initial_capital
+                ret_pct = (net_profit / initial_capital) * 100
 
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Capitale Finale", f"€{final_cap:,.2f}")
-                c2.metric("Rendimento", f"{total_return:.2f}%", delta_color="normal")
+                tot_comm = df_trades['Comm'].sum()
+                tot_tax = df_trades['Tax'].sum()
 
-                closed_trades = df_trades[df_trades['Action'] == 'SELL (100%)']
-                if not closed_trades.empty:
-                    wins = len(closed_trades[closed_trades['PnL_Eur'] > 0])
-                    total_closed = len(closed_trades)
-                    win_rate = (wins / total_closed) * 100
-                    c3.metric("Win Rate", f"{win_rate:.1f}% ({wins}/{total_closed})")
-
-                st.subheader("Giornale delle Operazioni")
-
-                def style_trades(row):
-                    action = row['Action']
-                    if "BUY" in action: return ['background-color: #000000'] * len(row)
-                    if "SELL" in action:
-                        if "PROFIT" in str(row['Reason']) or "TARGET" in str(row['Reason']): return [
-                            'background-color: #f0fff4; color: green'] * len(row)
-                        return ['background-color: #fff5f5; color: red'] * len(row)
-                    return [''] * len(row)
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Capitale Netto", f"€{final:,.2f}", delta=f"{ret_pct:.2f}%")
+                m2.metric("Profitto Netto", f"€{net_profit:,.2f}")
+                m3.metric("Tasse Pagate (26%)", f"€{tot_tax:,.2f}", delta_color="inverse")
+                m4.metric("Commissioni Totali", f"€{tot_comm:,.2f}", delta_color="inverse")
 
                 st.dataframe(
-                    df_trades.style.apply(style_trades, axis=1)
-                    .format({"Price": "{:.2f}", "PnL_Eur": "{:+.2f}", "PnL_Pct": "{:+.2f}%", "Capital": "€{:,.0f}"}),
-                    width="stretch",
+                    df_trades.style.format({
+                        "Price": "{:.2f}", "PnL_Net": "{:+.2f}", "Tax": "{:.2f}",
+                        "Comm": "{:.2f}", "Capital": "€{:,.0f}"
+                    }),
+                    use_container_width=True
                 )
             else:
-                st.warning("Nessun trade generato nel periodo.")
+                st.warning("Nessun trade eseguito.")

@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 import pandas as pd
 import numpy as np
-from datetime import datetime
 import streamlit as st
 from etf_metrics.clients.yahoo_client import get_series
 
 
+# ... (Funzioni ausiliarie calculate_atr_series, calculate_adx_series, calculate_position_size rimangono invariate) ...
 def calculate_atr_series(df, window=14):
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
@@ -16,38 +16,34 @@ def calculate_atr_series(df, window=14):
 
 
 def calculate_adx_series(df, window=14):
-    """Calcola l'indicatore ADX per misurare la forza del trend."""
     plus_dm = df['High'].diff()
     minus_dm = df['Low'].diff()
     plus_dm[plus_dm < 0] = 0
     minus_dm[minus_dm > 0] = 0
-
     tr = calculate_atr_series(df, window=1)
-    # Evitiamo divisioni per zero
     atr = tr.rolling(window).mean().replace(0, np.nan)
-
     plus_di = 100 * (plus_dm.ewm(alpha=1 / window).mean() / atr)
     minus_di = 100 * (minus_dm.ewm(alpha=1 / window).mean().abs() / atr)
-
     dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.rolling(window).mean()
-    return adx
+    return dx.rolling(window).mean()
 
 
 def calculate_position_size(capital, current_portfolio_value, vix_value, base_alloc_pct=0.20):
-    """Money Management VIX-Adjusted."""
     if pd.isna(vix_value) or vix_value <= 0: vix_value = 20.0
-    # Se il capitale è piccolo (es. < 2000), forziamo size più grandi per evitare ordini da 5 euro
-    if current_portfolio_value < 2000:
-        adjusted_pct = 1.0  # Max 3 posizioni
+
+    # OTTIMIZZAZIONE PER CONTI PICCOLI VS GRANDI
+    # Se < 2000€, concentriamo tutto su 1-2 asset per minimizzare l'impatto delle commissioni fisse
+    if current_portfolio_value < 2500:
+        adjusted_pct = 0.95  # Lascia un 5% di cash per commissioni e fluttuazioni
     else:
+        # Per conti grandi, diversifichiamo in base alla volatilità
         adjusted_pct = min(0.35, base_alloc_pct * (20.0 / vix_value))
 
     target_amount = current_portfolio_value * adjusted_pct
     return min(capital, target_amount)
 
 
-def prepare_market_data(tickers, period="5y"):
+def prepare_market_data(tickers, period="10y"):
     """Scarica i dati e calcola gli indicatori."""
     market_data = {}
     for t in tickers:
@@ -71,12 +67,13 @@ def prepare_market_data(tickers, period="5y"):
     return market_data
 
 
-def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_capital=10000, use_tp_only=False,
-                              preloaded_data=None):
+def run_market_aware_backtest(tickers: list, start_date="2019-01-01", initial_capital=10000, use_tp_only=False,
+                              preloaded_data=None, commission=1.0, tax_rate=26.0):
     """
-    Versione 5.1 (Confidence Filter):
-    - Filtra segnali con Confidence Score < 75.
-    - Allinea il calcolo dello score con trading.py.
+    Backtest fiscale realistico:
+    - Commissioni: fisso per ordine (Buy & Sell).
+    - Tasse: 26% su Plusvalenze Realizzate (Netto commissioni).
+    - Minusvalenze: Credito fiscale compensabile (Zainetto Fiscale).
     """
 
     # 1. SELEZIONE FONTE DATI
@@ -87,12 +84,11 @@ def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_ca
 
     if not market_data: return pd.DataFrame(), initial_capital
 
-    # Gestione dati ausiliari
+    # Gestione dati ausiliari (VIX e SP500)
     try:
-        vix_df = get_series("^VIX", period="5y", as_dataframe=True)
+        vix_df = get_series("^VIX", period="10y", as_dataframe=True)
         vix_series = vix_df['Close'] if vix_df is not None else pd.Series(dtype=float)
-
-        sp500_df = get_series("^GSPC", period="5y", as_dataframe=True)
+        sp500_df = get_series("^GSPC", period="10y", as_dataframe=True)
         if sp500_df is not None:
             sp500_df['SMA200'] = sp500_df['Close'].rolling(200).mean()
     except:
@@ -106,6 +102,9 @@ def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_ca
     positions = {}
     trade_log = []
 
+    # Zainetto Fiscale (Minusvalenze accumulate)
+    tax_credit = 0.0
+
     try:
         progress_bar = st.progress(0)
     except:
@@ -113,7 +112,7 @@ def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_ca
 
     # 2. LOOP GIORNALIERO
     for i, current_date in enumerate(sim_dates):
-        if progress_bar and i % 5 == 0:
+        if progress_bar and i % 10 == 0:
             progress_bar.progress((i + 1) / len(sim_dates))
 
         try:
@@ -127,15 +126,15 @@ def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_ca
             if sp_today['Close'] < sp_today['SMA200']:
                 market_is_bullish = False
 
-        # Calcolo valore portafoglio
+        # Calcolo valore portafoglio (Mark to Market)
         portfolio_value = cash
         for t, p in positions.items():
             if current_date in market_data[t].index:
-                portfolio_value += p['qty'] * market_data[t].loc[current_date]['Close']
-            else:
-                portfolio_value += p['qty'] * p['entry_price']
+                curr_price = market_data[t].loc[current_date]['Close']
+                # Valore posizione netto vendita stimata (senza tasse per ora)
+                portfolio_value += (p['qty'] * curr_price)
 
-        # --- FASE A: GESTIONE POSIZIONI APERTE (VENDITE) ---
+        # --- FASE A: GESTIONE VENDITE (SELL) ---
         tickers_with_data = [t for t in positions.keys() if current_date in market_data[t].index]
 
         for ticker in tickers_with_data:
@@ -152,15 +151,16 @@ def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_ca
             sell_price = curr_close
             sell_reason = ""
 
+            # Logica di uscita (Take Profit o Trailing Stop)
             if use_tp_only:
                 if curr_high >= pos['take_profit']:
                     should_sell = True
                     sell_price = pos['take_profit']
-                    sell_reason = f"🎯 TARGET PROFIT ({pos['take_profit']:.2f})"
-                elif curr_close < (pos['entry_price'] * 0.85):  # Hard stop
+                    sell_reason = f"🎯 TARGET ({pos['take_profit']:.2f})"
+                elif curr_close < (pos['entry_price'] * 0.85):  # Hard stop emergenza
                     should_sell = True
                     sell_price = curr_close
-                    sell_reason = "🛑 HARD STOP (Safety)"
+                    sell_reason = "🛑 HARD STOP"
             else:
                 if curr_high > pos['highest_price']:
                     positions[ticker]['highest_price'] = curr_high
@@ -174,24 +174,50 @@ def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_ca
                 if curr_close < pos['trailing_stop']:
                     should_sell = True
                     sell_price = curr_close
-                    sell_reason = f"📉 TRAILING STOP (Mult {mult})"
+                    sell_reason = f"📉 TRAILING STOP"
 
             if should_sell:
                 qty = pos['qty']
-                revenue = qty * sell_price
-                pnl = revenue - (qty * pos['entry_price'])
-                pnl_pct = (pnl / (qty * pos['entry_price'])) * 100
 
-                cash += revenue
+                # === CALCOLO FISCALE E COMMISSIONI ===
+                gross_revenue = qty * sell_price
+                net_revenue = gross_revenue - commission  # Tolgo comm vendita
+
+                # Costo di carico totale (inclusa commissione acquisto)
+                total_entry_cost = pos['total_cost_basis']
+
+                # Capital Gain/Loss
+                capital_gain = net_revenue - total_entry_cost
+
+                tax_amount = 0.0
+
+                if capital_gain > 0:
+                    # Ho un guadagno. Posso usare minusvalenze pregresse?
+                    taxable_gain = max(0, capital_gain - tax_credit)
+                    tax_credit = max(0, tax_credit - capital_gain)  # Riduce lo zainetto
+
+                    tax_amount = taxable_gain * (tax_rate / 100.0)
+                else:
+                    # Ho una perdita. Accumulo credito fiscale.
+                    tax_credit += abs(capital_gain)
+
+                final_cash_in = net_revenue - tax_amount
+                cash += final_cash_in
+
+                realized_pnl_eur = final_cash_in - total_entry_cost
+                realized_pnl_pct = (realized_pnl_eur / total_entry_cost) * 100
+
                 trade_log.append({
-                    "Date": current_date.date(), "Ticker": ticker, "Action": "SELL (100%)",
+                    "Date": current_date.date(), "Ticker": ticker, "Action": "SELL",
                     "Price": sell_price, "Qty": qty,
                     "Reason": sell_reason,
-                    "PnL_Eur": pnl, "PnL_Pct": pnl_pct, "Capital": cash
+                    "Comm": commission, "Tax": tax_amount,
+                    "PnL_Net": realized_pnl_eur, "PnL_Pct": realized_pnl_pct,
+                    "Capital": cash
                 })
                 del positions[ticker]
 
-        # --- FASE B: RACCOLTA CANDIDATI (ACQUISTI) ---
+        # --- FASE B: GESTIONE ACQUISTI (BUY) ---
         daily_candidates = []
 
         for ticker, df in market_data.items():
@@ -201,119 +227,108 @@ def run_market_aware_backtest(tickers: list, start_date="2021-01-01", initial_ca
             daily = df.loc[current_date]
             curr_close = daily['Close']
 
-            # Filtri Macro
+            # Filtri Macro di sicurezza
             if curr_vix > 35: continue
             if not market_is_bullish: continue
-            if pd.isna(daily['SMA200']): continue
-            if curr_close < daily['SMA200']: continue
+            if pd.isna(daily['SMA200']) or curr_close < daily['SMA200']: continue
 
+            # Setup Breakout
             upper_band = daily['SMA20'] + (2 * daily['STD20'])
-            vol_sma = daily['Vol_SMA20']
-            vol_rel = (daily['Volume'] / vol_sma) if (pd.notna(vol_sma) and vol_sma > 0) else 1.0
+            vol_rel = (daily['Volume'] / daily['Vol_SMA20']) if (
+                        pd.notna(daily['Vol_SMA20']) and daily['Vol_SMA20'] > 0) else 1.0
             adx_val = daily['ADX'] if pd.notna(daily['ADX']) else 0
 
-            # 1. Breakout
-            is_breakout = (curr_close > upper_band) and \
-                          (curr_close > daily['SMA50']) and \
-                          (vol_rel > 2.0) and \
-                          (adx_val > 30)
-
-            # 2. Dip
+            is_breakout = (curr_close > upper_band) and (vol_rel > 1.5) and (adx_val > 25)
             is_dip = (curr_close > daily['SMA50']) and (daily['RSI'] < 35)
 
             if is_breakout or is_dip:
-                # === CALCOLO SCORE CONFIDENCE (0-100) ===
-                score = 0.0
-
+                # Calcolo Score per Ranking
+                score = 0
                 if is_breakout:
-                    # Formula Breakout: ADX + Bonus Volumi - Malus RSI
-                    score = adx_val
-                    score += (vol_rel - 1.0) * 15
+                    score = adx_val + ((vol_rel - 1.0) * 10)
                     if daily['RSI'] > 75: score -= 10
-
                 elif is_dip:
-                    # Formula Dip: 100-RSI + Bonus Trend + Bonus Supporto
-                    score = 100 - daily['RSI']
-                    score += (adx_val / 2)
+                    score = (100 - daily['RSI']) + (adx_val / 2)
 
-                    # Bonus Supporto SMA50
-                    dist_sma50 = abs(curr_close - daily['SMA50']) / daily['SMA50']
-                    if dist_sma50 < 0.02:  # Entro il 2% dalla SMA50
-                        score += 15
-
-                # === FILTRO RICHIESTO: Confidence >= 75 ===
-                if score >= 75:
+                if score >= 70:  # Filtro qualità
                     daily_candidates.append({
-                        'ticker': ticker,
-                        'price': curr_close,
-                        'atr': daily['ATR'],
-                        'high': daily['High'],
-                        'type': "BREAKOUT" if is_breakout else "DIP",
-                        'score': score,
-                        'adx': adx_val,
-                        'vol_rel': vol_rel
+                        'ticker': ticker, 'price': curr_close, 'atr': daily['ATR'],
+                        'high': daily['High'], 'type': "BREAKOUT" if is_breakout else "DIP",
+                        'score': score
                     })
 
-        # --- FASE C: ESECUZIONE ---
+        # --- FASE C: ESECUZIONE ORDINI ---
         daily_candidates.sort(key=lambda x: x['score'], reverse=True)
 
         for cand in daily_candidates:
-            alloc = calculate_position_size(cash, portfolio_value, curr_vix)
-            if cash < 200: break
+            # Calcola quanto investire
+            alloc_eur = calculate_position_size(cash, portfolio_value, curr_vix)
 
-            qty = int(alloc / cand['price'])
+            # Deve rimanerci cash per le commissioni (almeno 2€ per sicurezza)
+            max_buy_eur = alloc_eur - (commission * 2)
 
-            if qty >= 1:
-                cost = qty * cand['price']
-                if cost > cash: continue
+            if max_buy_eur < (cand['price']): continue  # Non ho soldi nemmeno per 1 azione
 
-                cash -= cost
+            qty = int(max_buy_eur / cand['price'])
+            if qty < 1: continue
 
-                curr_atr = cand['atr'] if pd.notna(cand['atr']) else (cand['price'] * 0.02)
+            cost_shares = qty * cand['price']
+            total_cost = cost_shares + commission  # Prezzo + Comm
 
-                if cand['type'] == 'BREAKOUT':
-                    sl_mult = 1.5
-                    tp_mult = 3.0
-                else:
-                    sl_mult = 3.0
-                    tp_mult = 4.0
+            if total_cost > cash: continue
 
-                initial_stop = cand['price'] - (curr_atr * sl_mult)
-                take_profit_target = cand['price'] + (curr_atr * tp_mult)
+            cash -= total_cost
 
-                positions[cand['ticker']] = {
-                    'qty': qty,
-                    'entry_price': cand['price'],
-                    'trailing_stop': initial_stop,
-                    'highest_price': cand['high'],
-                    'take_profit': take_profit_target,
-                    'sl_mult': sl_mult
-                }
+            curr_atr = cand['atr'] if pd.notna(cand['atr']) else (cand['price'] * 0.02)
+            sl_mult = 2.0 if cand['type'] == 'BREAKOUT' else 3.0
+            tp_mult = 4.0
 
-                reason_str = f"Score: {cand['score']:.0f} (ADX:{cand['adx']:.0f}, Vol:{cand['vol_rel']:.1f}x)"
-                if use_tp_only:
-                    reason_str += f" | TP: {take_profit_target:.2f}"
+            initial_stop = cand['price'] - (curr_atr * sl_mult)
+            take_profit_target = cand['price'] + (curr_atr * tp_mult)
 
-                trade_log.append({
-                    "Date": current_date.date(), "Ticker": cand['ticker'],
-                    "Action": f"BUY ({cand['type']}) 🚀",
-                    "Price": cand['price'], "Qty": qty,
-                    "Reason": reason_str,
-                    "PnL_Eur": 0, "PnL_Pct": 0, "Capital": cash
-                })
+            positions[cand['ticker']] = {
+                'qty': qty,
+                'entry_price': cand['price'],
+                'total_cost_basis': total_cost,  # Importante per il calcolo fiscale
+                'trailing_stop': initial_stop,
+                'highest_price': cand['high'],
+                'take_profit': take_profit_target,
+                'sl_mult': sl_mult
+            }
+
+            trade_log.append({
+                "Date": current_date.date(), "Ticker": cand['ticker'],
+                "Action": f"BUY",
+                "Price": cand['price'], "Qty": qty,
+                "Reason": f"Score: {cand['score']:.0f}",
+                "Comm": commission, "Tax": 0.0,
+                "PnL_Net": 0, "PnL_Pct": 0,
+                "Capital": cash
+            })
 
     if progress_bar: progress_bar.empty()
 
+    # Chiusura forzata posizioni finali (al valore netto stimato)
     for ticker, pos in positions.items():
         last_price = market_data[ticker]['Close'].iloc[-1]
-        val = pos['qty'] * last_price
+
+        gross_rev = pos['qty'] * last_price
+        net_rev = gross_rev - commission
+        cap_gain = net_rev - pos['total_cost_basis']
+
+        tax = (cap_gain * (tax_rate / 100)) if cap_gain > 0 else 0
+        net_in = net_rev - tax
+
+        realized_pnl = net_in - pos['total_cost_basis']
+
+        cash += net_in
+
         trade_log.append({
-            "Date": sim_dates[-1].date(), "Ticker": ticker, "Action": "HELD (End)",
+            "Date": sim_dates[-1].date(), "Ticker": ticker, "Action": "END",
             "Price": last_price, "Qty": pos['qty'],
-            "Reason": "End of Simulation",
-            "PnL_Eur": val - (pos['qty'] * pos['entry_price']),
-            "PnL_Pct": ((last_price / pos['entry_price']) - 1) * 100, "Capital": cash + val
+            "Reason": "Chiusura Simulazione",
+            "Comm": commission, "Tax": tax,
+            "PnL_Net": realized_pnl, "PnL_Pct": 0, "Capital": cash
         })
-        cash += val
 
     return pd.DataFrame(trade_log), cash

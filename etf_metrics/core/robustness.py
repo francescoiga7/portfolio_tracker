@@ -201,7 +201,7 @@ def run_monte_carlo_permutation_test(tickers, start_date, n_simulations=50, init
 
 def run_walk_forward_analysis(tickers, initial_capital=1000, train_months=12, test_months=3):
     """Walk-Forward Analysis (WFA) su finestre scorrevoli."""
-    full_data = prepare_market_data(tickers, period="5y")
+    full_data = prepare_market_data(tickers, period="10y")
     if not full_data: return pd.DataFrame()
 
     sample = list(full_data.values())[0]
