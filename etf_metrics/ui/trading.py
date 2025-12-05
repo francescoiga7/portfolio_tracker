@@ -38,7 +38,6 @@ def render_trading_ui():
         **Nota Fiscale:** Il backtest calcola il 26% di tasse su ogni profitto netto e usa lo zainetto fiscale per compensare le perdite.
         """)
 
-    # --- SIDEBAR ---
     st.sidebar.header("⚙️ Configurazione")
 
     initial_capital = st.sidebar.number_input(
@@ -55,7 +54,6 @@ def render_trading_ui():
     st.sidebar.subheader("📋 Watchlist")
     tickers_input = st.sidebar.text_area("Ticker", DEFAULT_TRADING_LIST, height=150)
 
-    # --- SCANNER ---
     if st.sidebar.button("🔥 Scansiona Mercato"):
         tickers = [t.strip().upper() for t in tickers_input.split('\n') if t.strip()]
         results = []
@@ -81,8 +79,7 @@ def render_trading_ui():
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric(res['ticker'], f"{res['price']:.2f}", res['signal'])
 
-                    # Calcolo Size ottimizzata per costi
-                    costo_fisso_incidenza = (2.0 / (initial_capital * 0.2)) * 100  # % costo su un trade medio del 20%
+                    costo_fisso_incidenza = (2.0 / (initial_capital * 0.2)) * 100
 
                     rec_size = "Concentrata (1-2 asset)" if initial_capital < 2500 else "Diversificata (4-5 asset)"
                     c2.metric("Strategia Consigliata", rec_size,
@@ -128,7 +125,7 @@ def render_trading_ui():
                         "Price": "{:.2f}", "PnL_Net": "{:+.2f}", "Tax": "{:.2f}",
                         "Comm": "{:.2f}", "Capital": "€{:,.0f}"
                     }),
-                    use_container_width=True
+                    width="stretch"
                 )
             else:
                 st.warning("Nessun trade eseguito.")

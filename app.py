@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
 from etf_metrics.ui.main import run_app
 
-# Nota: con `streamlit run app.py` Streamlit esegue il modulo e costruisce la UI.
+# `streamlit run app.py`
 run_app()

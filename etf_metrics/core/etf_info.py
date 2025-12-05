@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 import re
 import logging
 import yfinance as yf
@@ -11,11 +11,10 @@ logger = logging.getLogger(__name__)
 
 UNKNOWN = "Sconosciuto"
 ACCUM_RE = re.compile(r"\bacc(?:umulating)?\b", re.IGNORECASE)
-DIST_RE = re.compile(r"\bdist(?:ributing|ribuzione)?\b", re.IGNORECASE)
-
+DIST_RE = re.compile(r"\bdist(?:ributing|ribuzione|inc)?\b", re.IGNORECASE)
 
 def get_etf_extended_info(isin: str) -> Dict:
-    """Recupera informazioni estese su un ETF con approccio universale"""
+    """Recupera informazioni estese con fallback aggressivi."""
     info: Dict = {}
 
     yf_info = get_yahoo_info(isin)
@@ -23,119 +22,89 @@ def get_etf_extended_info(isin: str) -> Dict:
         info.update(yf_info)
 
     try:
-        html = fetch_justetf_page(isin, timeout=15)
+        html = fetch_justetf_page(isin, timeout=10)
         if html:
             jt = parse_etf_details_from_html(html)
             for k in ("category", "fund_size", "replication_method", "distribution", "provider"):
                 v = jt.get(k)
                 if v and (k not in info or not info[k] or info[k] == UNKNOWN):
                     info[k] = v
-    except Exception as e:
-        logger.debug(f"Errore nel recupero informazioni JustETF per {isin}: {e}")
+    except Exception:
+        pass
 
-    if "category" not in info or not info["category"] or info["category"] == UNKNOWN:
-        info["category"] = get_category_from_name(info.get("longName", "") or info.get("shortName", ""))
+    if info.get("category", UNKNOWN) == UNKNOWN:
+        full_name = info.get("longName", "") or info.get("shortName", "")
+        info["category"] = get_category_from_name(full_name)
 
-    if "distribution" not in info or not info["distribution"] or info["distribution"] == UNKNOWN:
+    if info.get("distribution", UNKNOWN) == UNKNOWN:
         nm = f"{info.get('longName', '')} {info.get('shortName', '')}".lower()
         if ACCUM_RE.search(nm):
             info["distribution"] = "Ad accumulazione"
         elif DIST_RE.search(nm):
             info["distribution"] = "A distribuzione"
         else:
-            info["distribution"] = UNKNOWN
+            if info.get('yield', 0) > 0.01:
+                info["distribution"] = "A distribuzione (dedotto da yield)"
+            else:
+                info["distribution"] = UNKNOWN
 
     if "fund_size" not in info and "totalAssets" in info and info["totalAssets"]:
         try:
             ta = float(info["totalAssets"])
             if ta > 1e9:
-                info["fund_size"] = f"{ta / 1e9:.2f} Miliardi USD"
+                info["fund_size"] = f"{ta / 1e9:.2f} Mld USD"
             else:
-                info["fund_size"] = f"{ta / 1e6:.2f} Milioni USD"
+                info["fund_size"] = f"{ta / 1e6:.2f} Mln USD"
         except Exception:
             pass
-    info["alternative_etfs"] = get_better_td_alternatives(isin, info.get("category", ""))
 
     return info
 
-
 def get_yahoo_info(isin: str) -> Dict:
-    """Recupera informazioni da Yahoo Finance"""
     info: Dict = {}
     try:
         ticker = resolve_isin_one(isin)
         if ticker:
-            yf_ticker = yf.Ticker(ticker)
-            yf_info = yf_ticker.info
-            info["provider"] = yf_info.get("fundFamily", UNKNOWN)
-            info["category"] = yf_info.get("category", UNKNOWN)
-            info["morningStarOverallRating"] = yf_info.get("morningStarOverallRating", UNKNOWN)
-
-            total_assets = yf_info.get("totalAssets")
-            if total_assets is not None:
-                info["totalAssets"] = total_assets
-                try:
-                    ta = float(total_assets)
-                    if ta > 1e9:
-                        info["fund_size"] = f"{ta / 1e9:.2f} Miliardi USD"
-                    else:
-                        info["fund_size"] = f"{ta / 1e6:.2f} Milioni USD"
-                except Exception:
-                    pass
-
-            long_short = f"{yf_info.get('longName','')} {yf_info.get('shortName','')}".lower()
-            if ACCUM_RE.search(long_short):
-                info["distribution"] = "Ad accumulazione"
-            elif DIST_RE.search(long_short):
-                info["distribution"] = "A distribuzione"
-    except Exception as e:
-        logger.debug(f"Errore nel recupero informazioni Yahoo per {isin}: {e}")
+            t = yf.Ticker(ticker)
+            yf_data = t.info
+            info["provider"] = yf_data.get("fundFamily", UNKNOWN)
+            info["category"] = yf_data.get("category", UNKNOWN)
+            info["longName"] = yf_data.get("longName")
+            info["totalAssets"] = yf_data.get("totalAssets")
+            info["yield"] = yf_data.get("yield", 0)
+    except Exception:
+        pass
     return info
 
-
 def get_category_from_name(name: str) -> str:
-    """Determina la categoria dal nome dell'ETF"""
     name_lower = name.lower()
-    category_keywords = {
-        "azionario": ["equity", "stock", "azionario", "index", "msci", "ftse", "stoxx"],
-        "obbligazionario": ["bond", "obbligazionario", "treasury", "government", "corporate"],
-        "commodity": ["commodity", "gold", "silver", "oil", "energy", "metals"],
-        "settoriale": ["technology", "healthcare", "financial", "energy", "sector"],
-        "reale": ["real estate", "property", "reit"],
-        "monetario": ["money market", "cash", "liquidità"],
+    maps = {
+        "Azionario Globale": ["world", "global", "acwi"],
+        "Azionario USA": ["s&p", "nasdaq", "usa", "america"],
+        "Azionario Europa": ["europe", "stoxx", "dax", "cac", "mib"],
+        "Azionario Emergenti": ["emerging", "china", "india"],
+        "Obbligazionario Gov": ["govt", "treasury", "bund", "btp"],
+        "Obbligazionario Corp": ["corporate", "corp", "credit"],
+        "Tech": ["tech", "robot", "cyber", "digital"],
+        "Materie Prime": ["gold", "silver", "oil", "commodity"]
     }
-    for category, keywords in category_keywords.items():
-        for keyword in keywords:
-            if keyword in name_lower:
-                return category.capitalize()
-    return "Diversificato"
-
-
-def get_better_td_alternatives(isin: str, category: str) -> List[Dict]:
-    """Trova ETF alternativi nella stessa categoria con tracking difference migliore"""
-    return []
-
+    for cat, keys in maps.items():
+        if any(k in name_lower for k in keys):
+            return cat
+    return "Azionario/Altro"
 
 def fetch_ter_justetf(isin: str, timeout: int = 12) -> Optional[float]:
     html = fetch_justetf_page(isin, timeout=timeout)
-    if not html:
-        return None
+    if not html: return None
     return parse_ter_from_html(html)
-
 
 def fallback_ter_from_yahoo_info(etf_info: Dict) -> Optional[float]:
     keys = ["annualReportExpenseRatio", "annualExpenseRatio", "expenseRatio", "feesExpensesInvestment"]
     for k in keys:
         v = etf_info.get(k)
-        if v is None:
-            continue
-        try:
-            s = str(v).strip().replace("%", "")
-            f = float(s)
-            if f <= 0.05:
-                f *= 100.0
-            if 0.0 < f < 3.0:
-                return round(f, 4)
-        except Exception:
-            continue
+        if v is not None:
+            try:
+                val = float(v)
+                return val * 100 if val < 0.1 else val
+            except: continue
     return None

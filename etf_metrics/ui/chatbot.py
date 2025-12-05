@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
-# File: etf_metrics/ui/chatbot_app.py
 import streamlit as st
 from etf_metrics.core.chatbot import generate_advisory_response
 
-# Lista di modelli gratuiti e performanti (aggiornata)
 FREE_MODELS = {
     "Google Gemma 2 (9B) - Consigliato": "google/gemma-2-9b-it",
     "Mistral Nemo (12B)": "mistralai/Mistral-Nemo-Instruct-2407",
@@ -12,15 +10,15 @@ FREE_MODELS = {
     "HuggingFace Zephyr": "HuggingFaceH4/zephyr-7b-beta",
 }
 
+DEFAULT_HF_TOKEN = "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"
 
 def render_chatbot_ui():
     st.title("🤖 Financial Advisor AI")
     st.caption("Il tuo analista personale. Chiedi un'analisi su un titolo o ISIN.")
 
     with st.sidebar.expander("🧠 Impostazioni IA", expanded=True):
-        hf_token = st.text_input("Hugging Face Token", type="password")
+        hf_token = st.text_input("Hugging Face Token", value=DEFAULT_HF_TOKEN, type="password")
 
-        # NUOVO: Selezione Modello
         selected_model_name = st.selectbox(
             "Scegli il Modello AI",
             options=list(FREE_MODELS.keys()),
@@ -45,7 +43,6 @@ def render_chatbot_ui():
 
         with st.chat_message("assistant"):
             with st.spinner(f"L'IA ({selected_model_name}) sta analizzando i dati..."):
-                # Passiamo il modello scelto alla funzione core
                 response_text = generate_advisory_response(prompt, hf_token, model_id)
                 st.write(response_text)
                 st.session_state.messages.append({"role": "assistant", "content": response_text})

@@ -3,52 +3,56 @@ import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Any, DefaultDict
-import streamlit as st
 from collections import defaultdict
 import pandas as pd
+import streamlit as st
 
 from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series
-from .metrics import get_trend_signal, get_satellite_signal
+from etf_metrics.core.trading import check_satellite_status
 
 logger = logging.getLogger(__name__)
 
+
 def _calculate_open_positions(transactions: List[Dict[str, Any]]) -> DefaultDict[str, Dict[str, Any]]:
-    """
-    Calcola le quantità, i costi totali e lo stato 'satellite' delle posizioni aperte.
-    """
-    positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0, 'satellite': False})
+    """Calcola le quantità e i costi totali. Tiene traccia della data del primo acquisto attivo."""
+    positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0, 'satellite': False, 'first_buy_date': None})
     sorted_trans = sorted(transactions, key=lambda x: x['date'])
 
     for t in sorted_trans:
         isin = t['isin']
         qty = float(t['quantity'])
         price = float(t['price'])
+        t_date = pd.to_datetime(t['date'])
 
         if t['type'] == 'buy':
+            if positions[isin]['quantity'] == 0:
+                positions[isin]['first_buy_date'] = t_date
+
             positions[isin]['quantity'] += qty
             positions[isin]['total_cost'] += qty * price
             if t.get('satellite', False):
                 positions[isin]['satellite'] = True
+
         elif t['type'] == 'sell':
             if positions[isin]['quantity'] > 0:
-                if positions[isin]['quantity'] < 1e-9: continue
                 avg_buy_price = positions[isin]['total_cost'] / positions[isin]['quantity']
-
                 sell_qty = min(qty, positions[isin]['quantity'])
-
                 cost_of_sold_shares = sell_qty * avg_buy_price
                 positions[isin]['quantity'] -= sell_qty
+
                 if positions[isin]['quantity'] < 1e-9:
                     positions[isin]['quantity'] = 0
                     positions[isin]['total_cost'] = 0
+                    positions[isin]['first_buy_date'] = None
                 else:
                     positions[isin]['total_cost'] -= cost_of_sold_shares
                     if positions[isin]['total_cost'] < 0: positions[isin]['total_cost'] = 0
 
     return positions
 
-def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: float, tax_rate: float) -> \
-        List[Dict[str, Any]]:
+
+def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: float, tax_rate: float) -> List[
+    Dict[str, Any]]:
     """Calcola plusvalenze e minusvalenze per ogni operazione di vendita."""
     sales_gains = []
     positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0})
@@ -65,8 +69,6 @@ def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: floa
 
         elif t['type'] == 'sell':
             if positions[isin]['quantity'] < qty:
-                logger.warning(
-                    f"Vendita di {isin} per una quantità ({qty}) superiore a quella posseduta. Transazione saltata.")
                 continue
 
             avg_buy_price = positions[isin]['total_cost'] / positions[isin]['quantity']
@@ -92,118 +94,88 @@ def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: floa
 
     return sales_gains
 
+
 def _fetch_current_prices_and_series(isins: List[str]) -> Dict[str, Dict[str, Any]]:
     """
-    Recupera il prezzo più recente, la serie storica 'Close', il DataFrame OHLCV
-    e la serie VIX per una lista di ISIN.
+    Recupera dati OHLCV a 10 anni per calcolare correttamente ATR e massimi.
     """
     data = {}
-    fetch_period = "2y" # Potrebbe servire uno storico adeguato per l'ATR e il max recente
-
-    # Recupera la serie VIX una sola volta
-    try:
-        vix_series = get_series("^VIX", fetch_period)
-        if vix_series is None or vix_series.empty:
-            logger.warning("Impossibile recuperare i dati del VIX.")
-            vix_series = pd.Series(dtype=float) # Serie vuota per evitare errori dopo
-    except Exception as e:
-        logger.error(f"Errore nel recupero dati VIX: {e}")
-        vix_series = pd.Series(dtype=float)
+    fetch_period = "10y"
 
     for isin in isins:
         ticker = resolve_isin_one(isin)
         series_df = get_series(ticker, fetch_period, as_dataframe=True) if ticker else None
 
         if series_df is not None and not series_df.empty and 'Close' in series_df.columns:
-            close_series = series_df['Close'].copy()
-            close_series.name = ticker
+            current_price = series_df['Close'].iloc[-1]
             data[isin] = {
-                "price": close_series.iloc[-1],
-                "series": close_series,
+                "price": current_price,
                 "series_df": series_df,
-                "vix_series": vix_series # Aggiungi la serie VIX ai dati per ogni ISIN
             }
         else:
-            data[isin] = {
-                "price": 0,
-                "series": None,
-                "series_df": None,
-                "vix_series": vix_series # Aggiungi comunque la serie VIX
-            }
-            logger.warning(f"Impossibile recuperare i dati OHLCV completi per {isin} ({ticker})")
+            data[isin] = {"price": 0, "series_df": None}
+            logger.warning(f"Dati incompleti per {isin}")
     return data
 
 
 def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, Any]],
                                     market_data: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Arricchisce i dati delle posizioni aperte con P&L e segnale di trend/satellite.
-    Modificato per passare la serie VIX a get_satellite_signal.
+    Arricchisce posizioni con P&L e logica Satellite/Core.
     """
-    enriched_positions = []
+    enriched = []
     for isin, data in open_positions.items():
-        if data['quantity'] > 1e-9: # Usa una tolleranza piccola per evitare errori floating point
-            market_info = market_data.get(isin, {})
-            current_price = market_info.get("price", 0)
-            series = market_info.get("series", None)
-            series_df = market_info.get("series_df", None)
-            vix_series = market_info.get("vix_series", pd.Series(dtype=float)) # Recupera VIX
+        if data['quantity'] > 1e-9:
+            mkt = market_data.get(isin, {})
+            curr_price = mkt.get("price", 0)
+            df_hist = mkt.get("series_df", None)
 
-            invested_amount = data['total_cost']
-            current_amount = data['quantity'] * current_price
-            unrealized_pnl = current_amount - invested_amount
-            avg_buy_price = invested_amount / data['quantity'] if data['quantity'] > 1e-9 else 0
-            unrealized_pnl_pct = (unrealized_pnl / invested_amount * 100) if invested_amount > 1e-9 else 0.0
+            invested = data['total_cost']
+            curr_val = data['quantity'] * curr_price
+            unrealized = curr_val - invested
+            unrealized_pct = (unrealized / invested * 100) if invested > 0 else 0
 
-            is_satellite_asset = data.get('satellite', False)
+            signal_text = "N/D"
+            is_sat = data.get('satellite', False)
 
-            trend_signal_info = {"signal": "N/D", "reason": "Dati insufficienti"} # Default
-
-            if is_satellite_asset:
-                if series_df is not None and vix_series is not None:
-                     # Passa vix_series alla funzione
-                    trend_signal_info = get_satellite_signal(series_df, vix_series)
+            if df_hist is not None:
+                if is_sat:
+                    purchase_date = data.get('first_buy_date')
+                    if purchase_date:
+                        res = check_satellite_status(df_hist, purchase_date, data['quantity'])
+                        signal_text = res['action']
+                        if res['action'] == "SELL":
+                            signal_text += f" (Stop: {res.get('stop_price', 0):.2f})"
+                    else:
+                        signal_text = "HOLD (Data acq. ignota)"
                 else:
-                    reason = []
-                    if series_df is None: reason.append("Mancano dati OHLCV.")
-                    if vix_series is None or vix_series.empty : reason.append("Mancano dati VIX.")
-                    trend_signal_info = {"signal": "Dati Insufficienti", "reason": " ".join(reason)}
-            else: # Asset Core
-                if series is not None:
-                    original_signal_string = get_trend_signal(series)
-                    trend_signal_info = {"signal": original_signal_string, "reason": ""}
-                # else: mantiene il default "Dati insufficienti"
+                    sma200 = df_hist['Close'].rolling(200).mean().iloc[-1]
+                    if curr_price > sma200:
+                        signal_text = "MANTIENI (Trend Core)"
+                    else:
+                        signal_text = "MONITORA (Sotto SMA200)"
 
-            enriched_positions.append({
+            enriched.append({
                 'isin': isin,
                 'quantity': data['quantity'],
-                'avg_buy_price': avg_buy_price,
-                'current_price': current_price,
-                'invested_amount': invested_amount,
-                'current_amount': current_amount,
-                'unrealized_pnl': unrealized_pnl,
-                'unrealized_pnl_pct': unrealized_pnl_pct,
-                'trend_signal': trend_signal_info.get("signal", "N/D"),
-                'trend_reason': trend_signal_info.get("reason", ""),
-                'satellite': is_satellite_asset
+                'avg_buy_price': invested / data['quantity'],
+                'current_price': curr_price,
+                'invested_amount': invested,
+                'current_amount': curr_val,
+                'unrealized_pnl': unrealized,
+                'unrealized_pnl_pct': unrealized_pct,
+                'trend_signal': signal_text,
+                'satellite': is_sat
             })
-    return enriched_positions
+    return enriched
 
-def _aggregate_portfolio_summary(
-        open_positions_details: List[Dict[str, Any]],
-        realized_pnl_net: float,
-        transactions: List[Dict[str, Any]]
-) -> Dict[str, Any]:
-    """
-    Calcola le metriche di riepilogo del portafoglio.
-    """
+
+def _aggregate_portfolio_summary(open_positions_details, realized_pnl_net, transactions):
     invested_net_open = sum(p['invested_amount'] for p in open_positions_details)
     current_value_open = sum(p['current_amount'] for p in open_positions_details)
     unrealized_pnl_open = sum(p['unrealized_pnl'] for p in open_positions_details)
-
     total_pnl = unrealized_pnl_open + realized_pnl_net
     total_capital_invested = sum(t['quantity'] * t['price'] for t in transactions if t['type'] == 'buy')
-
     return {
         'net_invested': invested_net_open,
         'current_value': current_value_open,
@@ -256,64 +228,41 @@ class PortfolioTracker:
 
     @staticmethod
     def calculate_portfolio_pnl(transactions: List[Dict[str, Any]], commission: float = 1.0, tax_rate: float = 26.0) -> \
-            Dict[str, Any]:
-        """Orchestra il calcolo completo del P&L del portafoglio."""
+    Dict[str, Any]:
         if not transactions:
-            return {
-                'open_positions': [], 'aggregated_positions': [], 'capital_gains': [],
-                'net_invested': 0, 'current_value': 0, 'realized_pnl': 0,
-                'total_pnl': 0, 'total_pnl_pct': 0
-            }
+            return {'open_positions': [], 'aggregated_positions': [], 'capital_gains': [], 'net_invested': 0,
+                    'current_value': 0, 'realized_pnl': 0, 'total_pnl': 0, 'total_pnl_pct': 0}
 
         capital_gains_realized = _calculate_realized_pnl(transactions, commission, tax_rate)
         realized_pnl_net = sum(cg['net_pnl'] for cg in capital_gains_realized)
-
         open_positions_base = _calculate_open_positions(transactions)
-
         isins_to_fetch = [isin for isin, data in open_positions_base.items() if data['quantity'] > 1e-9]
         market_data = _fetch_current_prices_and_series(isins_to_fetch)
-
         open_positions_details = _enrich_open_positions_with_pnl(open_positions_base, market_data)
-
         summary = _aggregate_portfolio_summary(open_positions_details, realized_pnl_net, transactions)
-
         aggregated_positions = PortfolioTracker.calculate_aggregated_positions(transactions, open_positions_details)
 
-        return {
-            **summary,
-            'open_positions': open_positions_details,
-            'aggregated_positions': aggregated_positions,
-            'capital_gains': capital_gains_realized
-        }
+        return {**summary, 'open_positions': open_positions_details, 'aggregated_positions': aggregated_positions,
+                'capital_gains': capital_gains_realized}
 
     @staticmethod
-    def calculate_aggregated_positions(transactions: List[Dict[str, Any]],
-                                       open_positions_details: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Calcola una vista aggregata per ISIN (acquisti totali, vendite totali, P&L, etc.)."""
+    def calculate_aggregated_positions(transactions, open_positions_details):
         aggregated = []
         all_isins = set(t['isin'] for t in transactions)
-
         for isin in all_isins:
             trans_isin = [t for t in transactions if t['isin'] == isin]
             total_bought_qty = sum(t['quantity'] for t in trans_isin if t['type'] == 'buy')
             total_bought_value = sum(t['quantity'] * t['price'] for t in trans_isin if t['type'] == 'buy')
             total_sold_qty = sum(t['quantity'] for t in trans_isin if t['type'] == 'sell')
             total_sold_value = sum(t['quantity'] * t['price'] for t in trans_isin if t['type'] == 'sell')
-
             avg_buy_price = total_bought_value / total_bought_qty if total_bought_qty > 0 else 0
             realized_pnl_gross = total_sold_value - (total_sold_qty * avg_buy_price)
-
             current_pos = next((p for p in open_positions_details if p['isin'] == isin), None)
             unrealized_pnl = current_pos['unrealized_pnl'] if current_pos else 0
-
             aggregated.append({
-                'isin': isin,
-                'total_bought_qty': total_bought_qty,
-                'total_sold_qty': total_sold_qty,
-                'current_qty': current_pos['quantity'] if current_pos else 0,
-                'avg_buy_price': avg_buy_price,
-                'realized_pnl': realized_pnl_gross,
-                'unrealized_pnl': unrealized_pnl,
+                'isin': isin, 'total_bought_qty': total_bought_qty, 'total_sold_qty': total_sold_qty,
+                'current_qty': current_pos['quantity'] if current_pos else 0, 'avg_buy_price': avg_buy_price,
+                'realized_pnl': realized_pnl_gross, 'unrealized_pnl': unrealized_pnl,
                 'total_pnl': realized_pnl_gross + unrealized_pnl,
                 'current_value': current_pos['current_amount'] if current_pos else 0,
             })

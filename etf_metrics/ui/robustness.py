@@ -33,7 +33,6 @@ def render_robustness_ui():
 
     tab1, tab2, tab3 = st.tabs(["📉 Detrended Analysis", "🎲 Monte Carlo", "🚶 Walk-Forward"])
 
-    # TAB 1: DETRENDED
     with tab1:
         st.subheader("Test su Dati Detrended (Zero Drift)")
         st.markdown("Verifica se la strategia funziona rimuovendo il trend di fondo.")
@@ -45,13 +44,11 @@ def render_robustness_ui():
                 with st.spinner("Elaborazione dati sintetici e ricalcolo indicatori..."):
                     trades, final, detrended_data = run_detrended_analysis(tickers, str(start_date), initial_cap)
 
-                # DEBUG VISIVO
                 if detrended_data and tickers[0] in detrended_data:
                     st.write("### 🔍 Verifica Visiva: Reale vs Detrended")
                     ticker_to_plot = tickers[0]
 
                     try:
-                        # Scarichiamo dati reali freschi per il confronto grafico
                         orig_series = get_series(ticker_to_plot, period="5y")
                         if orig_series is not None:
                             detr_series = detrended_data[ticker_to_plot]['Close']
@@ -62,13 +59,11 @@ def render_robustness_ui():
                                 "Detrended (Senza Trend)": detr_series.loc[common_idx]
                             })
 
-                            # Normalizzazione a 100
                             chart_df = (chart_df / chart_df.iloc[0]) * 100
                             st.line_chart(chart_df)
                     except Exception as e:
                         st.warning(f"Impossibile generare grafico di debug: {e}")
 
-                # RISULTATI NUMERICI
                 ret = ((final - initial_cap) / initial_cap) * 100
                 color = "green" if ret > 0 else "red"
                 st.markdown(f"### Risultato PnL Detrended: :{color}[{ret:.2f}%]")
@@ -85,7 +80,6 @@ def render_robustness_ui():
                     st.info(
                         "Nessun trade generato. La rimozione del trend potrebbe aver appiattito l'ADX o i segnali di breakout.")
 
-    # TAB 2: MONTE CARLO
     with tab2:
         st.subheader("Permutation Test (Significatività)")
         n_sims = st.slider("Numero Simulazioni", 10, 100, 20)
@@ -109,7 +103,6 @@ def render_robustness_ui():
                 else:
                     st.error(f"❌ **Non Significativo.** Il risultato rientra nella varianza casuale.")
 
-                # Plot Istogramma
                 if res['monte_carlo_returns']:
                     fig, ax = plt.subplots()
                     ax.hist([r * 100 for r in res['monte_carlo_returns']], bins=15, alpha=0.7, label='Random Runs')
@@ -118,7 +111,6 @@ def render_robustness_ui():
                     ax.legend()
                     st.pyplot(fig)
 
-    # TAB 3: WALK FORWARD
     with tab3:
         st.subheader("Walk-Forward Stability")
         if st.button("Avvia Walk-Forward"):
