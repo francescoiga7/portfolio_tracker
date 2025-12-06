@@ -124,4 +124,4 @@ def render_portfolio_backtester_ui():
             key_prefix="main_bt"
         )
     else:
-        st.info("Definisci un portafoglio e i parametri nella sidebar, poi premi 'Esegui Backtest'.")
+        st.info("👈 Definisci un portafoglio e i parametri nella sidebar, poi premi 'Esegui Backtest'.")

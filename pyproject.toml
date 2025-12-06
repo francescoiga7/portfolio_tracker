@@ -20,14 +20,12 @@ beautifulsoup4 = "*"
 matplotlib = "*"
 scipy = "*"
 pyarrow = "*"
+huggingface_hub = "*"
+certifi = "*"
 
 [tool.poetry.group.dev.dependencies]
-poe-the-poet = "*"
 black = "*"
 pytest = "*"
-
-[tool.poe.tasks]
-start = "streamlit run app.py"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

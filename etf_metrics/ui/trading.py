@@ -1,289 +1,199 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
-from datetime import datetime
-import json
-from pathlib import Path
-import math
-
-from etf_metrics.core.pac_screener import fetch_screener_data
+from datetime import date
 from etf_metrics.clients.yahoo_client import get_series
-from etf_metrics.core.metrics import get_monday_buy_signal, monitor_weekly_trade
-from etf_metrics.shared.config import TACTICAL_TRADING_SEED_QUERIES
+from etf_metrics.core.trading import analyze_ticker
+from etf_metrics.core.automated_backtest import run_market_aware_backtest
 
-TRADES_JSON_FILE = "simulated_trades.json"
-
-
-def save_simulated_trades():
-    """Salva le operazioni simulate in un file JSON."""
-    try:
-        path = Path(TRADES_JSON_FILE)
-        trades = st.session_state.get('simulated_trades', {})
-        path.write_text(json.dumps(trades, indent=2), encoding="utf-8")
-    except Exception as e:
-        st.error(f"Errore durante il salvataggio delle operazioni: {e}")
-
-
-def load_simulated_trades_once():
-    """Carica le operazioni simulate da un file JSON una sola volta per sessione."""
-    if st.session_state.get("_trades_loaded_once"):
-        return
-    path = Path(TRADES_JSON_FILE)
-    if path.exists():
-        try:
-            trades = json.loads(path.read_text(encoding="utf-8"))
-            st.session_state.simulated_trades = trades
-        except Exception as e:
-            st.error(f"Errore during il caricamento delle operazioni: {e}")
-            st.session_state.simulated_trades = {}
-    st.session_state["_trades_loaded_once"] = True
-
-
-def calculate_min_shares(price, commission, tax_rate, target_profit_pct=1.0):
-    """
-    Calcola il numero minimo di quote per coprire costi e tasse ipotizzando un certo profitto.
-    """
-    if price <= 0 or target_profit_pct <= 0:
-        return float('inf')
-
-    profit_per_share = price * (target_profit_pct / 100.0)
-    profit_after_tax = profit_per_share * (1 - tax_rate / 100.0)
-    total_commission = 2 * commission
-
-    if profit_after_tax <= 0:
-        return float('inf')
-
-    return math.ceil(total_commission / profit_after_tax)
+DEFAULT_TRADING_LIST = """NVDA
+TSLA
+AMD
+COIN
+MARA
+PLTR
+META
+AMZN
+NFLX
+QQQ
+TQQQ
+SQQQ"""
 
 
 def render_trading_ui():
-    st.title("💹 Trading Settimanale")
-    st.caption(
-        "Identifica segnali di acquisto al lunedì e simula operazioni con vendita al venerdì, basato su un modello quantitativo.")
+    st.title("💹 Trading")
+    st.caption("Algoritmo quantitativo per Swing Trading e Breakout di Volatilità.")
 
-    if 'simulated_trades' not in st.session_state:
-        st.session_state.simulated_trades = {}
-    load_simulated_trades_once()
-
-    if 'tactical_universe_data' not in st.session_state:
-        st.session_state.tactical_universe_data = None
-    if 'tactical_log' not in st.session_state:
-        st.session_state.tactical_log = []
-
-    with st.expander("📖 Metodologia e Funzionamento"):
+    with st.expander("🧠 Logica Operativa e Backtest"):
         st.markdown("""
-        Questa sezione implementa una strategia di **swing trading settimanale** basata sull'anomalia del "weekend effect", arricchita con filtri quantitativi per aumentare le probabilità di successo.
+        Questa sezione identifica setup di **Breakout** e **Reversion** basati su volatilità e volumi.
 
-        **Fase 1: Caricamento dell'Universo**
-        Puoi scoprire un vasto universo di azioni ed ETF tramite la **Scoperta Automatica** o analizzare una tua **lista manuale** di Ticker.
+        **Funzionalità Time Travel:**
+        Attivando il Backtest nella sidebar, puoi "tornare indietro nel tempo".
+        L'algoritmo vedrà SOLO i dati disponibili fino a quella data. È utile per rispondere alla domanda:
+        *"Se avessi usato questo algoritmo il 15 ottobre scorso, mi avrebbe dato il segnale giusto?"*
 
-        **Fase 2: Ricerca dei Segnali di "Monday Buy"**
-        L'applicazione cerca segnali di acquisto solo di **lunedì**, basandosi su una **confluenza di 4 fattori**:
-        1.  **Regime di Mercato Favorevole**: Il VIX (indice di volatilità) deve essere basso, per evitare di comprare durante fasi di panico.
-        2.  **Trend di Fondo Rialzista**: Il prezzo dell'asset deve trovarsi al di sopra della sua media mobile a 50 giorni (SMA50).
-        3.  **Condizione "Weekend Effect"**: Il rendimento del venerdì precedente deve essere stato negativo, aumentando le probabilità di un prezzo di ingresso vantaggioso.
-        4.  **Conferma dei Volumi**: I volumi di scambio del lunedì devono essere superiori alla media per confermare l'interesse degli acquirenti.
-
-        **Fase 3: Simulazione e Gestione della Posizione**
-        Una volta simulato un acquisto, la posizione viene monitorata con strategie di uscita chiare:
-        - **Vendita il Venerdì**: L'obiettivo è chiudere la posizione il venerdì, ma solo se il profitto atteso copre i costi di transazione (commissioni) e le tasse.
-        - **Stop Loss**: Protezione dal ribasso con un limite di perdita predefinito.
-        - **Uscita Tecnica Anticipata**: Se il trend di breve termine si inverte (es. prezzo sotto la media a 10 giorni), viene suggerita un'uscita per proteggere il capitale.
+        **Legenda Segnali:**
+        * 🟢 **LONG_BREAKOUT:** Prezzo rompe la Banda di Bollinger superiore con volumi.
+        * 🔵 **LONG_DIP:** Trend rialzista ma prezzo in ritracciamento (RSI basso).
+        * 🔴 **SHORT_BREAKDOWN:** Rottura violenta al ribasso dei supporti.
         """)
 
-    st.sidebar.header("⚙️ Parametri di Trading")
+    st.sidebar.header("⚙️ Radar Settings")
 
-    with st.sidebar.expander("1. Carica Universo di Analisi", expanded=True):
-        source_mode = st.radio("Modalità di Ricerca", ["Scoperta Automatica", "Inserimento Manuale"])
-        specific_items_input = ""
-        if source_mode == "Inserimento Manuale":
-            specific_items_input = st.text_area(
-                "Elenco Ticker (uno per riga)",
-                "ALAB\nHOOD\nCLS\nSOFI\nANET\nNVDA\nCRWV\nAPLD\nNBIS\nORCL",
-                height=150
-            )
+    st.sidebar.subheader("⏳ Macchina del Tempo")
+    enable_time_travel = st.sidebar.checkbox("Abilita Backtest Storico", value=False)
 
-        if st.button("Carica/Aggiorna Dati Universo"):
-            st.session_state.tactical_universe_data, st.session_state.tactical_signals, st.session_state.tactical_log = None, [], []
-
-            specific_items = None
-            if source_mode == "Inserimento Manuale" and specific_items_input.strip():
-                specific_items = [item.strip().upper() for item in specific_items_input.split('\n') if
-                                  item.strip()]
-
-            with st.spinner("Caricamento dati storici... L'operazione potrebbe richiedere alcuni minuti."):
-                log_list = []
-                instrument_types = ["EQUITY", "ETF", "ETP", "ETN"]
-                queries = TACTICAL_TRADING_SEED_QUERIES if source_mode == "Scoperta Automatica" else []
-
-                st.session_state.tactical_universe_data = fetch_screener_data(
-                    log_area=log_list,
-                    specific_isins=specific_items,
-                    instrument_types=instrument_types,
-                    queries=queries
-                )
-            st.success(f"Universo di {len(st.session_state.tactical_universe_data)} strumenti caricato!")
-            st.session_state.tactical_log.extend(log_list)
-            st.rerun()
-
-    st.sidebar.header("2. Strategia di Uscita")
-    stop_loss = st.sidebar.number_input("Stop Loss (%)", 1.0, 100.0, 10.0, 1.0)
-    commission = st.sidebar.number_input("Commissioni per operazione (€)", 0.0, 100.0, 1.0, 0.5)
-    tax_rate = st.sidebar.number_input("Tassazione plusvalenze (%)", 0.0, 100.0, 26.0, 1.0)
-
-    if st.session_state.tactical_universe_data is not None:
-        if st.sidebar.button("Cerca Segnali 'Monday Buy'"):
-            st.session_state.tactical_log = []
-            universe_data = st.session_state.tactical_universe_data
-            signals = []
-            progress_bar = st.progress(0, text="Analisi segnali in corso...")
-
-            with st.spinner("Caricamento dati di mercato (VIX)..."):
-                vix_series = get_series("^VIX", period="1y")
-
-            if vix_series is None or vix_series.empty:
-                st.error("Impossibile caricare i dati del VIX. L'analisi non può procedere.")
-                return
-
-            for i, data in enumerate(universe_data):
-                ticker = data['ticker']
-                series_df = data['series']
-                series_df.attrs['ticker'] = ticker
-
-                progress_bar.progress((i + 1) / len(universe_data), text=f"Analisi: {ticker}")
-
-                if series_df is None or not isinstance(series_df, pd.DataFrame) or series_df.empty or len(
-                        series_df) < 51:
-                    st.session_state.tactical_log.append(f"⚠️ **{ticker}**: Dati storici insufficienti. Saltato.")
-                    continue
-
-                buy_signal, log_messages = get_monday_buy_signal(series_df, vix_series)
-                st.session_state.tactical_log.extend(log_messages)
-
-                if buy_signal:
-                    signals.append({"ticker": ticker, "price": series_df['Close'].iloc[-1], **buy_signal})
-
-            progress_bar.empty()
-            st.session_state.tactical_signals = signals
-            st.rerun()
-
-    if not st.session_state.tactical_universe_data and not st.session_state.simulated_trades:
-        st.info("👈 Inizia caricando un universo di strumenti dalla barra laterale.")
-
-    if 'tactical_signals' in st.session_state:
-        st.subheader("🚨 Segnali di Acquisto 'Monday Buy' Identificati")
-        signals = st.session_state.tactical_signals
-        if signals:
-            sorted_signals = sorted(signals, key=lambda x: x.get('friday_return', 0))
-
-            df_signals = pd.DataFrame(sorted_signals)
-            df_signals['min_shares'] = df_signals.apply(
-                lambda row: calculate_min_shares(row['price'], commission, tax_rate), axis=1
-            )
-
-            col_config = {
-                "ticker": st.column_config.TextColumn("Ticker", width="small"),
-                "price": st.column_config.NumberColumn("Prezzo (€)", format="%.2f", width="small"),
-                "min_shares": st.column_config.NumberColumn("Quote Minime",
-                                                            help="Quote minime per coprire costi e tasse con un profitto dell'1%",
-                                                            format="%d", width="small"),
-                "action": st.column_config.CheckboxColumn("Simula Acquisto", width="small")
-            }
-
-            df_display = df_signals[['ticker', 'price', 'min_shares']].copy()
-            df_display['action'] = False
-
-            st.write("Classifica dei segnali con potenziale di rialzo, dal più promettente:")
-            edited_df = st.data_editor(df_display, column_config=col_config, hide_index=True, width="stretch",
-                                     key="signal_editor")
-
-            if st.button("Esegui Simulazioni Selezionate"):
-                for i, row in edited_df.iterrows():
-                    if row['action']:
-                        ticker = row['ticker']
-                        price = row['price']
-                        st.session_state.simulated_trades[ticker] = {
-                            "purchase_price": price,
-                            "purchase_date": datetime.now().strftime("%Y-%m-%d"),
-                            "status": "Aperta"
-                        }
-                        st.success(f"Acquisto di {ticker} simulato a {price:.2f}!")
-                save_simulated_trades()
-                st.rerun()
-
-        elif st.session_state.tactical_universe_data:
-            st.info("Nessun segnale di acquisto 'Monday Buy' identificato oggi nell'universo caricato.")
-
-    st.subheader("📈 Posizioni Simulate Aperte")
-    open_trades_data = []
-    if st.session_state.simulated_trades:
-        for ticker, trade_info in st.session_state.simulated_trades.items():
-            if trade_info.get('status') == "Aperta":
-                series_df = get_series(ticker, period="1y", as_dataframe=True)
-                if series_df is None or series_df.empty:
-                    st.warning(f"Dati non disponibili per monitorare {ticker}.")
-                    continue
-
-                current_price = series_df['Close'].iloc[-1]
-                pnl_pct = (current_price / trade_info['purchase_price'] - 1) * 100
-                sell_signal = monitor_weekly_trade(
-                    trade_info['purchase_price'], series_df['Close'],
-                    commission, tax_rate, stop_loss
-                )
-
-                open_trades_data.append({
-                    "Ticker": ticker,
-                    "Data Acquisto": trade_info['purchase_date'],
-                    "Prezzo Acquisto": trade_info['purchase_price'],
-                    "Prezzo Attuale": current_price,
-                    "P&L (%)": pnl_pct,
-                    "Segnale Vendita": sell_signal['reason'] if sell_signal else "Mantieni"
-                })
-
-    if open_trades_data:
-        df_display = pd.DataFrame(open_trades_data)
-
-        def style_pnl(val):
-            color = 'green' if val >= 0 else 'red'
-            return f'color: {color};'
-
-        def style_sell_signal(val):
-            val_lower = val.lower()
-            if "mantieni" in val_lower:
-                return 'background-color: #28a745; color: white; font-weight: bold;'
-            elif "vendi" in val_lower:
-                return 'background-color: #dc3545; color: white; font-weight: bold;'
-            return ''
-
-        styler = df_display.style.map(style_pnl, subset=['P&L (%)']) \
-            .map(style_sell_signal, subset=['Segnale Vendita']) \
-            .format({
-            "Prezzo Acquisto": "€{:,.2f}",
-            "Prezzo Attuale": "€{:,.2f}",
-            "P&L (%)": "{:,.2f}%"
-        })
-
-        st.dataframe(styler, hide_index=True, width="stretch")
-
-        sell_candidates = [trade['Ticker'] for trade in open_trades_data if "Vendi" in trade['Segnale Vendita']]
-        if sell_candidates:
-            trades_to_close = st.multiselect(
-                "Seleziona posizioni da chiudere",
-                options=sell_candidates,
-                label_visibility="collapsed"
-            )
-            if st.button("Chiudi Selezionate"):
-                if trades_to_close:
-                    for ticker_to_close in trades_to_close:
-                        st.session_state.simulated_trades[ticker_to_close]['status'] = "Chiusa"
-                    save_simulated_trades()
-                    st.success(f"Posizioni chiuse per: {', '.join(trades_to_close)}")
-                    st.rerun()
-                else:
-                    st.warning("Nessuna posizione selezionata per la chiusura.")
+    analysis_date = date.today()
+    if enable_time_travel:
+        analysis_date = st.sidebar.date_input(
+            "Analizza come se fosse il:",
+            date.today(),
+            min_value=date(2020, 1, 1),
+            max_value=date.today()
+        )
+        st.sidebar.warning(f"⚠️ Analisi congelata al: {analysis_date.strftime('%d/%m/%Y')}")
     else:
-        st.info("Nessuna posizione simulata aperta.")
+        st.sidebar.caption("Analisi in tempo reale (Dati odierni)")
 
-    if st.session_state.tactical_log:
-        with st.expander("🔍 Log Dettagliato dell'Analisi"):
-            st.markdown("\n".join(f"- {entry}" for entry in st.session_state.tactical_log))
+    tickers_input = st.sidebar.text_area("Watchlist (Ticker Yahoo)", DEFAULT_TRADING_LIST, height=200)
+
+    if st.sidebar.button("🔥 Scansiona Mercato"):
+        tickers = [t.strip().upper() for t in tickers_input.split('\n') if t.strip()]
+
+        results = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        cutoff_date = pd.to_datetime(analysis_date)
+
+        for i, ticker in enumerate(tickers):
+            status_text.text(f"Analisi {ticker} al {analysis_date}...")
+
+            full_df = get_series(ticker, period="5y", as_dataframe=True)
+
+            if full_df is not None and not full_df.empty:
+                df_slice = full_df[full_df.index <= cutoff_date].copy()
+
+                if len(df_slice) > 200:
+                    signal_data = analyze_ticker(ticker, df_slice)
+
+                    if signal_data and signal_data['signal'] != "NEUTRAL":
+                        results.append(signal_data)
+                else:
+                    pass
+
+            progress_bar.progress((i + 1) / len(tickers))
+
+        status_text.empty()
+        progress_bar.empty()
+
+        date_label = analysis_date.strftime('%d/%m/%Y')
+        if enable_time_travel:
+            st.subheader(f"📅 Risultati Storici al {date_label}")
+        else:
+            st.subheader(f"📅 Segnali Live ({date_label})")
+
+        if not results:
+            st.info(f"Nessun segnale operativo trovato alla data {date_label}.")
+            if enable_time_travel:
+                st.caption(
+                    "Suggerimento: Prova a cambiare data. I segnali di breakout sono rari e durano pochi giorni.")
+            return
+
+        st.success(f"Trovate {len(results)} opportunità operative!")
+
+        results.sort(key=lambda x: x['confidence'], reverse=True)
+
+        for res in results:
+            signal_color = "green" if "LONG" in res['signal'] else "red"
+
+            with st.container():
+                st.markdown(f"### {res['ticker']} : :{signal_color}[{res['signal']}]")
+                st.caption(f"Prezzo alla data {date_label}: **{res['price']:.2f}** | Confidence: {res['confidence']}/5")
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Prezzo Ingresso", f"{res['price']:.2f}")
+
+                sl_delta = res['stop_loss'] - res['price']
+                tp_delta = res['take_profit'] - res['price']
+
+                c2.metric("Stop Loss (ATR)", f"{res['stop_loss']:.2f}", delta=f"{sl_delta:.2f}", delta_color="inverse")
+                c3.metric("Take Profit", f"{res['take_profit']:.2f}", delta=f"{tp_delta:.2f}", delta_color="normal")
+
+                rsi_val = res['indicators']['RSI']
+                rsi_state = "Ipercomprato" if rsi_val > 70 else "Ipervenduto" if rsi_val < 30 else "Neutrale"
+                c4.metric("RSI (14)", f"{rsi_val:.1f}", delta=rsi_state, delta_color="off")
+
+                with st.expander("Dettagli Strategici"):
+                    st.write("**Motivazioni del Segnale:**")
+                    for reason in res['reasons']:
+                        st.markdown(f"- {reason}")
+
+                    st.markdown("---")
+                    st.markdown(f"**Dati Tecnici al {date_label}:**")
+                    st.markdown(f"- *Bande Bollinger Width:* {res['indicators']['BB_Width']:.4f} (Compressione)")
+                    st.markdown(f"- *Volume Relativo:* {res['indicators']['Vol_Rel']:.1f}x media")
+
+                st.markdown("---")
+
+    else:
+        if enable_time_travel:
+            st.info(f"👈 Imposta la data storica ({analysis_date.strftime('%d/%m/%Y')}) e premi 'Scansiona'.")
+        else:
+            st.info("👈 Inserisci i ticker e premi 'Scansiona Mercato' per l'analisi live.")
+
+        st.markdown("---")
+        st.subheader("🤖 Backtest Strategia")
+        st.caption(
+            "Simula l'acquisto sui segnali. Puoi scegliere tra Trailing Stop dinamico o uscita fissa a Target.")
+
+        default_backtest_list = "NVDA\nTSLA\nAMD\nCOIN\nMARA\nPLTR\nMETA\nAMZN\nNFLX\nQQQ\nTQQQ\nSQQQ"
+        backtest_tickers_txt = st.text_area("Ticker per Backtest", default_backtest_list, height=100)
+
+        # NUOVO FLAG
+        use_tp_only = st.checkbox("🎯 Usa Strategia 'Solo Take Profit'",
+                                  help="Se attivo, ignora il Trailing Stop. Vende SOLTANTO se il prezzo tocca il Take Profit (Entry + 4*ATR). Più rischioso ma evita stop prematuri.")
+
+        start_date = st.sidebar.date_input("Data Inizio Backtest", pd.to_datetime("2021-01-01"))
+
+        if st.button("Esegui Backtest"):
+            t_list = [t.strip().upper() for t in backtest_tickers_txt.split('\n') if t.strip()]
+
+            strategy_name = "Target Fisso (Take Profit)" if use_tp_only else "Trailing Stop Dinamico"
+            with st.spinner(f"Simulazione con strategia {strategy_name} in corso..."):
+                df_trades, final_cap = run_market_aware_backtest(t_list, start_date=start_date,
+                                                                 use_tp_only=use_tp_only)
+
+            if not df_trades.empty:
+                total_return = ((final_cap - 1000) / 1000) * 100
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Capitale Finale", f"€{final_cap:,.2f}")
+                c2.metric("Rendimento", f"{total_return:.2f}%", delta_color="normal")
+
+                closed_trades = df_trades[df_trades['Action'] == 'SELL (100%)']
+                if not closed_trades.empty:
+                    wins = len(closed_trades[closed_trades['PnL_Eur'] > 0])
+                    total_closed = len(closed_trades)
+                    win_rate = (wins / total_closed) * 100
+                    c3.metric("Win Rate", f"{win_rate:.1f}% ({wins}/{total_closed})")
+
+                st.subheader("Giornale delle Operazioni")
+
+                def style_trades(row):
+                    action = row['Action']
+                    if "BUY" in action: return ['background-color: #000000'] * len(row)
+                    if "SELL" in action:
+                        if "PROFIT" in str(row['Reason']) or "TARGET" in str(row['Reason']): return [
+                            'background-color: #f0fff4; color: green'] * len(row)
+                        return ['background-color: #fff5f5; color: red'] * len(row)
+                    return [''] * len(row)
+
+                st.dataframe(
+                    df_trades.style.apply(style_trades, axis=1)
+                    .format({"Price": "{:.2f}", "PnL_Eur": "{:+.2f}", "PnL_Pct": "{:+.2f}%", "Capital": "€{:,.0f}"}),
+                    width="stretch",
+                )
+            else:
+                st.warning("Nessun trade generato nel periodo.")

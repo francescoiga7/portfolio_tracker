@@ -29,7 +29,6 @@ def style_trend_signal(val: str) -> str:
         return 'background-color: #28a745; color: white; font-weight: bold;' # Verde per Mantieni
     elif "monitora" in val_lower:
         return 'background-color: #ffc107; color: black; font-weight: bold;' # Giallo per Monitora
-    # Modificato per includere tutti i segnali che iniziano con "Vendi"
     elif val_lower.startswith("vendi"):
         return 'background-color: #dc3545; color: white; font-weight: bold;' # Rosso per Vendi
     return '' # Default
