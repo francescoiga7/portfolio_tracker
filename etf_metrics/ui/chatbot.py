@@ -3,10 +3,10 @@ import streamlit as st
 from etf_metrics.core.chatbot import generate_advisory_response
 
 FREE_MODELS = {
+    "Meta Llama 3 (8B)": "meta-llama/Meta-Llama-3-8B-Instruct",
     "Google Gemma 2 (9B) - Consigliato": "google/gemma-2-9b-it",
     "Mistral Nemo (12B)": "mistralai/Mistral-Nemo-Instruct-2407",
     "Microsoft Phi-3.5 Mini": "microsoft/Phi-3.5-mini-instruct",
-    "Meta Llama 3 (8B)": "meta-llama/Meta-Llama-3-8B-Instruct",
     "HuggingFace Zephyr": "HuggingFaceH4/zephyr-7b-beta",
 }
 

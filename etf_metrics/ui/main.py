@@ -45,7 +45,7 @@ def run_app():
             "🎯 Screener PAC",
             "⚡ Verifica Momentum",
             "💹 Trading",
-            "🤖 Chatbot Advisor",
+            "💬 Chatbot Advisor",
             "🛡️ Robustness Testing"
         ],
     )
@@ -64,7 +64,7 @@ def run_app():
         render_momentum_ui()
     elif app_mode == "💹 Trading":
         render_trading_ui()
-    elif app_mode == "🤖 Chatbot Advisor":
+    elif app_mode == "💬 Chatbot Advisor":
         render_chatbot_ui()
     elif app_mode == "🛡️ Robustness Testing":
         render_robustness_ui()
