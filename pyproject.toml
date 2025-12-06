@@ -21,16 +21,11 @@ matplotlib = "*"
 scipy = "*"
 pyarrow = "*"
 huggingface_hub = "*"
-poetry = "*"
-certifi = "^2025.11.12"
+certifi = "*"
 
 [tool.poetry.group.dev.dependencies]
-poethepoet = "*"
 black = "*"
 pytest = "*"
-
-[tool.poe.tasks]
-start = "streamlit run app.py"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
