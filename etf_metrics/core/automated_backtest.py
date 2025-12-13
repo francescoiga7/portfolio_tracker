@@ -5,7 +5,6 @@ import streamlit as st
 from etf_metrics.clients.yahoo_client import get_series
 
 
-# ... (Funzioni ausiliarie calculate_atr_series, calculate_adx_series, calculate_position_size rimangono invariate) ...
 def calculate_atr_series(df, window=14):
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
@@ -32,11 +31,9 @@ def calculate_position_size(capital, current_portfolio_value, vix_value, base_al
     if pd.isna(vix_value) or vix_value <= 0: vix_value = 20.0
 
     # OTTIMIZZAZIONE PER CONTI PICCOLI VS GRANDI
-    # Se < 2000€, concentriamo tutto su 1-2 asset per minimizzare l'impatto delle commissioni fisse
     if current_portfolio_value < 2500:
-        adjusted_pct = 0.95  # Lascia un 5% di cash per commissioni e fluttuazioni
+        adjusted_pct = 0.95
     else:
-        # Per conti grandi, diversifichiamo in base alla volatilità
         adjusted_pct = min(0.35, base_alloc_pct * (20.0 / vix_value))
 
     target_amount = current_portfolio_value * adjusted_pct
@@ -67,13 +64,10 @@ def prepare_market_data(tickers, period="10y"):
     return market_data
 
 
-def run_market_aware_backtest(tickers: list, start_date="2019-01-01", initial_capital=1000, use_tp_only=False,
+def run_market_aware_backtest(tickers: list, start_date="2019-01-01", initial_capital=1000,
                               preloaded_data=None, commission=1.0, tax_rate=26.0):
     """
-    Backtest fiscale realistico:
-    - Commissioni: fisso per ordine (Buy & Sell).
-    - Tasse: 26% su Plusvalenze Realizzate (Netto commissioni).
-    - Minusvalenze: Credito fiscale compensabile (Zainetto Fiscale).
+    Backtest fiscale realistico con strategia TRAILING STOP.
     """
 
     # 1. SELEZIONE FONTE DATI
@@ -101,8 +95,6 @@ def run_market_aware_backtest(tickers: list, start_date="2019-01-01", initial_ca
     cash = initial_capital
     positions = {}
     trade_log = []
-
-    # Zainetto Fiscale (Minusvalenze accumulate)
     tax_credit = 0.0
 
     try:
@@ -131,7 +123,6 @@ def run_market_aware_backtest(tickers: list, start_date="2019-01-01", initial_ca
         for t, p in positions.items():
             if current_date in market_data[t].index:
                 curr_price = market_data[t].loc[current_date]['Close']
-                # Valore posizione netto vendita stimata (senza tasse per ora)
                 portfolio_value += (p['qty'] * curr_price)
 
         # --- FASE A: GESTIONE VENDITE (SELL) ---
@@ -151,54 +142,43 @@ def run_market_aware_backtest(tickers: list, start_date="2019-01-01", initial_ca
             sell_price = curr_close
             sell_reason = ""
 
-            # Logica di uscita (Take Profit o Trailing Stop)
-            if use_tp_only:
-                if curr_high >= pos['take_profit']:
-                    should_sell = True
-                    sell_price = pos['take_profit']
-                    sell_reason = f"🎯 TARGET ({pos['take_profit']:.2f})"
-                elif curr_close < (pos['entry_price'] * 0.85):  # Hard stop emergenza
-                    should_sell = True
-                    sell_price = curr_close
-                    sell_reason = "🛑 HARD STOP"
-            else:
-                if curr_high > pos['highest_price']:
-                    positions[ticker]['highest_price'] = curr_high
+            # Logica di uscita: SOLO TRAILING STOP
+            if curr_high > pos['highest_price']:
+                positions[ticker]['highest_price'] = curr_high
 
-                mult = pos.get('sl_mult', 3.0)
-                potential_stop = positions[ticker]['highest_price'] - (curr_atr * mult)
+            mult = pos.get('sl_mult', 3.0)
+            potential_stop = positions[ticker]['highest_price'] - (curr_atr * mult)
 
-                if potential_stop > pos['trailing_stop']:
-                    positions[ticker]['trailing_stop'] = potential_stop
+            # Il trailing stop può solo salire
+            if potential_stop > pos['trailing_stop']:
+                positions[ticker]['trailing_stop'] = potential_stop
 
-                if curr_close < pos['trailing_stop']:
-                    should_sell = True
-                    sell_price = curr_close
-                    sell_reason = f"📉 TRAILING STOP"
+            if curr_close < pos['trailing_stop']:
+                should_sell = True
+                sell_price = curr_close
+                sell_reason = f"📉 TRAILING STOP"
+
+            # Hard stop emergenza
+            if curr_close < (pos['entry_price'] * 0.85):
+                should_sell = True
+                sell_price = curr_close
+                sell_reason = "🛑 HARD STOP"
 
             if should_sell:
                 qty = pos['qty']
 
                 # === CALCOLO FISCALE E COMMISSIONI ===
                 gross_revenue = qty * sell_price
-                net_revenue = gross_revenue - commission  # Tolgo comm vendita
-
-                # Costo di carico totale (inclusa commissione acquisto)
+                net_revenue = gross_revenue - commission
                 total_entry_cost = pos['total_cost_basis']
-
-                # Capital Gain/Loss
                 capital_gain = net_revenue - total_entry_cost
 
                 tax_amount = 0.0
-
                 if capital_gain > 0:
-                    # Ho un guadagno. Posso usare minusvalenze pregresse?
                     taxable_gain = max(0, capital_gain - tax_credit)
-                    tax_credit = max(0, tax_credit - capital_gain)  # Riduce lo zainetto
-
+                    tax_credit = max(0, tax_credit - capital_gain)
                     tax_amount = taxable_gain * (tax_rate / 100.0)
                 else:
-                    # Ho una perdita. Accumulo credito fiscale.
                     tax_credit += abs(capital_gain)
 
                 final_cash_in = net_revenue - tax_amount
@@ -227,7 +207,7 @@ def run_market_aware_backtest(tickers: list, start_date="2019-01-01", initial_ca
             daily = df.loc[current_date]
             curr_close = daily['Close']
 
-            # Filtri Macro di sicurezza
+            # Filtri Macro
             if curr_vix > 35: continue
             if not market_is_bullish: continue
             if pd.isna(daily['SMA200']) or curr_close < daily['SMA200']: continue
@@ -242,7 +222,6 @@ def run_market_aware_backtest(tickers: list, start_date="2019-01-01", initial_ca
             is_dip = (curr_close > daily['SMA50']) and (daily['RSI'] < 35)
 
             if is_breakout or is_dip:
-                # Calcolo Score per Ranking
                 score = 0
                 if is_breakout:
                     score = adx_val + ((vol_rel - 1.0) * 10)
@@ -250,7 +229,7 @@ def run_market_aware_backtest(tickers: list, start_date="2019-01-01", initial_ca
                 elif is_dip:
                     score = (100 - daily['RSI']) + (adx_val / 2)
 
-                if score >= 70:  # Filtro qualità
+                if score >= 70:
                     daily_candidates.append({
                         'ticker': ticker, 'price': curr_close, 'atr': daily['ATR'],
                         'high': daily['High'], 'type': "BREAKOUT" if is_breakout else "DIP",
@@ -261,19 +240,16 @@ def run_market_aware_backtest(tickers: list, start_date="2019-01-01", initial_ca
         daily_candidates.sort(key=lambda x: x['score'], reverse=True)
 
         for cand in daily_candidates:
-            # Calcola quanto investire
             alloc_eur = calculate_position_size(cash, portfolio_value, curr_vix)
-
-            # Deve rimanerci cash per le commissioni (almeno 2€ per sicurezza)
             max_buy_eur = alloc_eur - (commission * 2)
 
-            if max_buy_eur < (cand['price']): continue  # Non ho soldi nemmeno per 1 azione
+            if max_buy_eur < (cand['price']): continue
 
             qty = int(max_buy_eur / cand['price'])
             if qty < 1: continue
 
             cost_shares = qty * cand['price']
-            total_cost = cost_shares + commission  # Prezzo + Comm
+            total_cost = cost_shares + commission
 
             if total_cost > cash: continue
 
@@ -281,18 +257,15 @@ def run_market_aware_backtest(tickers: list, start_date="2019-01-01", initial_ca
 
             curr_atr = cand['atr'] if pd.notna(cand['atr']) else (cand['price'] * 0.02)
             sl_mult = 2.0 if cand['type'] == 'BREAKOUT' else 3.0
-            tp_mult = 4.0
 
             initial_stop = cand['price'] - (curr_atr * sl_mult)
-            take_profit_target = cand['price'] + (curr_atr * tp_mult)
 
             positions[cand['ticker']] = {
                 'qty': qty,
                 'entry_price': cand['price'],
-                'total_cost_basis': total_cost,  # Importante per il calcolo fiscale
+                'total_cost_basis': total_cost,
                 'trailing_stop': initial_stop,
                 'highest_price': cand['high'],
-                'take_profit': take_profit_target,
                 'sl_mult': sl_mult
             }
 
@@ -308,19 +281,15 @@ def run_market_aware_backtest(tickers: list, start_date="2019-01-01", initial_ca
 
     if progress_bar: progress_bar.empty()
 
-    # Chiusura forzata posizioni finali (al valore netto stimato)
+    # Chiusura forzata posizioni finali
     for ticker, pos in positions.items():
         last_price = market_data[ticker]['Close'].iloc[-1]
-
         gross_rev = pos['qty'] * last_price
         net_rev = gross_rev - commission
         cap_gain = net_rev - pos['total_cost_basis']
-
         tax = (cap_gain * (tax_rate / 100)) if cap_gain > 0 else 0
         net_in = net_rev - tax
-
         realized_pnl = net_in - pos['total_cost_basis']
-
         cash += net_in
 
         trade_log.append({
