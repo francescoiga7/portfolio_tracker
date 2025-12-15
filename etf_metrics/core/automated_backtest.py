@@ -4,20 +4,21 @@ import numpy as np
 import streamlit as st
 from etf_metrics.clients.yahoo_client import get_series
 
-# --- CONFIGURAZIONE V25 (THE SMART HOLDER) ---
-MAX_POSITIONS = 4  # Top 4 titoli (25% ciascuno)
+# --- CONFIGURAZIONE V28 (THE GOLDEN MEAN) ---
+MAX_POSITIONS = 4  # Top 4 titoli
 REBALANCE_DAYS = 20  # Ribilanciamento Mensile
 
 
 def calculate_indicators(df):
     """
-    Calcola indicatori per V25.
-    Solo SMA200 (Trend Lungo) e Momentum (Forza Relativa).
+    Calcola indicatori per V28.
+    SMA130: Il compromesso perfetto tra trend lungo (200) e breve (50).
+    Momentum: 6 mesi.
     """
-    # 1. Trend Filter (L'unico che conta davvero per il lungo termine)
-    df['SMA200'] = df['Close'].rolling(200).mean()
+    # 1. Trend Filter Ottimizzato (26 settimane approx 130gg)
+    df['SMA130'] = df['Close'].rolling(130).mean()
 
-    # 2. Momentum a 6 mesi (126 giorni) - Classico Dual Momentum
+    # 2. Momentum a 6 mesi (126 giorni)
     df['Momentum'] = df['Close'].pct_change(126)
 
     return df
@@ -33,15 +34,15 @@ def prepare_market_data(tickers, period="10y"):
     return market_data
 
 
-def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_capital=1000,
+def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_capital=1500,
                               preloaded_data=None, commission=2.0, tax_rate=26.0):
     """
-    Backtest V25 (The Smart Holder):
-    - FREQUENZA: Mensile (Ogni 20gg). Zero stress intraday.
-    - SELEZIONE: Top 4 titoli per Momentum a 6 mesi.
-    - FILTRO ON/OFF: Si compra/tiene SOLO se Prezzo > SMA200.
-      Se un titolo va sotto la SMA200, si vende e si tiene il CASH.
-    - NO STOP LOSS, NO TAKE PROFIT: Si cavalca il trend finché dura.
+    Backtest V28 (The Golden Mean):
+    - RITORNO ALLA SEMPLICITÀ (Stile V14).
+    - EXIT FILTER: SMA 130 (Exit giornaliera).
+      Più veloce della 200 (salva il 2022), meno nervosa della 50 (evita whipsaw 2025).
+    - ENTRY: Top 4 Momentum, solo se Prezzo > SMA 130.
+    - NO TAKE PROFIT: Lascia correre i guadagni.
     """
 
     if preloaded_data:
@@ -55,7 +56,7 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
     sim_dates = market_data[sample_ticker].index[market_data[sample_ticker].index >= pd.to_datetime(start_date)]
 
     cash = initial_capital
-    positions = {}  # {ticker: {qty, entry_price, cost_basis, last_value}}
+    positions = {}
     trade_log = []
     tax_credit = 0.0
 
@@ -73,31 +74,41 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
 
         days_counter += 1
 
-        # --- A. AGGIORNAMENTO EQUITY ---
+        # --- A. AGGIORNAMENTO E CONTROLLO TREND (DAILY) ---
         portfolio_equity = cash
+        tickers_to_sell = []
+
         for t, pos in positions.items():
             if current_date in market_data[t].index:
-                curr_price = market_data[t].loc[current_date]['Close']
-                pos['last_known_price'] = curr_price
-                portfolio_equity += (pos['qty'] * curr_price)
+                daily = market_data[t].loc[current_date]
+                curr_close = daily['Close']
+                sma130 = daily['SMA130']
+
+                portfolio_equity += (pos['qty'] * curr_close)
+
+                # GOLDEN RULE: Se chiude sotto la SMA 130, si esce.
+                # Nessuna pietà, nessuna attesa.
+                if pd.notna(sma130) and curr_close < sma130:
+                    tickers_to_sell.append((t, curr_close, "📉 TREND BREAK (< SMA130)"))
+
             else:
-                portfolio_equity += (pos['qty'] * pos.get('last_known_price', 0))
+                portfolio_equity += (pos['qty'] * pos.get('entry_price', 0))
 
-        # --- B. HARD STOP DI ESTREMA EMERGENZA (OPZIONALE - Cigno Nero) ---
-        # Solo se un titolo crolla del 30% in un giorno, usciamo.
-        tickers_to_dump = []
-        for t, pos in positions.items():
-            if current_date in market_data[t].index:
-                curr_close = market_data[t].loc[current_date]['Close']
-                if curr_close < (pos['entry_price'] * 0.70):
-                    tickers_to_dump.append((t, curr_close, "☠️ BLACK SWAN STOP (-30%)"))
-
-        for t, price, reason in tickers_to_dump:
+        # Esecuzione Vendite Immediate
+        for t, price, reason in tickers_to_sell:
             pos = positions[t]
             gross = pos['qty'] * price
             net = gross - commission
             gain = net - pos['cost_basis']
-            tax = gain * (tax_rate / 100) if gain > 0 else 0
+
+            tax = 0.0
+            if gain > 0:
+                taxable = max(0, gain - tax_credit)
+                tax = taxable * (tax_rate / 100.0)
+                tax_credit = max(0, tax_credit - gain)
+            else:
+                tax_credit += abs(gain)
+
             cash += (net - tax)
             portfolio_equity -= (pos['qty'] * price)
 
@@ -110,63 +121,56 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
             })
             del positions[t]
 
-        # --- C. RIBILANCIAMENTO MENSILE ---
+        # --- B. RIBILANCIAMENTO MENSILE (SELEZIONE) ---
         if days_counter >= REBALANCE_DAYS:
             days_counter = 0
 
-            # 1. Analisi Candidati
+            # 1. Ranking Top Picks
             candidates = []
             for t, df in market_data.items():
                 if current_date not in df.index: continue
                 daily = df.loc[current_date]
 
-                if pd.isna(daily['SMA200']) or pd.isna(daily['Momentum']): continue
+                if pd.isna(daily['SMA130']) or pd.isna(daily['Momentum']): continue
 
-                # IL FILTRO D'ORO: Siamo sopra la media a 200 giorni?
-                # Se sì, il titolo è "sano". Se no, è "malato" -> Cash.
-                if daily['Close'] < daily['SMA200']: continue
+                # FILTRO INGRESSO: Trend Sano (> SMA130)
+                if daily['Close'] < daily['SMA130']: continue
 
-                # Filtro Momentum Positivo (Deve salire)
+                # Filtro Momentum Positivo
                 if daily['Momentum'] <= 0: continue
 
                 candidates.append({
-                    'ticker': t,
-                    'score': daily['Momentum'],
-                    'close': daily['Close']
+                    'ticker': t, 'score': daily['Momentum'], 'close': daily['Close']
                 })
 
-            # Ordina per Momentum (Forza Relativa)
             candidates.sort(key=lambda x: x['score'], reverse=True)
             top_picks = candidates[:MAX_POSITIONS]
             top_tickers = [c['ticker'] for c in top_picks]
 
-            # 2. VENDITE (Rotazione Out)
+            # 2. VENDITE DI ROTAZIONE (Solo se il trend è buono ma c'è di meglio)
             tickers_out = []
             for t in list(positions.keys()):
-                # Vendiamo se:
-                # a) Non è più nella Top 4 (abbiamo trovato di meglio)
-                # b) È sceso sotto la SMA 200 (è diventato ribassista) -> Questo gestisce il 2022
-
-                keep = False
-                if t in top_tickers:
-                    # Verifica extra: è ancora sopra la SMA200 oggi?
+                # Se non è top 4, lo vendiamo per fare spazio
+                # (Nota: Se avesse rotto il trend, sarebbe già stato venduto al passo A)
+                if t not in top_tickers:
                     if current_date in market_data[t].index:
                         curr_price = market_data[t].loc[current_date]['Close']
-                        sma200 = market_data[t].loc[current_date]['SMA200']
-                        if curr_price > sma200:
-                            keep = True
-
-                if not keep:
-                    if current_date in market_data[t].index:
-                        curr_price = market_data[t].loc[current_date]['Close']
-                        tickers_out.append((t, curr_price, "📉 MONTHLY ROTATION"))
+                        tickers_out.append((t, curr_price, "🔄 ROTATION EXIT"))
 
             for t, price, reason in tickers_out:
                 pos = positions[t]
                 gross = pos['qty'] * price
                 net = gross - commission
                 gain = net - pos['cost_basis']
-                tax = gain * (tax_rate / 100) if gain > 0 else 0
+
+                tax = 0.0
+                if gain > 0:
+                    taxable = max(0, gain - tax_credit)
+                    tax = taxable * (tax_rate / 100.0)
+                    tax_credit = max(0, tax_credit - gain)
+                else:
+                    tax_credit += abs(gain)
+
                 cash += (net - tax)
                 portfolio_equity -= (pos['qty'] * price)
 
@@ -182,7 +186,6 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
             # 3. ACQUISTI (Riempiamo i buchi)
             free_slots = MAX_POSITIONS - len(positions)
 
-            # Calcolo budget dinamico: Cash / Slot Liberi
             if free_slots > 0 and cash > 50:
                 budget_per_slot = cash / free_slots
 
@@ -192,7 +195,6 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
 
                     if budget_per_slot < 50: continue
 
-                    # Acquisto Frazionato
                     qty = round(budget_per_slot / cand['close'], 4)
                     cost = (qty * cand['close']) + commission
 
@@ -203,8 +205,7 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
                         positions[cand['ticker']] = {
                             'qty': qty,
                             'entry_price': cand['close'],
-                            'cost_basis': cost,
-                            'last_known_price': cand['close']
+                            'cost_basis': cost
                         }
 
                         portfolio_equity += (qty * cand['close'])
@@ -212,9 +213,9 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
                         trade_log.append({
                             "Date": current_date.date(), "Ticker": cand['ticker'], "Action": "BUY",
                             "Price": cand['close'], "Qty": qty,
-                            "Reason": f"SMART ENTRY (Mom: {cand['score']:.2%})",
+                            "Reason": f"GOLD ENTRY (Mom: {cand['score']:.2%})",
                             "Comm": commission, "Tax": 0.0, "PnL_Net": 0, "PnL_Pct": 0,
-                            "Capital": cash, "Portfolio_Value": cash + portfolio_equity
+                            "Capital": cash, "Portfolio_Value": cash + portfolio_equity + (qty * cand['close'])
                         })
 
     if progress_bar: progress_bar.empty()
