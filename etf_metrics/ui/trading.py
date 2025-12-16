@@ -21,22 +21,22 @@ SQQQ"""
 
 
 def render_trading_ui():
-    st.title("💹 Trading & Algorithmic Strategy")
-    st.caption("Scanner di segnali operativi e backtest di strategie di Breakout.")
+    st.title("💹 Trading")
 
     with st.expander("🧠 Logica Operativa"):
         st.markdown("""
-        Questa sezione identifica setup di **Breakout** e **Reversion** basati su volatilità e volumi.
+        Questa strategia cerca il compromesso perfetto tra trend di lungo periodo e reattività.
 
-        **1. Scanner Segnali (Trading)**
-        Analizza il mercato alla data odierna (o passata) per trovare opportunità immediate.
-        * 🟢 **LONG_BREAKOUT:** Prezzo rompe la Banda di Bollinger superiore con volumi.
-        * 🔵 **LONG_DIP:** Trend rialzista ma prezzo in ritracciamento (RSI basso).
+        **Regole Scanner & Backtest:**
+        1.  **Filtro Trend (On/Off):** **SMA 130 Giorni**.
+            * Se Prezzo > SMA 130 -> Mercato Rialzista (Si cercano acquisti).
+            * Se Prezzo < SMA 130 -> Mercato Ribassista (Si Vende/Flat).
 
-        **2. Automated Backtest**
-        Simula l'esecuzione della strategia nel tempo gestendo un portafoglio virtuale.
-        * **Gestione Uscita:** Esclusivamente **Trailing Stop Dinamico** basato sull'ATR (Volatility Stop).
-        * **Money Management:** Dynamic Position Sizing basato sulla volatilità (VIX).
+        2.  **Motore di Ranking (Selezione):** **Momentum a 6 Mesi**.
+            * Tra i titoli sopra la SMA 130, si scelgono quelli con il Momentum (Performance a 126gg) più alto.
+            * Ingresso solo se Momentum > 0.
+
+        **In Sintesi:** Compriamo i titoli più forti, ma solo se sono in un trend strutturalmente sano. Usciamo immediatamente se il trend si rompe (chiusura sotto SMA 130).
         """)
 
     # --- SIDEBAR CONFIGURATION ---
@@ -45,21 +45,21 @@ def render_trading_ui():
     # Scelta Modalità
     mode = st.sidebar.radio(
         "Modalità Operativa",
-        ["📡 Scanner Segnali (Live/Storico)", "🤖 Automated Backtest"],
-        help="Scegli se cercare segnali puntuali o simulare una strategia nel tempo."
+        ["📡 Scanner Segnali", "🤖 Automated Backtest"],
+        help="Scanner live o simulazione storica della strategia."
     )
 
     st.sidebar.divider()
 
-    # Input Tickers (Comune a entrambe le modalità)
+    # Input Tickers
     tickers_input = st.sidebar.text_area("Watchlist (Ticker Yahoo)", DEFAULT_TRADING_LIST, height=200)
     tickers = [t.strip().upper() for t in tickers_input.split('\n') if t.strip()]
 
-    # Configurazione Specifica per Modalità
+    # Configurazione Date
     analysis_date = date.today()
     start_date_backtest = date(2021, 1, 1)
 
-    if mode == "📡 Scanner Segnali (Live/Storico)":
+    if mode == "📡 Scanner Segnali":
         st.sidebar.subheader("⏳ Time Travel")
         enable_time_travel = st.sidebar.checkbox("Abilita Analisi Storica", value=False)
         if enable_time_travel:
@@ -75,13 +75,13 @@ def render_trading_ui():
 
     elif mode == "🤖 Automated Backtest":
         st.sidebar.subheader("⏳ Periodo Simulazione")
-        start_date_backtest = st.sidebar.date_input("Data Inizio:", pd.to_datetime("2021-01-01"))
-        st.sidebar.info("La simulazione utilizzerà solo Trailing Stop dinamico come uscita.")
+        start_date_backtest = st.sidebar.date_input("Data Inizio:", pd.to_datetime("2018-01-01"))
+        st.sidebar.info("Simulazione portafoglio (max 4 posizioni, ribilanciamento mensile).")
 
     # --- MAIN CONTENT ---
 
-    if mode == "📡 Scanner Segnali (Live/Storico)":
-        st.subheader("📡 Scanner di Mercato")
+    if mode == "📡 Scanner Segnali":
+        st.subheader("📡 Scanner Strategia")
 
         if st.button("🔥 Scansiona Watchlist"):
             if not tickers:
@@ -95,14 +95,14 @@ def render_trading_ui():
 
             for i, ticker in enumerate(tickers):
                 status_text.text(f"Analisi {ticker}...")
-                # Scarica un po' più di dati per calcolare le medie mobili correttamente
-                full_df = get_series(ticker, period="5y", as_dataframe=True)
+                # Serve storico per SMA 130 + buffer
+                full_df = get_series(ticker, period="2y", as_dataframe=True)
 
                 if full_df is not None and not full_df.empty:
                     df_slice = full_df[full_df.index <= cutoff_date].copy()
-                    if len(df_slice) > 200:
+                    if len(df_slice) > 135:
                         signal_data = analyze_ticker(ticker, df_slice)
-                        if signal_data and signal_data['signal'] != "NEUTRAL":
+                        if signal_data:
                             results.append(signal_data)
 
                 progress_bar.progress((i + 1) / len(tickers))
@@ -114,25 +114,72 @@ def render_trading_ui():
             st.markdown(f"### Risultati al **{date_label}**")
 
             if not results:
-                st.info(f"Nessun segnale operativo trovato.")
+                st.info(f"Nessun risultato disponibile.")
                 return
 
-            st.success(f"Trovate {len(results)} opportunità!")
+            # Ordina per Momentum (usato come 'confidence' in core/trading.py)
             results.sort(key=lambda x: x['confidence'], reverse=True)
 
+            st.success(f"Analizzati {len(results)} titoli. Ordinati per Momentum.")
+
+            # Tabella riassuntiva veloce
+            summary_data = []
             for res in results:
-                signal_color = "green" if "LONG" in res['signal'] else "red"
+                inds = res['indicators']
+                summary_data.append({
+                    "Ticker": res['ticker'],
+                    "Segnale": res['signal'],
+                    "Prezzo": res['price'],
+                    "SMA 130": inds.get('SMA_130'),
+                    "Momentum 6M": inds.get('Momentum_6M')
+                })
+
+            # --- VISUALIZZAZIONE DETTAGLIATA ---
+            for res in results:
+                inds = res['indicators']
+                mom_val = inds.get('Momentum_6M', 0)
+                sma_val = inds.get('SMA_130', 0)
+                price = res['price']
+
+                # Colori e Icone
+                sig_type = res['raw_signal']
+                if sig_type == "ENTRY":
+                    box_color = "green"
+                    icon = "🟢"
+                elif sig_type == "EXIT":
+                    box_color = "red"
+                    icon = "🔴"
+                else:
+                    box_color = "orange"
+                    icon = "🟠"
+
                 with st.container():
-                    st.markdown(
-                        f"**{res['ticker']}** : :{signal_color}[{res['signal']}] (Confidenza: {res['confidence']}/100)")
+                    # Header Card
+                    st.markdown(f"#### {icon} **{res['ticker']}**: :{box_color}[{res['signal']}]")
 
                     c1, c2, c3 = st.columns(3)
-                    c1.metric("Prezzo", f"{res['price']:.2f}")
-                    c2.metric("Stop Loss (ATR)", f"{res['stop_loss']:.2f}")
-                    c3.metric("RSI (14)", f"{res['indicators']['RSI']:.1f}")
 
-                    with st.expander("Dettagli"):
-                        st.write(f"**Motivazione:** {res['reason']}")
+                    # Colonna 1: Prezzo vs Trend
+                    dist_sma = (price / sma_val - 1) * 100 if sma_val else 0
+                    c1.metric(
+                        "Prezzo vs SMA 130",
+                        f"{price:.2f}",
+                        f"{dist_sma:+.1f}% (vs {sma_val:.2f})",
+                        delta_color="normal" if price > sma_val else "inverse"
+                    )
+
+                    # Colonna 2: Momentum (Il driver del ranking)
+                    c2.metric(
+                        "Momentum 6 Mesi",
+                        f"{mom_val:.2%}",
+                        "Fattore Ranking",
+                        delta_color="normal" if mom_val > 0 else "inverse"
+                    )
+
+                    # Colonna 3: Volatilità (Info extra)
+                    c3.metric("ATR (Volatilità)", f"{inds.get('ATR', 0):.2f}")
+
+                    st.caption(f"**Analisi:** {res['reason']}")
                     st.divider()
 
     elif mode == "🤖 Automated Backtest":
@@ -144,39 +191,55 @@ def render_trading_ui():
                 return
 
             with st.spinner(f"Simulazione in corso dal {start_date_backtest}..."):
-                # Chiama la funzione corretta senza use_tp_only
+                # Esegue la simulazione
                 df_trades, final_cap = run_market_aware_backtest(tickers, start_date=str(start_date_backtest))
 
             if not df_trades.empty:
                 initial = 1000
                 total_return = ((final_cap - initial) / initial) * 100
 
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Capitale Finale", f"€{final_cap:,.2f}")
-                c2.metric("Rendimento Totale", f"{total_return:.2f}%",
-                          delta_color="normal" if total_return > 0 else "inverse")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Capitale Finale", f"€{final_cap:,.2f}")
+                col2.metric("Rendimento Totale", f"{total_return:.2f}%",
+                            delta_color="normal" if total_return > 0 else "inverse")
 
-                closed_trades = df_trades[df_trades['Action'] == 'SELL']
-                if not closed_trades.empty:
-                    wins = len(closed_trades[closed_trades['PnL_Net'] > 0])
-                    total_closed = len(closed_trades)
-                    win_rate = (wins / total_closed) * 100
-                    c3.metric("Win Rate", f"{win_rate:.1f}% ({wins}/{total_closed})")
+                # Statistiche Trades
+                realized_trades = df_trades[df_trades['Action'] == 'SELL']
+                if not realized_trades.empty:
+                    wins = len(realized_trades[realized_trades['PnL_Net'] > 0])
+                    tot = len(realized_trades)
+                    win_rate = (wins / tot) * 100
+                    col3.metric("Win Rate", f"{win_rate:.1f}% ({wins}/{tot})")
 
                 st.subheader("Giornale delle Operazioni")
 
-                def style_trades(row):
-                    action = row['Action']
-                    if "BUY" in action: return ['background-color: #f0f2f6'] * len(row)
-                    if "SELL" in action:
-                        if row['PnL_Net'] > 0: return ['background-color: #d1e7dd; color: #0f5132'] * len(row)  # Verde
-                        return ['background-color: #f8d7da; color: #842029'] * len(row)  # Rosso
+                def style_backtest_rows(row):
+                    # Stiliamo le righe per azione
+                    act = row['Action']
+                    if act == 'BUY':
+                        return ['background-color: #202020'] * len(row)  # Light Green
+                    if act == 'SELL':
+                        if "TREND BREAK" in str(row['Reason']):
+                            return ['background-color: #fff5f5; color: #c53030'] * len(row)  # Light Red per stop loss
+                        return ['background-color: #006600'] * len(row)  # Light Blue per rotazione
                     return [''] * len(row)
 
-                st.dataframe(
-                    df_trades.style.apply(style_trades, axis=1)
-                    .format({"Price": "{:.2f}", "PnL_Net": "{:+.2f}", "PnL_Pct": "{:+.2f}%", "Capital": "€{:,.0f}"}),
-                    width="stretch",
-                )
+                # Formattazione Colonne
+                df_display = df_trades.style.apply(style_backtest_rows, axis=1).format({
+                    "Price": "{:.2f}",
+                    "PnL_Net": "{:+.2f}",
+                    "Capital": "€{:,.0f}",
+                    "Qty": "{:.4f}"
+                })
+
+                st.dataframe(df_display, width="stretch")
+
+                # Grafico Equity Curve
+                st.subheader("Curva del Capitale")
+                equity_curve = df_trades.drop_duplicates(subset=['Date'], keep='last').set_index('Date')[
+                    'Capital']
+                st.line_chart(equity_curve)
+
             else:
-                st.warning("Nessun trade generato nel periodo selezionato.")
+                st.warning(
+                    "Nessun trade generato nel periodo. Verifica che la data di inizio non sia troppo recente o che i dati siano disponibili.")

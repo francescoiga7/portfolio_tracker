@@ -1,121 +1,118 @@
 # -*- coding: utf-8 -*-
 import pandas as pd
 from typing import Dict
-from etf_metrics.core.metrics import calculate_atr_series, calculate_adx_series, calculate_rsi_series
+from etf_metrics.core.metrics import calculate_atr_series
 
 
 def calculate_full_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Arricchisce il DataFrame con tutti gli indicatori necessari."""
+    """
+    Arricchisce il DataFrame con gli indicatori V28 (Golden Mean).
+    """
     df = df.copy()
     if 'Close' not in df.columns: return df
 
-    df['SMA_20'] = df['Close'].rolling(20).mean()
-    df['SMA_50'] = df['Close'].rolling(50).mean()
-    df['SMA_200'] = df['Close'].rolling(200).mean()
+    # --- INDICATORI STRATEGIA V28 ---
+    # 1. Trend Filter: SMA 130
+    df['SMA_130'] = df['Close'].rolling(130).mean()
 
-    df['STD_20'] = df['Close'].rolling(20).std()
-    df['BB_Upper'] = df['SMA_20'] + (df['STD_20'] * 2)
-    df['BB_Lower'] = df['SMA_20'] - (df['STD_20'] * 2)
+    # 2. Ranking Factor: Momentum 6 Mesi (126 giorni)
+    df['Momentum_6M'] = df['Close'].pct_change(126)
 
-    df['ATR'] = calculate_atr_series(df)
-    df['ADX'] = calculate_adx_series(df)
-    df['RSI'] = calculate_rsi_series(df['Close'])
-
-    df['Vol_SMA_20'] = df['Volume'].rolling(20).mean()
+    # Indicatori ausiliari per UI (opzionali per la strategia, utili per contesto)
+    df['ATR'] = calculate_atr_series(df)  # Utile per volatilità corrente
 
     return df
 
 
 def analyze_ticker(ticker: str, df: pd.DataFrame) -> Dict:
     """
-    Analisi per 'Single ETF' o 'Trading Scanner'.
-    Restituisce segnali: COMPRA (Breakout/Dip), VENDI (Breakdown), MANTIENI.
+    Analisi allineata alla Strategia V28 (Golden Mean).
+    Restituisce segnali basati su SMA130 e Momentum.
     """
-    if df is None or len(df) < 200:
-        return {"signal": "Dati Insufficienti", "confidence": 0, "reason": "Storico < 200gg"}
+    # Servono almeno 130 giorni + buffer
+    if df is None or len(df) < 135:
+        return {"signal": "Dati Insufficienti", "confidence": 0, "reason": "Storico < 135gg"}
 
     df = calculate_full_indicators(df)
     last = df.iloc[-1]
 
     price = last['Close']
-    atr = last.get('ATR', price * 0.01)
-    adx = last.get('ADX', 0)
-    rsi = last.get('RSI', 50)
+    sma130 = last['SMA_130']
+    mom_6m = last.get('Momentum_6M', 0)
+    atr = last.get('ATR', 0)
 
-    is_uptrend = last['Close'] > last['SMA_200']
-
+    # Default
     signal = "NEUTRAL"
+    ui_signal = "ATTENDI"
     score = 0
-    reason = "Fase Laterale"
+    reason = "Dati non calcolabili"
 
-    if price > last['BB_Upper'] and is_uptrend:
-        signal = "LONG_BREAKOUT"
-        score = adx + 20
-        reason = "Rottura Bollinger Band Superiore in Trend Rialzista"
+    if pd.notna(sma130) and pd.notna(mom_6m):
 
-    elif is_uptrend and rsi < 40 and price > last['SMA_200']:
-        signal = "LONG_DIP"
-        score = (100 - rsi)
-        reason = f"Trend Rialzista con RSI scarico ({rsi:.1f})"
+        # Distanza dalla SMA in %
+        dist_sma = (price / sma130) - 1.0
 
-    elif price < last['SMA_200']:
-        signal = "SHORT_BEAR"
-        score = 50
-        reason = "Prezzo sotto la Media a 200 periodi (Trend Ribassista)"
+        # LOGICA V28
+        if price < sma130:
+            # Uscita immediata (o divieto di ingresso)
+            signal = "EXIT"
+            ui_signal = "VENDI (Trend Break)"
+            reason = f"Prezzo sotto SMA 130 ({dist_sma:.1%}). Trend ribassista."
+            score = -100  # Priorità bassa / negativa
 
-    elif is_uptrend:
-        signal = "MANTIENI"
-        score = 0
-        reason = "Trend positivo, nessun segnale di ingresso specifico."
+        elif mom_6m > 0:
+            # Condizione di Ingresso Soddisfatta (Trend OK + Momentum OK)
+            signal = "ENTRY"
+            ui_signal = "COMPRA (Golden Mean)"
+            reason = f"Trend Sano (> SMA130) e Momentum Positivo."
+            # Lo score è il Momentum stesso (per il ranking)
+            score = mom_6m * 100
 
-    stop_loss = price - (atr * 3) if "LONG" in signal else price * 0.9
-
-    ui_signal = "MANTIENI"
-    if "LONG" in signal: ui_signal = "COMPRA"
-    if "SHORT" in signal: ui_signal = "VENDI"
+        else:
+            # Prezzo sopra SMA ma Momentum negativo (Fase di stallo/ritracciamento)
+            signal = "HOLD_WEAK"
+            ui_signal = "MONITORA (Mom. Neg)"
+            reason = f"Sopra SMA 130 ma Momentum negativo ({mom_6m:.1%}). Nessun trigger."
+            score = mom_6m * 100  # Score basso/negativo
 
     return {
         "ticker": ticker,
         "signal": ui_signal,
         "raw_signal": signal,
-        "confidence": min(100, int(score)),
+        "confidence": score,  # Usato per ordinare per Momentum
         "reason": reason,
         "price": price,
-        "stop_loss": stop_loss,
-        "indicators": {"RSI": rsi, "ADX": adx, "ATR": atr}
+        "indicators": {
+            "SMA_130": sma130,
+            "Momentum_6M": mom_6m,
+            "ATR": atr
+        }
     }
 
 
 def check_satellite_status(df: pd.DataFrame, purchase_date: pd.Timestamp, current_shares: float) -> Dict:
     """
-    Logica di VENDITA per il Portfolio Tracker (Strategia Satellite).
-    Replica la logica di automated_backtest: Trailing Stop basato su ATR dai massimi.
+    Logica di VENDITA per il Portfolio Tracker.
+    Per coerenza con la V28, usiamo la SMA 130 anche qui come exit principale,
+    oppure manteniamo il Trailing Stop ATR come 'paracadute' aggiuntivo.
     """
     if df is None or df.empty:
         return {"action": "HOLD", "reason": "No Data"}
 
-    df_holding = df[df.index >= purchase_date].copy()
-
-    if len(df_holding) < 2:
-        return {"action": "HOLD", "reason": "Posizione troppo recente"}
-
-    full_atr = calculate_atr_series(df)
-    current_atr = full_atr.iloc[-1]
-
-    highest_price_since_buy = df_holding['High'].max()
-
-    stop_price = highest_price_since_buy - (current_atr * 3.0)
+    # Calcolo SMA 130 corrente
+    sma130 = df['Close'].rolling(130).mean().iloc[-1]
     current_price = df['Close'].iloc[-1]
 
-    if current_price < stop_price:
+    # 1. EXIT PRIMARIA: SMA 130
+    if pd.notna(sma130) and current_price < sma130:
         return {
             "action": "SELL",
-            "reason": f"Trailing Stop raggiunto ({stop_price:.2f}). Max recente: {highest_price_since_buy:.2f}",
-            "stop_price": stop_price
+            "reason": f"Trend Break: Prezzo ({current_price:.2f}) sotto SMA 130 ({sma130:.2f})",
+            "stop_price": sma130
         }
 
     return {
         "action": "HOLD",
-        "reason": f"Trend Satellite intatto. Stop attuale: {stop_price:.2f}",
-        "stop_price": stop_price
+        "reason": f"Trend Intatto (> SMA 130).",
+        "stop_price": sma130 if pd.notna(sma130) else 0
     }

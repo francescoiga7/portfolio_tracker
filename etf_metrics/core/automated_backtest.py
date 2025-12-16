@@ -34,7 +34,7 @@ def prepare_market_data(tickers, period="10y"):
     return market_data
 
 
-def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_capital=1500,
+def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_capital=1000,
                               preloaded_data=None, commission=2.0, tax_rate=26.0):
     """
     Backtest V28 (The Golden Mean):
@@ -117,7 +117,7 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
                 "Price": price, "Qty": pos['qty'], "Reason": reason,
                 "Comm": commission, "Tax": tax,
                 "PnL_Net": (net - tax) - pos['cost_basis'],
-                "PnL_Pct": 0, "Capital": cash, "Portfolio_Value": cash + portfolio_equity
+                "PnL_Pct": 0, "Capital": cash
             })
             del positions[t]
 
@@ -179,7 +179,7 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
                     "Price": price, "Qty": pos['qty'], "Reason": reason,
                     "Comm": commission, "Tax": tax,
                     "PnL_Net": (net - tax) - pos['cost_basis'],
-                    "PnL_Pct": 0, "Capital": cash, "Portfolio_Value": cash + portfolio_equity
+                    "PnL_Pct": 0, "Capital": cash
                 })
                 del positions[t]
 
@@ -215,7 +215,7 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
                             "Price": cand['close'], "Qty": qty,
                             "Reason": f"GOLD ENTRY (Mom: {cand['score']:.2%})",
                             "Comm": commission, "Tax": 0.0, "PnL_Net": 0, "PnL_Pct": 0,
-                            "Capital": cash, "Portfolio_Value": cash + portfolio_equity + (qty * cand['close'])
+                            "Capital": cash
                         })
 
     if progress_bar: progress_bar.empty()
@@ -236,7 +236,7 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
             "Price": final_price, "Qty": pos['qty'], "Reason": "Chiusura Simulazione",
             "Comm": commission, "Tax": tax,
             "PnL_Net": final_cash - pos['cost_basis'], "PnL_Pct": 0,
-            "Capital": cash, "Portfolio_Value": cash
+            "Capital": cash
         })
 
     return pd.DataFrame(trade_log), cash
