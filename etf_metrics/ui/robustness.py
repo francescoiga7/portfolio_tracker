@@ -25,7 +25,6 @@ def render_robustness_ui():
 
     st.sidebar.header("⚙️ Setup Test")
 
-    # Default tickers aggiornati per la strategia momentum
     default_tickers = "NVDA\nAMD\nTSLA\nAAPL\nMSFT\nAMZN\nGOOGL\nMETA\nNFLX"
     tickers_input = st.sidebar.text_area("Ticker per Test", default_tickers, height=150)
     tickers = [t.strip().upper() for t in tickers_input.split('\n') if t.strip()]
@@ -35,7 +34,6 @@ def render_robustness_ui():
 
     tab1, tab2, tab3 = st.tabs(["📉 Detrended Analysis", "🎲 Monte Carlo", "🚶 Walk-Forward"])
 
-    # --- TAB 1: DETRENDED ANALYSIS ---
     with tab1:
         st.subheader("Test su Dati Detrended (Zero Drift)")
         st.info("Questo test rimuove il 'Vento a favore'. La strategia batte il mercato anche se il mercato non sale?")
@@ -47,7 +45,6 @@ def render_robustness_ui():
                 with st.spinner("Creazione universi 'Zero-Mean' e backtest..."):
                     trades, final, detrended_data = run_detrended_analysis(tickers, str(start_date), initial_cap)
 
-                # Grafico di verifica (Originale vs Detrended) per il primo ticker
                 if detrended_data and len(tickers) > 0:
                     ticker_debug = tickers[0]
                     if ticker_debug in detrended_data:
@@ -87,7 +84,6 @@ def render_robustness_ui():
                     st.warning(
                         "Nessun trade generato sui dati detrended (i segnali SMA130/Momentum potrebbero essere spariti).")
 
-    # --- TAB 2: MONTE CARLO ---
     with tab2:
         st.subheader("Permutation Test (Significatività)")
         st.info("Confronta il risultato reale contro N universi casuali.")
@@ -137,7 +133,6 @@ def render_robustness_ui():
                     ax.legend()
                     st.pyplot(fig)
 
-    # --- TAB 3: WALK FORWARD ---
     with tab3:
         st.subheader("Walk-Forward Stability")
         st.info("Verifica la costanza dei risultati su finestre temporali scorrevoli (es. ogni 6 mesi).")
@@ -151,7 +146,6 @@ def render_robustness_ui():
             if not wf_df.empty:
                 st.write(f"### Risultati per finestre di {test_window} mesi")
 
-                # Metriche aggregate
                 positive_windows = len(wf_df[wf_df['PnL'] > 0])
                 total_windows = len(wf_df)
                 win_rate = (positive_windows / total_windows) * 100 if total_windows > 0 else 0
@@ -162,7 +156,6 @@ def render_robustness_ui():
                 c2.metric("Win Rate Temporale", f"{win_rate:.1f}%")
                 c3.metric("ROI Medio per Finestra", f"{avg_roi:.2f}%")
 
-                # Grafico
                 st.bar_chart(wf_df.set_index("Window End")['ROI %'])
 
                 st.dataframe(wf_df.style.format({"PnL": "{:.2f}", "ROI %": "{:.2f}%"}))

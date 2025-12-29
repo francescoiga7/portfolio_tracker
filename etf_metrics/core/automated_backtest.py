@@ -5,8 +5,8 @@ import streamlit as st
 from etf_metrics.clients.yahoo_client import get_series
 
 # --- CONFIGURAZIONE V28 (THE GOLDEN MEAN) ---
-MAX_POSITIONS = 4  # Top 4 titoli
-REBALANCE_DAYS = 20  # Ribilanciamento Mensile
+MAX_POSITIONS = 4
+REBALANCE_DAYS = 20
 
 
 def calculate_indicators(df):
@@ -15,10 +15,7 @@ def calculate_indicators(df):
     SMA130: Il compromesso perfetto tra trend lungo (200) e breve (50).
     Momentum: 6 mesi.
     """
-    # 1. Trend Filter Ottimizzato (26 settimane approx 130gg)
     df['SMA130'] = df['Close'].rolling(130).mean()
-
-    # 2. Momentum a 6 mesi (126 giorni)
     df['Momentum'] = df['Close'].pct_change(126)
 
     return df
@@ -36,14 +33,6 @@ def prepare_market_data(tickers, period="10y"):
 
 def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_capital=1000,
                               preloaded_data=None, commission=2.0, tax_rate=26.0):
-    """
-    Backtest V28 (The Golden Mean):
-    - RITORNO ALLA SEMPLICITÀ (Stile V14).
-    - EXIT FILTER: SMA 130 (Exit giornaliera).
-      Più veloce della 200 (salva il 2022), meno nervosa della 50 (evita whipsaw 2025).
-    - ENTRY: Top 4 Momentum, solo se Prezzo > SMA 130.
-    - NO TAKE PROFIT: Lascia correre i guadagni.
-    """
 
     if preloaded_data:
         market_data = preloaded_data
@@ -67,14 +56,12 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
 
     days_counter = 0
 
-    # 2. LOOP TEMPORALE
     for i, current_date in enumerate(sim_dates):
         if progress_bar and i % 20 == 0:
             progress_bar.progress((i + 1) / len(sim_dates))
 
         days_counter += 1
 
-        # --- A. AGGIORNAMENTO E CONTROLLO TREND (DAILY) ---
         portfolio_equity = cash
         tickers_to_sell = []
 
@@ -86,15 +73,12 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
 
                 portfolio_equity += (pos['qty'] * curr_close)
 
-                # GOLDEN RULE: Se chiude sotto la SMA 130, si esce.
-                # Nessuna pietà, nessuna attesa.
                 if pd.notna(sma130) and curr_close < sma130:
                     tickers_to_sell.append((t, curr_close, "📉 TREND BREAK (< SMA130)"))
 
             else:
                 portfolio_equity += (pos['qty'] * pos.get('entry_price', 0))
 
-        # Esecuzione Vendite Immediate
         for t, price, reason in tickers_to_sell:
             pos = positions[t]
             gross = pos['qty'] * price
@@ -121,11 +105,9 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
             })
             del positions[t]
 
-        # --- B. RIBILANCIAMENTO MENSILE (SELEZIONE) ---
         if days_counter >= REBALANCE_DAYS:
             days_counter = 0
 
-            # 1. Ranking Top Picks
             candidates = []
             for t, df in market_data.items():
                 if current_date not in df.index: continue
@@ -133,10 +115,8 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
 
                 if pd.isna(daily['SMA130']) or pd.isna(daily['Momentum']): continue
 
-                # FILTRO INGRESSO: Trend Sano (> SMA130)
                 if daily['Close'] < daily['SMA130']: continue
 
-                # Filtro Momentum Positivo
                 if daily['Momentum'] <= 0: continue
 
                 candidates.append({
@@ -147,11 +127,8 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
             top_picks = candidates[:MAX_POSITIONS]
             top_tickers = [c['ticker'] for c in top_picks]
 
-            # 2. VENDITE DI ROTAZIONE (Solo se il trend è buono ma c'è di meglio)
             tickers_out = []
             for t in list(positions.keys()):
-                # Se non è top 4, lo vendiamo per fare spazio
-                # (Nota: Se avesse rotto il trend, sarebbe già stato venduto al passo A)
                 if t not in top_tickers:
                     if current_date in market_data[t].index:
                         curr_price = market_data[t].loc[current_date]['Close']
@@ -183,7 +160,6 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
                 })
                 del positions[t]
 
-            # 3. ACQUISTI (Riempiamo i buchi)
             free_slots = MAX_POSITIONS - len(positions)
 
             if free_slots > 0 and cash > 50:
@@ -220,7 +196,6 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
 
     if progress_bar: progress_bar.empty()
 
-    # Chiusura Finale
     for t, pos in positions.items():
         if t not in market_data: continue
         final_price = market_data[t]['Close'].iloc[-1]

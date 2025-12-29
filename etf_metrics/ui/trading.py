@@ -39,10 +39,8 @@ def render_trading_ui():
         **In Sintesi:** Compriamo i titoli più forti, ma solo se sono in un trend strutturalmente sano. Usciamo immediatamente se il trend si rompe (chiusura sotto SMA 130).
         """)
 
-    # --- SIDEBAR CONFIGURATION ---
     st.sidebar.header("⚙️ Configurazione")
 
-    # Scelta Modalità
     mode = st.sidebar.radio(
         "Modalità Operativa",
         ["📡 Scanner Segnali", "🤖 Automated Backtest"],
@@ -51,11 +49,9 @@ def render_trading_ui():
 
     st.sidebar.divider()
 
-    # Input Tickers
     tickers_input = st.sidebar.text_area("Watchlist (Ticker Yahoo)", DEFAULT_TRADING_LIST, height=200)
     tickers = [t.strip().upper() for t in tickers_input.split('\n') if t.strip()]
 
-    # Configurazione Date
     analysis_date = date.today()
     start_date_backtest = date(2021, 1, 1)
 
@@ -78,7 +74,6 @@ def render_trading_ui():
         start_date_backtest = st.sidebar.date_input("Data Inizio:", pd.to_datetime("2018-01-01"))
         st.sidebar.info("Simulazione portafoglio (max 4 posizioni, ribilanciamento mensile).")
 
-    # --- MAIN CONTENT ---
 
     if mode == "📡 Scanner Segnali":
         st.subheader("📡 Scanner Strategia")
@@ -95,7 +90,6 @@ def render_trading_ui():
 
             for i, ticker in enumerate(tickers):
                 status_text.text(f"Analisi {ticker}...")
-                # Serve storico per SMA 130 + buffer
                 full_df = get_series(ticker, period="2y", as_dataframe=True)
 
                 if full_df is not None and not full_df.empty:
@@ -117,12 +111,10 @@ def render_trading_ui():
                 st.info(f"Nessun risultato disponibile.")
                 return
 
-            # Ordina per Momentum (usato come 'confidence' in core/trading.py)
             results.sort(key=lambda x: x['confidence'], reverse=True)
 
             st.success(f"Analizzati {len(results)} titoli. Ordinati per Momentum.")
 
-            # Tabella riassuntiva veloce
             summary_data = []
             for res in results:
                 inds = res['indicators']
@@ -134,14 +126,12 @@ def render_trading_ui():
                     "Momentum 6M": inds.get('Momentum_6M')
                 })
 
-            # --- VISUALIZZAZIONE DETTAGLIATA ---
             for res in results:
                 inds = res['indicators']
                 mom_val = inds.get('Momentum_6M', 0)
                 sma_val = inds.get('SMA_130', 0)
                 price = res['price']
 
-                # Colori e Icone
                 sig_type = res['raw_signal']
                 if sig_type == "ENTRY":
                     box_color = "green"
@@ -154,12 +144,10 @@ def render_trading_ui():
                     icon = "🟠"
 
                 with st.container():
-                    # Header Card
                     st.markdown(f"#### {icon} **{res['ticker']}**: :{box_color}[{res['signal']}]")
 
                     c1, c2, c3 = st.columns(3)
 
-                    # Colonna 1: Prezzo vs Trend
                     dist_sma = (price / sma_val - 1) * 100 if sma_val else 0
                     c1.metric(
                         "Prezzo vs SMA 130",
@@ -168,7 +156,6 @@ def render_trading_ui():
                         delta_color="normal" if price > sma_val else "inverse"
                     )
 
-                    # Colonna 2: Momentum (Il driver del ranking)
                     c2.metric(
                         "Momentum 6 Mesi",
                         f"{mom_val:.2%}",
@@ -176,7 +163,6 @@ def render_trading_ui():
                         delta_color="normal" if mom_val > 0 else "inverse"
                     )
 
-                    # Colonna 3: Volatilità (Info extra)
                     c3.metric("ATR (Volatilità)", f"{inds.get('ATR', 0):.2f}")
 
                     st.caption(f"**Analisi:** {res['reason']}")
@@ -191,7 +177,6 @@ def render_trading_ui():
                 return
 
             with st.spinner(f"Simulazione in corso dal {start_date_backtest}..."):
-                # Esegue la simulazione
                 df_trades, final_cap = run_market_aware_backtest(tickers, start_date=str(start_date_backtest))
 
             if not df_trades.empty:
@@ -203,7 +188,6 @@ def render_trading_ui():
                 col2.metric("Rendimento Totale", f"{total_return:.2f}%",
                             delta_color="normal" if total_return > 0 else "inverse")
 
-                # Statistiche Trades
                 realized_trades = df_trades[df_trades['Action'] == 'SELL']
                 if not realized_trades.empty:
                     wins = len(realized_trades[realized_trades['PnL_Net'] > 0])
@@ -214,17 +198,15 @@ def render_trading_ui():
                 st.subheader("Giornale delle Operazioni")
 
                 def style_backtest_rows(row):
-                    # Stiliamo le righe per azione
                     act = row['Action']
                     if act == 'BUY':
-                        return ['background-color: #202020'] * len(row)  # Light Green
+                        return ['background-color: #202020'] * len(row)
                     if act == 'SELL':
                         if "TREND BREAK" in str(row['Reason']):
-                            return ['background-color: #fff5f5; color: #c53030'] * len(row)  # Light Red per stop loss
-                        return ['background-color: #006600'] * len(row)  # Light Blue per rotazione
+                            return ['background-color: #fff5f5; color: #c53030'] * len(row)
+                        return ['background-color: #006600'] * len(row)
                     return [''] * len(row)
 
-                # Formattazione Colonne
                 df_display = df_trades.style.apply(style_backtest_rows, axis=1).format({
                     "Price": "{:.2f}",
                     "PnL_Net": "{:+.2f}",
@@ -234,7 +216,6 @@ def render_trading_ui():
 
                 st.dataframe(df_display, width="stretch")
 
-                # Grafico Equity Curve
                 st.subheader("Curva del Capitale")
                 equity_curve = df_trades.drop_duplicates(subset=['Date'], keep='last').set_index('Date')[
                     'Capital']

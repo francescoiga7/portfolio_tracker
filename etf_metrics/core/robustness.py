@@ -23,16 +23,9 @@ def detrend_series(series: pd.Series) -> pd.Series:
 
     prices = clean_series.values
 
-    # 1. Calcola Log Returns
     log_rets = np.log(prices[1:] / prices[:-1])
-
-    # 2. Calcola il Drift medio
     avg_ret = np.mean(log_rets)
-
-    # 3. Sottrai il Drift
     detrended_rets = log_rets - avg_ret
-
-    # 4. Ricostruisci i prezzi
     reconstructed_path = np.exp(np.cumsum(np.insert(detrended_rets, 0, 0)))
     final_prices = reconstructed_path * prices[0]
 
@@ -67,7 +60,6 @@ def _rebuild_synthetic_df(original_df: pd.DataFrame, new_close: pd.Series) -> pd
     df_slice = original_df.loc[common_index]
     new_close = new_close.loc[common_index]
 
-    # Scala Open, High, Low proporzionalmente al nuovo Close
     ratio = new_close / df_slice['Close']
 
     df_synth = pd.DataFrame(index=common_index)
@@ -77,8 +69,6 @@ def _rebuild_synthetic_df(original_df: pd.DataFrame, new_close: pd.Series) -> pd
     df_synth['Low'] = df_slice['Low'] * ratio
     df_synth['Volume'] = df_slice['Volume']
 
-    # Ricalcola gli indicatori specifici della strategia (SMA130, Momentum)
-    # sui dati sintetici
     df_synth = calculate_indicators(df_synth)
 
     return df_synth
@@ -89,17 +79,14 @@ def run_detrended_analysis(tickers, start_date, initial_capital=1000):
     Esegue il backtest su dati Detrended.
     Serve a verificare se la strategia guadagna grazie all'Alpha o solo al Trend di mercato.
     """
-    # 1. Scarica dati reali
     real_data = prepare_market_data(tickers, period="10y")
     detrended_data = {}
 
     for t, df in real_data.items():
         if df.empty: continue
 
-        # 2. Crea serie Detrended
         detr_close = detrend_series(df['Close'])
 
-        # 3. Ricostruisci DF e ricalcola indicatori (SMA130, Mom)
         df_d = _rebuild_synthetic_df(df, detr_close)
 
         if not df_d.empty:
@@ -108,7 +95,6 @@ def run_detrended_analysis(tickers, start_date, initial_capital=1000):
     if not detrended_data:
         return pd.DataFrame(), initial_capital, {}
 
-    # 4. Esegui Backtest su dati detrended
     trades, end_cap = run_market_aware_backtest(
         tickers, start_date, initial_capital, preloaded_data=detrended_data
     )
@@ -121,7 +107,6 @@ def run_monte_carlo_permutation_test(tickers, start_date, n_simulations=50, init
     Esegue N simulazioni Monte Carlo mescolando i rendimenti.
     Verifica se il risultato è statisticamente significativo o frutto del caso.
     """
-    # 1. Run Reale
     real_data = prepare_market_data(tickers, period="10y")
     _, real_final_cap = run_market_aware_backtest(
         tickers, start_date, initial_capital, preloaded_data=real_data
@@ -130,30 +115,24 @@ def run_monte_carlo_permutation_test(tickers, start_date, n_simulations=50, init
 
     simulation_results = []
 
-    # 2. Loop Simulazioni
     for i in range(n_simulations):
         synthetic_data = {}
         for t, df in real_data.items():
             if df.empty: continue
 
-            # Shuffle dei prezzi
             shuffled_close = shuffle_series(df['Close'])
 
-            # Ricostruzione e ricalcolo indicatori
             df_synth = _rebuild_synthetic_df(df, shuffled_close)
 
             if not df_synth.empty:
                 synthetic_data[t] = df_synth
 
-        # Backtest su universo parallelo
         _, synth_cap = run_market_aware_backtest(
             tickers, start_date, initial_capital, preloaded_data=synthetic_data
         )
         synth_return = (synth_cap - initial_capital) / initial_capital
         simulation_results.append(synth_return)
 
-    # 3. Calcolo P-Value
-    # Quante volte il caso ha battuto la strategia reale?
     better_than_real = sum(1 for r in simulation_results if r >= real_return)
     p_value = better_than_real / n_simulations if n_simulations > 0 else 1.0
 
@@ -174,7 +153,6 @@ def run_walk_forward_analysis(tickers, initial_capital=1000, train_months=24, te
     full_data = prepare_market_data(tickers, period="10y")
     if not full_data: return pd.DataFrame()
 
-    # Trova range date comune approssimativo
     sample = list(full_data.values())[0]
     start_dt = sample.index[0]
     end_dt = sample.index[-1]
@@ -186,18 +164,16 @@ def run_walk_forward_analysis(tickers, initial_capital=1000, train_months=24, te
         window_end = current_dt + pd.DateOffset(months=test_months)
         if window_end > end_dt: break
 
-        # Prepara dati per la finestra corrente
         window_data = {}
         valid_window = False
         for t, df in full_data.items():
             mask = (df.index >= current_dt) & (df.index <= window_end)
             df_slice = df.loc[mask].copy()
-            if not df_slice.empty and len(df_slice) > 130:  # Minimo per SMA130
+            if not df_slice.empty and len(df_slice) > 130:
                 window_data[t] = df_slice
                 valid_window = True
 
         if valid_window:
-            # Esegui backtest sulla finestra
             trades, end_cap = run_market_aware_backtest(
                 tickers,
                 start_date=str(current_dt.date()),
@@ -216,7 +192,6 @@ def run_walk_forward_analysis(tickers, initial_capital=1000, train_months=24, te
                 "Trades": len(trades)
             })
 
-        # Avanza alla prossima finestra
         current_dt = window_end
 
     return pd.DataFrame(results)
