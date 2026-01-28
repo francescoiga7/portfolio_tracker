@@ -81,58 +81,74 @@ def generate_advisory_response(user_input: str, hf_token: Optional[str] = None,
     if not ctx:
         return f"Errore dati per **{clean_input}**."
 
+    # Estrazione Dati Migliorata
     t = ctx['trading']
     m = ctx['metrics']
-    e = ctx['etf_info']
+    e = ctx['etf_info'] or {}
     macro = ctx['market']
 
-    cagr = m.get('cagr', 0)
-    mdd = m.get('mdd', 0)
-    sortino = m.get('sortino', 0)
-    var = m.get('var_95', 0)
-    prox = m.get('prox_high', 0) * 100
+    # Parametri aggiuntivi per il contesto
+    asset_category = e.get('assetClass', 'Azionario/Misto')
+    sector = e.get('sector', 'Generale')
+    description = e.get('description', 'Nessuna descrizione disponibile.')[:200]  # Primi 200 caratteri
 
-    is_pac_candidate = (cagr > 3) and (mdd > -35)
-
-    inds = t.get('indicators', {})
-    rsi_val = inds.get('RSI', 50)
+    # Metriche chiave formattate
+    rsi_val = t.get('indicators', {}).get('RSI', 50)
+    volatility_risk = "ALTO" if m.get('var_95', 0) < -2.0 else "MEDIO" if m.get('var_95', 0) < -1.0 else "BASSO"
 
     if hf_token:
         try:
             client = InferenceClient(model=model_id, token=hf_token)
 
+            # PROMPT AVANZATO (Chain of Thought + Persona Finanziaria)
             system_prompt = f"""
-            Sei un analista finanziario esperto. Analisi su: {ctx['name']} ({ctx['ticker']}).
+            Agisci come un Senior Portfolio Manager quantitativo. 
+            Analizza il seguente asset finanziario basandoti RIGOROSAMENTE sui dati forniti.
 
-            1. CONTESTO MACRO:
-            - Regime: {macro.get('regime', 'N/D')} (VIX: {macro.get('vix', 0):.2f}).
+            ### 1. SCHEDA ASSET
+            - Nome: {ctx['name']} ({ctx['ticker']})
+            - Categoria/Settore: {asset_category} - {sector}
+            - Prezzo Attuale: {ctx['price']:.2f}
 
-            2. DATI TECNICI:
-            - Prezzo: {ctx['price']:.2f} | Trend: {ctx['trend']}
-            - Segnale Algoritmo: {t['signal']} (Confidenza {t.get('confidence', 0)}%)
-            - RSI: {rsi_val:.1f} | Prossimità Massimi: {prox:.0f}%
-            - Stop Loss Suggerito: {t.get('stop_loss', 0):.2f}
+            ### 2. CONTESTO DI MERCATO (MACRO)
+            - Regime di Mercato: {macro.get('regime', 'N/D').upper()} 
+            - Volatilità VIX: {macro.get('vix', 0):.2f} (Sopra 20 = Alta incertezza)
 
-            3. RISCHIO:
-            - Sortino Ratio: {sortino:.2f}
-            - VaR 95% (1gg): {var:.2f}%
-            - Max Drawdown: {mdd:.2f}%
+            ### 3. ANALISI TECNICA (Breve Termine)
+            - Trend Primario: {ctx['trend']}
+            - Segnale Algoritmico: {t['signal']} (Confidenza: {t.get('confidence', 0)}%)
+            - RSI (14): {rsi_val:.1f} (Ipervenduto < 30, Ipercomprato > 70)
+            - Distanza dai Massimi: {m.get('prox_high', 0) * 100:.1f}%
+            - Stop Loss Tecnico: {t.get('stop_loss', 0):.2f}
 
-            COMPITO:
-            Consiglia (COMPRA, VENDI, ACCUMULA o ATTENDI) spiegando il perché basandoti sui dati sopra. Sii sintetico e professionale.
+            ### 4. METRICHE DI RISCHIO E RENDIMENTO (Lungo Termine)
+            - Rischio Downside (VaR 95%): {m.get('var_95', 0):.2f}% giornaliero -> Rischio {volatility_risk}
+            - Max Drawdown: {m.get('mdd', 0):.2f}%
+            - Sortino Ratio: {m.get('sortino', 0):.2f} ( > 1.0 Buono, > 2.0 Eccellente)
+
+            ### ISTRUZIONI DI RISPOSTA:
+            Non essere generico. Usa uno stile sintetico e diretto (bullet points).
+            Struttura la risposta così:
+
+            1. **Analisi del Contesto**: Sintetizza se il macro (VIX) favorisce o ostacola questo asset.
+            2. **Valutazione Tecnica (Timing)**: È il momento giusto per entrare? L'RSI o il Trend supportano l'ingresso?
+            3. **Profilo Rischio/Rendimento**: Il Sortino e il Drawdown giustificano l'investimento a lungo termine?
+            4. **VERDETTO FINALE**: Scegli una action chiara: [STRONG BUY | BUY | HOLD | SELL | AVOID]. Motiva la scelta in una frase.
             """
 
+            # Temperature più bassa per essere analitico, non creativo
             response = client.chat_completion(
                 messages=[{"role": "user", "content": system_prompt}],
-                max_tokens=800,
-                temperature=0.6
+                max_tokens=1024,
+                temperature=0.3,
+                top_p=0.9
             )
             return response.choices[0].message.content
 
         except Exception as e:
-            return f"⚠️ **Errore AI:** {str(e)}\n\n" + _fallback_template_response(ctx, is_pac_candidate)
+            return f"⚠️ **Errore AI:** {str(e)}\n\n" + _fallback_template_response(ctx, (m.get('cagr', 0) > 3))
 
-    return _fallback_template_response(ctx, is_pac_candidate)
+    return _fallback_template_response(ctx, (m.get('cagr', 0) > 3))
 
 
 def _fallback_template_response(ctx, is_pac_candidate):

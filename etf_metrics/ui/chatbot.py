@@ -3,11 +3,10 @@ import streamlit as st
 from etf_metrics.core.chatbot import generate_advisory_response
 
 FREE_MODELS = {
-    "Meta Llama 3 (8B)": "meta-llama/Meta-Llama-3-8B-Instruct",
-    "Google Gemma 2 (9B) - Consigliato": "google/gemma-2-9b-it",
-    "Mistral Nemo (12B)": "mistralai/Mistral-Nemo-Instruct-2407",
-    "Microsoft Phi-3.5 Mini": "microsoft/Phi-3.5-mini-instruct",
-    "HuggingFace Zephyr": "HuggingFaceH4/zephyr-7b-beta",
+    "Qwen 3 (235B)": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+    "Qwen 3-Next (80B)": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+    "Meta Llama 3.3 (70B)": "meta-llama/Llama-3.3-70B-Instruct",
+    "DeepSeek-V3.2-Exp": "deepseek-ai/DeepSeek-V3.2-Exp"
 }
 
 DEFAULT_HF_TOKEN = "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"
