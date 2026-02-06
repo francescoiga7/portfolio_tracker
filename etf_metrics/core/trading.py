@@ -5,6 +5,7 @@ from typing import Dict, Optional
 from etf_metrics.core.metrics import calculate_atr_series, calculate_rsi_series, calculate_adx_series
 from etf_metrics.clients.yahoo_client import get_series
 
+
 def _get_latest_vix() -> Optional[float]:
     try:
         vix_series = get_series("^VIX", period="5d")
@@ -12,12 +13,21 @@ def _get_latest_vix() -> Optional[float]:
     except:
         return None
 
+
 def _get_dynamic_atr_multiplier(vix_value: Optional[float]) -> float:
-    if vix_value is None or pd.isna(vix_value): return 3.0
-    if vix_value < 15: return 2.5
-    if vix_value < 25: return 3.0
-    if vix_value < 35: return 3.5
-    return 4.0
+    """
+    Restituisce un moltiplicatore ATR più ampio per gestire la volatilità
+    degli ETF settoriali (Satellite), evitando uscite premature.
+    """
+    if vix_value is None or pd.isna(vix_value):
+        return 3.5  # Default aumentato (era 3.0)
+
+    # Scala aumentata di 0.5 - 1.0 punti rispetto alla versione precedente
+    if vix_value < 15: return 3.0  # Bassa volatilità: stop stretto ma non soffocante (era 2.5)
+    if vix_value < 25: return 3.5  # Volatilità normale: spazio di manovra (era 3.0)
+    if vix_value < 35: return 4.5  # Volatilità alta: serve aria (era 3.5)
+    return 6.0  # Panico (VIX > 35): stop molto largo per evitare whipsaw (era 4.0)
+
 
 def calculate_full_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -29,9 +39,11 @@ def calculate_full_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['ADX'] = calculate_adx_series(df, window=14)
     return df
 
+
 def analyze_ticker(ticker: str, df: pd.DataFrame) -> Dict:
     if df is None or len(df) < 135:
-        return {"signal": "Dati Insufficienti", "confidence": 0, "reason": "Storico < 135gg", "stop_loss": 0, "price": 0, "indicators": {}}
+        return {"signal": "Dati Insufficienti", "confidence": 0, "reason": "Storico < 135gg", "stop_loss": 0,
+                "price": 0, "indicators": {}}
 
     df = calculate_full_indicators(df)
     last = df.iloc[-1]
@@ -39,9 +51,9 @@ def analyze_ticker(ticker: str, df: pd.DataFrame) -> Dict:
     sma130 = last['SMA_130']
     mom_6m = last.get('Momentum_6M', 0)
     atr = last.get('ATR', 0)
-    rsi = last.get('RSI', 0)
-    adx = last.get('ADX', 0)
 
+    # Qui usiamo un moltiplicatore standard per l'analisi generale,
+    # diverso dalla gestione posizioni aperte (che deve essere più "sticky")
     vix = _get_latest_vix()
     mult = _get_dynamic_atr_multiplier(vix)
     stop_loss = price - (atr * mult) if atr > 0 else 0
@@ -76,18 +88,48 @@ def analyze_ticker(ticker: str, df: pd.DataFrame) -> Dict:
         }
     }
 
+
 def check_satellite_status(df: pd.DataFrame, purchase_date: pd.Timestamp, current_shares: float) -> Dict:
+    """
+    Verifica lo stato di una posizione satellite usando un Trailing Stop basato su ATR e Close.
+    """
     if df is None or df.empty: return {"action": "HOLD", "reason": "Dati non disponibili"}
+
     df_clean = df.copy()
     if df_clean.index.tz is not None: df_clean.index = df_clean.index.tz_localize(None)
+
     p_date = purchase_date.tz_localize(None) if purchase_date.tzinfo else purchase_date
     df_since = df_clean[df_clean.index >= p_date]
+
     if df_since.empty: return {"action": "HOLD", "reason": "Data acquisto futura"}
+
+    # Calcolo ATR corrente
     atr_val = calculate_atr_series(df_clean).iloc[-1]
+
+    # 1. Recupero Moltiplicatore Dinamico (più largo per i satelliti)
     mult = _get_dynamic_atr_multiplier(_get_latest_vix())
-    high_since = df_since['High'].max()
-    stop_price = high_since - (atr_val * mult)
+
+    # 2. MODIFICA CRITICA: Uso il 'Close' massimo invece del 'High' massimo.
+    # Questo evita che uno spike intraday alzi lo stop loss prematuramente.
+    highest_close_since = df_since['Close'].max()
+
+    # Calcolo Stop Price (Chandelier Exit su Close)
+    stop_price = highest_close_since - (atr_val * mult)
+
     current_price = df_clean['Close'].iloc[-1]
+
+    # Calcolo distanza percentuale dallo stop per info
+    dist_pct = ((current_price - stop_price) / current_price) * 100
+
     if current_price < stop_price:
-        return {"action": "SELL", "stop_price": stop_price, "reason": f"Prezzo {current_price:.2f} < Stop {stop_price:.2f}"}
-    return {"action": "HOLD", "stop_price": stop_price, "reason": f"Prezzo in trend sopra {stop_price:.2f}"}
+        return {
+            "action": "SELL",
+            "stop_price": stop_price,
+            "reason": f"Prezzo {current_price:.2f} < Stop Dinamico {stop_price:.2f} (MaxClose: {highest_close_since:.2f})"
+        }
+
+    return {
+        "action": "HOLD",
+        "stop_price": stop_price,
+        "reason": f"Trend OK. Stop @ {stop_price:.2f} ({dist_pct:.1f}% di margine)"
+    }
