@@ -22,6 +22,7 @@ scipy = "*"
 pyarrow = "*"
 huggingface_hub = "*"
 certifi = "*"
+polars = "*"
 
 [tool.poetry.group.dev.dependencies]
 black = "*"

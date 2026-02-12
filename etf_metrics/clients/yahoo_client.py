@@ -20,7 +20,7 @@ class YahooClient(BaseFinancialClient):
 
     def __init__(self):
         super().__init__("YahooFinance", base_timeout=12)
-        self._search_hosts = ("query2", "query1")
+        self._search_hosts = ("query1", "query2")
 
     def validate_input(self, input_data: str) -> bool:
         """Accetta qualsiasi stringa non vuota (ticker, query o ISIN)."""
@@ -29,18 +29,24 @@ class YahooClient(BaseFinancialClient):
     def _search_once(self, host: str, query: str, quotes_count: int) -> List[Dict]:
         url = f"https://{host}.finance.yahoo.com/v1/finance/search"
         params = {"q": query, "quotesCount": quotes_count, "newsCount": 0, "listsCount": 0}
-        resp = self.safe_request(url, headers=REQUEST_HEADERS, params=params, timeout=10)
-        if not resp:
-            return []
+
         try:
-            data = resp.json() or {}
-        except Exception:
+            resp = self.safe_request(url, headers=REQUEST_HEADERS, params=params, timeout=10)
+            if not resp:
+                return []
+            try:
+                data = resp.json() or {}
+            except Exception:
+                return []
+            return data.get("quotes", []) or []
+        except Exception as e:
+            logger.warning(f"Yahoo Search failed on {host}: {e}")
             return []
-        return data.get("quotes", []) or []
 
     def search(self, query: str, quotes_count: int = 100) -> List[Dict]:
         if not self.validate_input(query):
             return []
+
         for host in self._search_hosts:
             quotes = self._search_once(host, query, quotes_count)
             if quotes:
@@ -53,6 +59,11 @@ class YahooClient(BaseFinancialClient):
         quotes = self.search(isin, quotes_count=60)
         symbols = [q.get("symbol") for q in quotes if q.get("symbol")]
         return pick_preferred_symbol(symbols)
+
+    def resolve_ticker_to_isin(self, ticker: str) -> Optional[str]:
+        """Tenta di risolvere un ticker nel suo ISIN usando get_info."""
+        info = self.get_info(ticker=ticker)
+        return info.get('isin')
 
     def get_series(self, ticker: str, period: str, as_dataframe: bool = False) -> Optional[
         Union[pd.Series, pd.DataFrame]]:
@@ -74,8 +85,9 @@ class YahooClient(BaseFinancialClient):
 
             if as_dataframe:
                 required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-                if not all(col in df.columns for col in required_cols):
-                    return None
+                for col in required_cols:
+                    if col not in df.columns:
+                        df[col] = 0.0
                 return df[required_cols]
 
             col = "Adj Close" if ("Adj Close" in df.columns and not df["Adj Close"].isna().all()) else "Close"

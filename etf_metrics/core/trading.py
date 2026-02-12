@@ -32,32 +32,52 @@ def _get_dynamic_atr_multiplier(vix_value: Optional[float]) -> float:
 def calculate_full_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if 'Close' not in df.columns: return df
-    df['SMA_130'] = df['Close'].rolling(130).mean()
-    df['Momentum_6M'] = df['Close'].pct_change(126)
-    df['ATR'] = calculate_atr_series(df, window=14)
-    df['RSI'] = calculate_rsi_series(df['Close'], window=14)
-    df['ADX'] = calculate_adx_series(df, window=14)
+
+    # Calcoli robusti con gestione errori
+    try:
+        df['SMA_130'] = df['Close'].rolling(130).mean()
+        df['Momentum_6M'] = df['Close'].pct_change(126)
+        df['ATR'] = calculate_atr_series(df, window=14)
+        df['RSI'] = calculate_rsi_series(df['Close'], window=14)
+        df['ADX'] = calculate_adx_series(df, window=14)
+    except Exception:
+        pass  # Se fallisce qualche indicatore, proseguiamo
+
     return df
 
 
 def analyze_ticker(ticker: str, df: pd.DataFrame) -> Dict:
+    # 1. Check Dati Minimi
     if df is None or len(df) < 135:
-        return {"signal": "Dati Insufficienti", "confidence": 0, "reason": "Storico < 135gg", "stop_loss": 0,
-                "price": 0, "indicators": {}}
+        return {
+            "ticker": ticker,
+            "signal": "Dati Insufficienti",
+            "raw_signal": "NEUTRAL",
+            "confidence": 0,
+            "reason": "Storico < 135gg",
+            "stop_loss": 0,
+            "price": 0,
+            "indicators": {}
+        }
 
+    # 2. Calcolo Indicatori
     df = calculate_full_indicators(df)
     last = df.iloc[-1]
+
+    # 3. Estrazione Valori (FIX BUG: Definizione variabili rsi/adx)
     price = last['Close']
-    sma130 = last['SMA_130']
+    sma130 = last.get('SMA_130', np.nan)
     mom_6m = last.get('Momentum_6M', 0)
     atr = last.get('ATR', 0)
+    rsi = last.get('RSI', 50)  # Default neutro se manca
+    adx = last.get('ADX', 0)
 
-    # Qui usiamo un moltiplicatore standard per l'analisi generale,
-    # diverso dalla gestione posizioni aperte (che deve essere più "sticky")
+    # 4. Calcolo Stop Loss Dinamico
     vix = _get_latest_vix()
     mult = _get_dynamic_atr_multiplier(vix)
     stop_loss = price - (atr * mult) if atr > 0 else 0
 
+    # 5. Logica Segnale V28 (Golden Mean)
     ui_signal, signal, score, reason = "ATTENDI", "NEUTRAL", 0, "Analisi in corso"
 
     if pd.notna(sma130) and pd.notna(mom_6m):
@@ -71,6 +91,11 @@ def analyze_ticker(ticker: str, df: pd.DataFrame) -> Dict:
             signal, ui_signal, score = "HOLD_WEAK", "MONITORA (Mom. Neg)", int(mom_6m * 100)
             reason = f"Sopra SMA 130 ma Momentum negativo."
 
+    # Aggiustamento score in base a RSI (Overbought/Oversold)
+    if pd.notna(rsi):
+        if rsi > 70: reason += " (Attenzione: RSI Ipercomprato)"
+        if rsi < 30: reason += " (Attenzione: RSI Ipervenduto)"
+
     return {
         "ticker": ticker,
         "signal": ui_signal,
@@ -83,8 +108,8 @@ def analyze_ticker(ticker: str, df: pd.DataFrame) -> Dict:
             "SMA_130": sma130,
             "Momentum_6M": mom_6m,
             "ATR": atr,
-            "RSI": rsi,
-            "ADX": adx
+            "RSI": rsi,  # Ora la variabile è definita
+            "ADX": adx  # Ora la variabile è definita
         }
     }
 
@@ -104,13 +129,16 @@ def check_satellite_status(df: pd.DataFrame, purchase_date: pd.Timestamp, curren
     if df_since.empty: return {"action": "HOLD", "reason": "Data acquisto futura"}
 
     # Calcolo ATR corrente
-    atr_val = calculate_atr_series(df_clean).iloc[-1]
+    atr_series = calculate_atr_series(df_clean)
+    if atr_series is None or atr_series.empty:
+        return {"action": "HOLD", "reason": "ATR non calcolabile"}
+
+    atr_val = atr_series.iloc[-1]
 
     # 1. Recupero Moltiplicatore Dinamico (più largo per i satelliti)
     mult = _get_dynamic_atr_multiplier(_get_latest_vix())
 
     # 2. MODIFICA CRITICA: Uso il 'Close' massimo invece del 'High' massimo.
-    # Questo evita che uno spike intraday alzi lo stop loss prematuramente.
     highest_close_since = df_since['Close'].max()
 
     # Calcolo Stop Price (Chandelier Exit su Close)
