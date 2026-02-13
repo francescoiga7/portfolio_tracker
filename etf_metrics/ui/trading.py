@@ -180,7 +180,7 @@ def render_trading_ui():
                 df_trades, final_cap = run_market_aware_backtest(tickers, start_date=str(start_date_backtest))
 
             if not df_trades.empty:
-                initial = 1000
+                initial = 10000
                 total_return = ((final_cap - initial) / initial) * 100
 
                 col1, col2, col3 = st.columns(3)

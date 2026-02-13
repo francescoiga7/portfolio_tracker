@@ -5,7 +5,6 @@ import logging
 from etf_metrics.core.automated_backtest import (
     run_market_aware_backtest,
     prepare_market_data,
-    calculate_indicators
 )
 
 logger = logging.getLogger(__name__)
@@ -69,7 +68,7 @@ def _rebuild_synthetic_df(original_df: pd.DataFrame, new_close: pd.Series) -> pd
     df_synth['Low'] = df_slice['Low'] * ratio
     df_synth['Volume'] = df_slice['Volume']
 
-    df_synth = calculate_indicators(df_synth)
+    df_synth = ""
 
     return df_synth
 
