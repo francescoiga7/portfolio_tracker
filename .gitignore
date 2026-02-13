@@ -3,3 +3,6 @@
 /simulated_trades.json
 /poetry.lock
 /.venv/
+/market_data.db
+/live_algo_portfolio.json
+/uv.lock

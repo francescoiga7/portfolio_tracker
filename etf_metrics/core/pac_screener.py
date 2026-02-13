@@ -7,6 +7,7 @@ import numpy as np
 import yfinance as yf
 import polars as pl
 
+# Assicuriamoci di importare get_info per scaricare i metadati
 from etf_metrics.clients.yahoo_client import get_info, resolve_isin_one, get_series
 from etf_metrics.core.etf_search_engine import discover_universe, get_unique_preferred_tickers
 from etf_metrics.shared.config import DEFAULT_SEED_QUERIES
@@ -93,13 +94,22 @@ def fetch_screener_data(
     if tickers_to_download:
         log_area.append(f"**2. Download Cloud per {len(tickers_to_download)} strumenti...**")
         try:
+            # Download dei prezzi
             bulk_df = yf.download(tickers_to_download, period="5y", group_by='ticker', auto_adjust=False, threads=True)
 
             downloaded_data = {}
+            new_names = {}  # Dizionario per raccogliere i nomi
+
             is_single = len(tickers_to_download) == 1
 
-            for ticker in tickers_to_download:
+            # Barra di avanzamento per il recupero metadati se sono tanti
+            progress_meta = None
+            if len(tickers_to_download) > 10:
+                progress_meta = st.progress(0, text="Recupero Nomi Asset...")
+
+            for i, ticker in enumerate(tickers_to_download):
                 try:
+                    # Estrazione Prezzi
                     if is_single:
                         df = bulk_df.copy()
                     else:
@@ -110,26 +120,47 @@ def fetch_screener_data(
                     if len(df) > 10:
                         if df.index.tz is not None: df.index = df.index.tz_localize(None)
                         downloaded_data[ticker] = df
+
+                        # Recupero Metadati (Name)
+                        # Nota: Questo rallenta un po' ma è necessario per avere il nome corretto
+                        try:
+                            info = get_info(ticker)
+                            name = info.get('longName') or info.get('shortName') or ticker
+                            new_names[ticker] = name
+                        except:
+                            new_names[ticker] = ticker
                 except:
                     continue
 
+                if progress_meta: progress_meta.progress((i + 1) / len(tickers_to_download))
+
+            if progress_meta: progress_meta.empty()
+
             if downloaded_data:
-                db_manager.save_bulk_data(downloaded_data)
+                # Passiamo anche i nomi al DB Manager
+                db_manager.save_bulk_data(downloaded_data, names_dict=new_names)
                 log_area.append(f"- Salvati {len(downloaded_data)} nuovi ticker nel Database.")
         except Exception as e:
             log_area.append(f"⚠️ Errore download: {e}")
 
     log_area.append(f"**3. Caricamento Dati Unificati...**")
+
+    # Carichiamo prezzi e nomi
     loaded_data_dict = db_manager.load_data(unique_tickers)
+    ticker_names = db_manager.get_ticker_names(unique_tickers)  # Nuova funzione
 
     fetched_data = []
     for ticker, df in loaded_data_dict.items():
         if df.empty or len(df) < 50: continue
+
+        # Recupera il nome dal DB, fallback sul ticker
+        asset_name = ticker_names.get(ticker, ticker)
+
         fetched_data.append({
             "ticker": ticker,
             "series": df,
-            "name": info.get("longName") or info.get("shortName") or ticker,
-            "isin": db_manager.resolve_ticker_to_isin(ticker) if hasattr(db_manager, 'resolve_ticker_to_isin') else None
+            "name": asset_name,  # Ora usiamo la variabile corretta
+            "isin": db_manager.resolve_ticker_to_isin(ticker) if hasattr(db_manager, 'resolve_ticker_to_isin') else ""
         })
 
     log_area.append(f"- **Pronti per analisi: {len(fetched_data)} strumenti.**")
@@ -167,8 +198,8 @@ def calculate_all_metrics(fetched_data: List[Dict], as_of_date: date) -> Tuple[p
 
             # Aggiungiamo metadati alle righe per portarli nel group_by
             df['ticker'] = str(item['ticker'])
-            df['name'] = str(item.get('name', ''))
-            df['isin'] = str(item.get('isin', ''))  # FIX: Aggiunto ISIN
+            df['name'] = str(item.get('name', item['ticker']))  # Fallback
+            df['isin'] = str(item.get('isin', ''))
 
             cols = ['Date', 'Close', 'Volume', 'ticker', 'name', 'isin']
 
@@ -198,7 +229,7 @@ def calculate_all_metrics(fetched_data: List[Dict], as_of_date: date) -> Tuple[p
 
         metrics_lf = (
             lf.sort("Date")
-            # FIX: Aggiunto 'isin' al group_by per conservarlo
+            # FIX: Aggiunto 'isin' e 'name' al group_by per conservarli
             .group_by(["ticker", "name", "isin"])
             .agg([
                 pl.last("Close").alias("current_price"),

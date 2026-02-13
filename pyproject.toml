@@ -23,6 +23,7 @@ pyarrow = "*"
 huggingface_hub = "*"
 certifi = "*"
 polars = "*"
+pandas-stubs = "*"
 
 [tool.poetry.group.dev.dependencies]
 black = "*"

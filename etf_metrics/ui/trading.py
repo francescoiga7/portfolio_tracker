@@ -49,6 +49,16 @@ def render_trading_ui():
 
     st.sidebar.divider()
 
+    # --- NUOVO CAMPO CAPITALE ---
+    initial_capital = st.sidebar.number_input(
+        "💰 Capitale Iniziale (€)",
+        min_value=100.0,
+        value=10000.0,
+        step=500.0,
+        help="Capitale di partenza per il backtest o per il dimensionamento (simulato) delle posizioni."
+    )
+    # ----------------------------
+
     tickers_input = st.sidebar.text_area("Watchlist (Ticker Yahoo)", DEFAULT_TRADING_LIST, height=200)
     tickers = [t.strip().upper() for t in tickers_input.split('\n') if t.strip()]
 
@@ -176,12 +186,17 @@ def render_trading_ui():
                 st.warning("Inserisci almeno un ticker nella sidebar.")
                 return
 
-            with st.spinner(f"Simulazione in corso dal {start_date_backtest}..."):
-                df_trades, final_cap = run_market_aware_backtest(tickers, start_date=str(start_date_backtest))
+            with st.spinner(f"Simulazione in corso dal {start_date_backtest} con capitale €{initial_capital:,.2f}..."):
+                # PASSIAMO IL CAPITALE DINAMICO ALLA FUNZIONE DI BACKTEST
+                df_trades, final_cap = run_market_aware_backtest(
+                    tickers,
+                    start_date=str(start_date_backtest),
+                    initial_capital=initial_capital
+                )
 
             if not df_trades.empty:
-                initial = 10000
-                total_return = ((final_cap - initial) / initial) * 100
+                # USIAMO IL CAPITALE DINAMICO PER IL CALCOLO DEL RENDIMENTO
+                total_return = ((final_cap - initial_capital) / initial_capital) * 100
 
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Capitale Finale", f"€{final_cap:,.2f}")

@@ -20,7 +20,7 @@ CONFIG = {
     # 1. GESTIONE COSTI E LIMITI
     'ENABLE_MONTHLY_LIMIT': True,
     'MAX_BUYS_PER_MONTH': 4,  # Aumentato leggermente per permettere rotazione
-    'COMMISSION': 2.0,  # Costo per trade
+    'COMMISSION': 2.0,  # Costo per trade (Simulato)
 
     # 2. FILTRO MACRO (SPY)
     'SPY_TICKER': 'SPY',
@@ -211,8 +211,9 @@ def prepare_market_data(tickers, period="5y"):  # Periodo ridotto per velocità
     return processed
 
 
+# MODIFICA: Aggiunto parametro allow_fractional=True di default per supportare piccoli capitali
 def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_capital=10000,
-                              preloaded_data=None, tax_rate=26.0):
+                              preloaded_data=None, tax_rate=26.0, allow_fractional=True):
     # --- PREPARAZIONE DATI ---
     if preloaded_data:
         market_data = preloaded_data
@@ -222,14 +223,13 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
     if not market_data: return pd.DataFrame(), initial_capital
 
     ref = CONFIG['SPY_TICKER'] if CONFIG['SPY_TICKER'] in market_data else list(market_data.keys())[0]
-    # Filtra date valide
     sim_dates = market_data[ref].index[market_data[ref].index >= pd.to_datetime(start_date)]
 
     # Matrice prezzi per calcoli veloci correlazione/proxy
-    price_matrix = pd.DataFrame({t: d['Close'] for t, d in market_data.items()}).fillna(method='ffill')
+    price_matrix = pd.DataFrame({t: d['Close'] for t, d in market_data.items()}).ffill()
 
     # --- STATO PORTAFOGLIO ---
-    cash = initial_capital
+    cash = float(initial_capital)  # Assicuriamoci sia float
     positions = {}  # {ticker: {qty, cost, stop, ...}}
     trade_log = []
     tax_credit = 0.0  # Minusvalenze
@@ -267,7 +267,6 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
 
             row = market_data[t].loc[current_date]
             curr_price = row['Close']
-            high = row['High']
             low = row['Low']
             atr = row['ATR']
 
@@ -289,19 +288,16 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
             # C) TRAILING STOP DINAMICO
             # Se siamo in profitto o TP1 preso, alziamo lo stop
             if pos.get('tp1_taken', False) or roi > 0.03:
-                # Usa un Chandelier Exit (High - 2.5 ATR)
                 new_stop = curr_price - (atr * CONFIG['STOP_LOSS_ATR_MULT'])
                 if new_stop > positions[t]['stop_loss']:
                     positions[t]['stop_loss'] = new_stop
 
             # D) MACRO EXIT (Emergency Brake)
-            # Se il mercato crolla (Regime DANGER) e il titolo sta perdendo forza, esci.
             if is_crash and roi < 0.05:
                 tokens_to_sell.append((t, curr_price, "MACRO RISK", 1.0))
                 continue
 
             # E) TIME STOP (Dead Money)
-            # Se dopo X giorni non ha performato, libera capitale
             days_held = (current_date - pos['entry_date']).days
             if days_held >= CONFIG['TIME_STOP_DAYS'] and roi < 0.01:
                 tokens_to_sell.append((t, curr_price, "TIME STOP", 1.0))
@@ -310,10 +306,16 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
         for t, price, reason, portion in tokens_to_sell:
             pos = positions[t]
             qty_sell = pos['qty'] * portion
+
+            # Arrotondamento in vendita se NON frazionato
+            if not allow_fractional:
+                qty_sell = int(qty_sell)
+                if qty_sell == 0 and portion > 0.9: qty_sell = pos['qty']  # Vendi tutto se è l'ultima parte
+
             if qty_sell <= 0: continue
 
             net = (qty_sell * price) - CONFIG['COMMISSION']
-            cost_portion = pos['cost_basis'] * portion
+            cost_portion = pos['cost_basis'] * (qty_sell / pos['qty'])
             gain = net - cost_portion
 
             # Calcolo Tasse (Zainetto Fiscale)
@@ -321,21 +323,21 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
             if gain > 0:
                 taxable = max(0, gain - tax_credit)
                 tax = taxable * (tax_rate / 100.0)
-                tax_credit = max(0, tax_credit - gain)  # riduci minus usata
+                tax_credit = max(0, tax_credit - gain)
             else:
-                tax_credit += abs(gain)  # accumula minus
+                tax_credit += abs(gain)
 
             cash += (net - tax)
 
-            # Logging
             trade_log.append({
                 "Date": current_date.date(), "Ticker": t, "Action": "SELL",
                 "Price": price, "Reason": reason,
-                "PnL_Net": gain - tax, "Capital": cash
+                "PnL_Net": gain - tax, "Capital": cash,
+                "Qty": qty_sell
             })
 
             # Aggiorna posizione
-            if portion >= 0.99:
+            if portion >= 0.99 or (pos['qty'] - qty_sell) < (0.001 if allow_fractional else 1):
                 del positions[t]
             else:
                 positions[t]['qty'] -= qty_sell
@@ -344,14 +346,13 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
         # ----------------------------
         # 2. GESTIONE INGRESSI (BUY)
         # ----------------------------
-        # Si compra solo in regime BULL e se non abbiamo superato il limite mensile
         buy_allowed = is_bull and (not CONFIG['ENABLE_MONTHLY_LIMIT'] or buys_this_month < CONFIG['MAX_BUYS_PER_MONTH'])
 
-        # Check rebalance day
         if buy_allowed and i % CONFIG['REBALANCE_DAYS'] == 0:
             free_slots = CONFIG['MAX_POSITIONS'] - len(positions)
 
-            if free_slots > 0 and cash > 2000:
+            # MODIFICA IMPORTANTE: Rimosso limite 2000$. Ora basta avere soldi per commissioni
+            if free_slots > 0 and cash > 50:
                 candidates = []
 
                 # Screening veloce
@@ -364,36 +365,36 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
                     # Usa il nuovo AI Smart Score
                     score, reason = calculate_ai_smart_score(row)
 
-                    if score >= 60:  # Threshold più alta (Qualità sopra quantità)
+                    if score >= 60:
                         candidates.append({'t': t, 'score': score, 'row': row, 'reason': reason})
 
-                # Ordina per score (i migliori prima)
                 candidates.sort(key=lambda x: x['score'], reverse=True)
 
                 for cand in candidates:
-                    if free_slots <= 0 or cash < 1000: break
+                    if free_slots <= 0 or cash < 50: break
                     if CONFIG['ENABLE_MONTHLY_LIMIT'] and buys_this_month >= CONFIG['MAX_BUYS_PER_MONTH']: break
 
                     t = cand['t']
                     row = cand['row']
 
-                    # Check Correlazione
                     is_safe_corr, conflict = check_correlation_strict(t, list(positions.keys()), price_matrix,
                                                                       current_date)
                     if not is_safe_corr: continue
 
                     # Position Sizing
-                    # Se il mercato è incerto (BULL ma vicino a VOLATILE), riduci la size
                     risk_factor = 1.0
-                    # Allocazione dinamica
                     alloc_per_slot = (cash / free_slots) * risk_factor * 0.98
 
-                    qty = alloc_per_slot / row['Close']
+                    # MODIFICA: Logica Frazionata vs Intera
+                    if allow_fractional:
+                        qty = alloc_per_slot / row['Close']
+                    else:
+                        qty = int(alloc_per_slot / row['Close'])
+
                     cost = (qty * row['Close']) + CONFIG['COMMISSION']
 
-                    if cost <= cash:
+                    if qty > 0 and cost <= cash:
                         cash -= cost
-                        # Stop Loss Iniziale (ATR Based)
                         initial_stop = row['Close'] - (row['ATR'] * CONFIG['STOP_LOSS_ATR_MULT'])
 
                         positions[t] = {
@@ -408,7 +409,8 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
                         trade_log.append({
                             "Date": current_date.date(), "Ticker": t, "Action": "BUY",
                             "Price": row['Close'], "Reason": cand['reason'],
-                            "PnL_Net": 0.0, "Capital": cash
+                            "PnL_Net": 0.0, "Capital": cash,
+                            "Qty": qty
                         })
                         free_slots -= 1
                         buys_this_month += 1
@@ -430,7 +432,8 @@ def run_market_aware_backtest(tickers: list, start_date="2015-01-01", initial_ca
         trade_log.append({
             "Date": sim_dates[-1].date(), "Ticker": t, "Action": "HOLD (End)",
             "Price": p, "Reason": "Portfolio Value",
-            "PnL_Net": gain, "Capital": final_nav
+            "PnL_Net": gain, "Capital": final_nav,
+            "Qty": pos['qty']
         })
 
     return pd.DataFrame(trade_log), final_nav
