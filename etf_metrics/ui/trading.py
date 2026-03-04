@@ -7,18 +7,14 @@ from etf_metrics.clients.yahoo_client import get_series
 from etf_metrics.core.trading import analyze_ticker
 from etf_metrics.core.automated_backtest import run_market_aware_backtest
 
-DEFAULT_TRADING_LIST = """NVDA
+DEFAULT_TRADING_LIST = """BTC-USD
+ETH-USD
+SOL-USD
+NVDA
 TSLA
-AMD
+MSTR
 COIN
-MARA
-PLTR
-META
-AMZN
-NFLX
-QQQ
-TQQQ
-SQQQ"""
+PLTR"""
 
 
 def _calculate_detailed_metrics(df_trades: pd.DataFrame, initial_capital: float):
@@ -35,7 +31,8 @@ def _calculate_detailed_metrics(df_trades: pd.DataFrame, initial_capital: float)
     if start_date == end_date:
         return None
 
-    all_dates = pd.date_range(start_date, end_date, freq='B')
+    # FIX CRITICO: Usa freq='D' (Daily) invece di 'B' (Business) per includere i weekend (Crypto)
+    all_dates = pd.date_range(start_date, end_date, freq='D')
     equity_df = pd.DataFrame(index=all_dates)
 
     # SELEZIONE COLONNA CORRETTA PER IL CALCOLO
@@ -46,12 +43,13 @@ def _calculate_detailed_metrics(df_trades: pd.DataFrame, initial_capital: float)
     equity_df.iloc[0, 0] = initial_capital  # Start value
 
     # Aggiorniamo il valore nei giorni in cui ci sono stati trade
+    # Raggruppa per data prendendo l'ultimo valore del giorno (gestisce più trade nello stesso giorno)
     daily_val_update = df_trades.groupby('Date')[val_col].last()
+
+    # Ora update sicuro perché l'indice contiene tutti i giorni (inclusi weekend)
     equity_df.loc[daily_val_update.index, 'Value'] = daily_val_update
 
     # Forward Fill: nei giorni senza trade, il valore rimane costante
-    # (Nota: è una approssimazione, idealmente si ricalcolerebbe ogni giorno mark-to-market,
-    # ma il backtester registra solo i trade. Comunque evita il crollo a zero del cash).
     equity_df['Value'] = equity_df['Value'].ffill()
 
     # 3. Calcolo Ritorni Giornalieri
@@ -64,13 +62,14 @@ def _calculate_detailed_metrics(df_trades: pd.DataFrame, initial_capital: float)
     years = days / 365.25
     cagr = ((final_cap / initial_capital) ** (1 / years)) - 1 if years > 0 else 0
 
-    volatility = equity_df['Daily_Ret'].std() * np.sqrt(252)
+    # Volatilità annualizzata (Crypto 365gg, Stock 252gg - usiamo 365 per sicurezza se misto)
+    volatility = equity_df['Daily_Ret'].std() * np.sqrt(365)
 
     risk_free_rate = 0.03
     sharpe = (cagr - risk_free_rate) / volatility if volatility > 0 else 0
 
     negative_returns = equity_df[equity_df['Daily_Ret'] < 0]['Daily_Ret']
-    downside_dev = negative_returns.std() * np.sqrt(252)
+    downside_dev = negative_returns.std() * np.sqrt(365)
     sortino = (cagr - risk_free_rate) / downside_dev if downside_dev > 0 else 0
 
     cumulative_returns = (1 + equity_df['Daily_Ret']).cumprod()
@@ -79,9 +78,12 @@ def _calculate_detailed_metrics(df_trades: pd.DataFrame, initial_capital: float)
     max_drawdown = drawdown.min()
 
     sells = df_trades[df_trades['Action'] == 'SELL']
-    gross_profit = sells[sells['PnL_Net'] > 0]['PnL_Net'].sum()
-    gross_loss = abs(sells[sells['PnL_Net'] < 0]['PnL_Net'].sum())
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.inf
+    if not sells.empty:
+        gross_profit = sells[sells['PnL_Net'] > 0]['PnL_Net'].sum()
+        gross_loss = abs(sells[sells['PnL_Net'] < 0]['PnL_Net'].sum())
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.inf
+    else:
+        profit_factor = 0.0
 
     return {
         "CAGR": cagr,
@@ -95,22 +97,20 @@ def _calculate_detailed_metrics(df_trades: pd.DataFrame, initial_capital: float)
 
 
 def render_trading_ui():
-    st.title("💹 Trading & Backtest")
+    st.title("💹 Trading & Backtest (Crypto/Stock)")
 
     with st.expander("🧠 Logica Operativa"):
         st.markdown("""
-        Questa strategia cerca il compromesso perfetto tra trend di lungo periodo e reattività.
+        Questa strategia adatta dinamicamente le regole in base all'asset class (Crypto vs Stock).
 
-        **Regole Scanner & Backtest:**
-        1.  **Filtro Trend (On/Off):** **SMA 130 Giorni**.
-            * Se Prezzo > SMA 130 -> Mercato Rialzista (Si cercano acquisti).
-            * Se Prezzo < SMA 130 -> Mercato Ribassista (Si Vende/Flat).
+        **Regole Crypto Aware:**
+        1.  **Cicli Halving:** Riconosce se siamo in Bull Run, Bear Winter o Accumulazione.
+        2.  **Risk Management Dinamico:**
+            * *Bull Run:* Stop larghi, niente Take Profit (lascia correre), Time Stop disattivato.
+            * *Bear Market:* Stop stretti, operatività ridotta o nulla.
+        3.  **Filtro Trend:** Usa BTC come benchmark per decidere il regime di mercato globale.
 
-        2.  **Motore di Ranking (Selezione):** **Momentum a 6 Mesi**.
-            * Tra i titoli sopra la SMA 130, si scelgono quelli con il Momentum (Performance a 126gg) più alto.
-            * Ingresso solo se Momentum > 0.
-
-        **In Sintesi:** Compriamo i titoli più forti, ma solo se sono in un trend strutturalmente sano. Usciamo immediatamente se il trend si rompe.
+        **In Sintesi:** Compra forza relativa in Bull Market, protegge il capitale in Bear Market.
         """)
 
     st.sidebar.header("⚙️ Configurazione")
@@ -126,16 +126,19 @@ def render_trading_ui():
     initial_capital = st.sidebar.number_input(
         "💰 Capitale Iniziale (€)",
         min_value=100.0,
-        value=10000.0,
-        step=500.0,
+        value=1000.0,
+        step=100.0,
         help="Capitale di partenza per la simulazione."
     )
 
     tickers_input = st.sidebar.text_area("Watchlist (Ticker Yahoo)", DEFAULT_TRADING_LIST, height=200)
     tickers = [t.strip().upper() for t in tickers_input.split('\n') if t.strip()]
 
+    # Check veloce se è crypto
+    is_crypto_universe = any("-USD" in t or "-EUR" in t for t in tickers)
+
     analysis_date = date.today()
-    start_date_backtest = date(2021, 1, 1)
+    start_date_backtest = date(2020, 1, 1)  # Default crypto friendly
 
     if mode == "📡 Scanner Segnali":
         st.sidebar.subheader("⏳ Time Travel")
@@ -144,7 +147,7 @@ def render_trading_ui():
             analysis_date = st.sidebar.date_input(
                 "Data Analisi:",
                 date.today(),
-                min_value=date(2020, 1, 1),
+                min_value=date(2015, 1, 1),
                 max_value=date.today()
             )
             st.sidebar.warning(f"Analisi congelata al: {analysis_date.strftime('%d/%m/%Y')}")
@@ -153,8 +156,8 @@ def render_trading_ui():
 
     elif mode == "🤖 Automated Backtest":
         st.sidebar.subheader("⏳ Periodo Simulazione")
-        start_date_backtest = st.sidebar.date_input("Data Inizio:", pd.to_datetime("2018-01-01"))
-        st.sidebar.info("Simulazione portafoglio (max 4 posizioni, ribilanciamento mensile).")
+        start_date_backtest = st.sidebar.date_input("Data Inizio:", pd.to_datetime("2020-01-01"))
+        st.sidebar.info("Simulazione portafoglio (Crypto Cycle Aware).")
 
     # --- LOGICA DISPLAY ---
 
@@ -177,7 +180,7 @@ def render_trading_ui():
 
                 if full_df is not None and not full_df.empty:
                     df_slice = full_df[full_df.index <= cutoff_date].copy()
-                    if len(df_slice) > 135:
+                    if len(df_slice) > 50:  # Ridotto per crypto recenti
                         signal_data = analyze_ticker(ticker, df_slice)
                         if signal_data:
                             results.append(signal_data)
@@ -196,7 +199,7 @@ def render_trading_ui():
 
             results.sort(key=lambda x: x['confidence'], reverse=True)
 
-            st.success(f"Analizzati {len(results)} titoli. Ordinati per Momentum.")
+            st.success(f"Analizzati {len(results)} titoli.")
 
             for res in results:
                 inds = res['indicators']
@@ -220,16 +223,16 @@ def render_trading_ui():
 
                     c1, c2, c3 = st.columns(3)
 
-                    dist_sma = (price / sma_val - 1) * 100 if sma_val else 0
+                    dist_sma = (price / sma_val - 1) * 100 if sma_val and sma_val > 0 else 0
                     c1.metric(
-                        "Prezzo vs SMA 130",
+                        "Prezzo vs Trend",
                         f"{price:.2f}",
-                        f"{dist_sma:+.1f}% (vs {sma_val:.2f})",
+                        f"{dist_sma:+.1f}%",
                         delta_color="normal" if price > sma_val else "inverse"
                     )
 
                     c2.metric(
-                        "Momentum 6 Mesi",
+                        "Momentum",
                         f"{mom_val:.2%}",
                         "Fattore Ranking",
                         delta_color="normal" if mom_val > 0 else "inverse"
@@ -249,10 +252,12 @@ def render_trading_ui():
 
             with st.spinner(f"Simulazione dal {start_date_backtest} con capitale €{initial_capital:,.2f}..."):
                 # Esecuzione Core Backtest
+                # Passiamo il flag is_crypto=True se ci sono crypto nella lista
                 df_trades, final_cap = run_market_aware_backtest(
                     tickers,
                     start_date=str(start_date_backtest),
-                    initial_capital=initial_capital
+                    initial_capital=initial_capital,
+                    is_crypto=is_crypto_universe
                 )
 
             if not df_trades.empty:
@@ -272,29 +277,29 @@ def render_trading_ui():
                 if metrics:
                     kpi3.metric("CAGR (Annuo)", f"{metrics['CAGR'] * 100:.2f}%")
                     kpi4.metric("Max Drawdown", f"{metrics['Max_Drawdown'] * 100:.2f}%",
-                                help="Massima perdita dal picco. Più è basso (vicino a 0), meglio è.",
+                                help="Massima perdita dal picco.",
                                 delta_color="inverse")
 
                 st.divider()
 
                 # --- SEZIONE 2: RISCHIO E STATISTICHE (Punti 1, 2, 5) ---
-                st.markdown("### 🛡️ Analisi Rischio & Statistiche (Validation Checklist)")
+                st.markdown("### 🛡️ Analisi Rischio & Statistiche")
 
                 if metrics:
                     col_r1, col_r2, col_r3, col_r4 = st.columns(4)
 
                     sharpe = metrics['Sharpe']
                     col_r1.metric("Sharpe Ratio", f"{sharpe:.2f}",
-                                  help="> 1.0 Buono, > 2.0 Ottimo. Misura il rendimento per unità di rischio.")
+                                  help="> 1.0 Buono, > 2.0 Ottimo.")
 
                     col_r2.metric("Sortino Ratio", f"{metrics['Sortino']:.2f}",
-                                  help="Simile allo Sharpe, ma considera solo la volatilità negativa (i crolli).")
+                                  help="Simile allo Sharpe, ma considera solo la volatilità negativa.")
 
                     pf = metrics['Profit_Factor']
                     col_r3.metric("Profit Factor", f"{pf:.2f}",
                                   help="Rapporto tra vincite lorde e perdite lorde. > 1.5 è solido.")
 
-                    col_r4.metric("Volatilità", f"{metrics['Volatility'] * 100:.1f}%")
+                    col_r4.metric("Volatilità Annuale", f"{metrics['Volatility'] * 100:.1f}%")
 
                 # Statistiche Trade (Punto 5)
                 realized = df_trades[df_trades['Action'] == 'SELL']
@@ -302,19 +307,15 @@ def render_trading_ui():
                     wins = len(realized[realized['PnL_Net'] > 0])
                     losses = len(realized[realized['PnL_Net'] <= 0])
                     total = len(realized)
-                    win_rate = (wins / total) * 100
+                    win_rate = (wins / total) * 100 if total > 0 else 0
 
                     st.markdown(f"""
-                    **Statistiche Operative (Significatività):**
+                    **Statistiche Operative:**
                     - Totale Operazioni: **{total}**
                     - ✅ Vincite: **{wins}**
                     - ❌ Perdite: **{losses}**
                     - 🎯 Win Rate: **{win_rate:.1f}%**
                     """)
-
-                    if total < 30:
-                        st.warning(
-                            "⚠️ Attenzione: Numero di operazioni basso (<30). I risultati statistici potrebbero non essere affidabili.")
 
                 st.divider()
 
@@ -334,7 +335,7 @@ def render_trading_ui():
                         act = row['Action']
                         if act == 'BUY': return ['background-color: #202020'] * len(row)
                         if act == 'SELL':
-                            if "TREND BREAK" in str(row['Reason']): return ['background-color: #3d0000'] * len(row)
+                            if "STOP LOSS" in str(row['Reason']): return ['background-color: #3d0000'] * len(row)
                             if row['PnL_Net'] > 0: return ['background-color: #003300'] * len(row)
                             return ['background-color: #3d0000'] * len(row)
                         return [''] * len(row)
@@ -347,4 +348,4 @@ def render_trading_ui():
 
             else:
                 st.warning(
-                    "Nessun trade generato nel periodo. Prova ad ampliare l'universo ticker o cambiare la data di inizio.")
+                    "Nessun trade generato nel periodo. Rilassa i vincoli (es. in Bear Market la strategia è molto protettiva).")
