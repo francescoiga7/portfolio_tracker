@@ -122,6 +122,7 @@ def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, A
                                     market_data: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Arricchisce posizioni con P&L e logica Satellite/Core.
+    Modificato per mostrare SEMPRE il livello di Stop Loss dinamico per i satelliti.
     """
     enriched = []
     for isin, data in open_positions.items():
@@ -140,15 +141,25 @@ def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, A
 
             if df_hist is not None:
                 if is_sat:
+                    # LOGICA SATELLITE (ATR Trailing Stop)
                     purchase_date = data.get('first_buy_date')
                     if purchase_date:
                         res = check_satellite_status(df_hist, purchase_date, data['quantity'])
-                        signal_text = res['action']
-                        if res['action'] == "SELL":
-                            signal_text += f" (Stop: {res.get('stop_price', 0):.2f})"
+                        # res['action'] torna solitamente "HOLD" o "SELL" in inglese
+                        # res['stop_price'] contiene il livello di stop calcolato
+
+                        stop_val = res.get('stop_price', 0)
+                        action_eng = res.get('action', 'HOLD')
+
+                        # Traduzione per mantenere la colorazione della UI e mostrare lo STOP
+                        if action_eng == "SELL":
+                            signal_text = f"VENDI (Stop Rotto: {stop_val:.2f})"
+                        else:
+                            signal_text = f"MANTIENI (Stop: {stop_val:.2f})"
                     else:
-                        signal_text = "HOLD (Data acq. ignota)"
+                        signal_text = "MANTIENI (Data acq. ignota)"
                 else:
+                    # LOGICA CORE (SMA 200)
                     sma200 = df_hist['Close'].rolling(200).mean().iloc[-1]
                     if curr_price > sma200:
                         signal_text = "MANTIENI (Trend Core)"
@@ -228,7 +239,7 @@ class PortfolioTracker:
 
     @staticmethod
     def calculate_portfolio_pnl(transactions: List[Dict[str, Any]], commission: float = 1.0, tax_rate: float = 26.0) -> \
-    Dict[str, Any]:
+            Dict[str, Any]:
         if not transactions:
             return {'open_positions': [], 'aggregated_positions': [], 'capital_gains': [], 'net_invested': 0,
                     'current_value': 0, 'realized_pnl': 0, 'total_pnl': 0, 'total_pnl_pct': 0}

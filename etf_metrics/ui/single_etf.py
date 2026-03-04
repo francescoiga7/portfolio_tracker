@@ -31,7 +31,7 @@ def render_single_etf_ui():
         if not isin:
             st.warning("Inserisci un ISIN.")
         else:
-            with st.spinner("Analisi 10y e calcolo metriche..."):
+            with st.spinner("Calcolo metriche..."):
                 try:
                     info, rows, frames = _cached_compute(isin, tuple(PERIODS_ALL), bench_override, rf_ann)
                     st.session_state.data_out = (info, rows, frames)
