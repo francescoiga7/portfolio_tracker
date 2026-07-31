@@ -7,6 +7,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# --- File di stato / persistenza ---
+PORTFOLIO_FILE = "saved_portfolio.json"
+ALGO_STATE_FILE = "live_algo_portfolio.json"
+MARKET_DATA_DB = "market_data.db"
+
 # Preferenze per i suffissi dei ticker Yahoo
 PREFERRED_SUFFIXES = [".DE", ".MI", ".AS", ".L", ""]
 
@@ -19,70 +24,7 @@ MANUAL_ISIN_MAP: Dict[str, List[str]] = {
     "IE00B3YCGJ38": ["SWDA.MI", "IWDA.AS"],
 }
 
-# Parole chiave -> proxy benchmark (ticker Yahoo)
-BENCHMARK_KEYWORDS_TO_PROXY: Dict[str, str] = {
-    "ftse all-world": "VWRA.L",
-    "ftse all world": "VWRA.L",
-    "msci acwi imi": "SSAC.L",
-    "msci acwi": "ACWI",
-    "msci world": "IWDA.AS",
-    "ftse developed world": "VEVE.L",
-    "s&p 500": "SPY",
-    "sp 500": "SPY",
-    "stoxx europe 600": "EXSA.DE",
-    "euro stoxx 50": "EXW1.DE",
-    "msci emerging markets imi": "EIMI.L",
-    "msci emerging markets": "EIMI.L",
-    "bloomberg global aggregate": "AGGG.L",
-    "global aggregate hedged eur": "AGGH.MI",
-    "global aggregate eur hedged": "AGGH.MI",
-    "bloomberg barclays global aggregate": "AGGG.L",
-    "treasury": "IEF",
-    "inflation-linked": "TIP",
-    "gold": "GC=F",
-    "bitcoin": "BTC-USD",
-    "commodities": "DBC",
-}
-
-# ETF noti -> proxy benchmark
-TICKER_TO_PROXY: Dict[str, str] = {
-    "VWCE": "VWRA.L",
-    "VWRL": "VWRA.L",
-    "SWDA": "IWDA.AS",
-    "IWDA": "IWDA.AS",
-    "EIMI": "EIMI.L",
-    "AGGH": "AGGH.MI",
-    "AGGG": "AGGG.L",
-}
-
-# Mappatura completa ISIN -> (ticker_benchmark, nome_benchmark)
-ISIN_TO_BENCHMARK = {
-    "IE00BK5BQT80": ("VWRA.L", "FTSE All-World Index"),
-    "IE000YYE6WK5": ("^GSPC", "S&P 500 Index"),
-    "IE00B4L5Y983": ("^GSPC", "S&P 500 Index"),
-    "IE00B3YCGJ38": ("IWDA.AS", "MSCI World Index"),
-    "IE00B1YZSC51": ("IEUR.AS", "MSCI Europe Index"),
-    "IE00BKM4GZ66": ("EIMI.L", "MSCI Emerging Markets IMI Index"),
-    "IE00BDBRDM35": ("AGGG.L", "Bloomberg Global Aggregate Bond Index"),
-    "IE00B3F81409": ("AGGG.L", "Bloomberg Global Aggregate Bond Index"),
-    "IE00B6R52259": ("GC=F", "Gold Spot Price"),
-    "IE00BFNM3K80": ("WSML.L", "MSCI World SRI Index"),
-    "IE00BN4Q0370": ("SUSW.L", "MSCI World ESG Universal Index"),
-    "IE00BFNM3D14": ("SUAG.L", "Bloomberg MSCI Global Green Bond Index"),
-    "LU0274208692": ("^GSPC", "S&P 500 Index"),
-    "IE00B0M62Q58": ("IUES.DE", "MSCI Europe Index"),
-    "IE00B1FZS467": ("CSPX.L", "S&P 500 Index"),
-    "IE00B52VJ196": ("INRG.L", "S&P Global Clean Energy Index"),
-    "IE00BYZK4552": ("RBOT.L", "ROBO Global Robotics Index"),
-    "IE00B14X4N27": ("CSBGE0.L", "iBoxx EUR Sovereigns Eurozone Index"),
-}
-
 REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; etf-metrics/1.0)"}
-
-# Periodi supportati (Yahoo Finance)
-PERIODS_ALL = [
-    "1d", "5d", "1mo", "3mo", "6mo", "1y", "3y", "5y", "10y", "ytd", "max"
-]
 
 # --- NUOVA STRATEGIA DI DISCOVERY A MATRICE ---
 asset_classes = ["Equity", "Government Bond", "Corporate Bond", "Aggregate Bond", "Commodity", "Real Estate"]
@@ -151,16 +93,3 @@ FAMOUS_PORTFOLIOS = {
         "VIOV": 0.20
     }
 }
-
-TACTICAL_TRADING_SEED_QUERIES: Tuple[str, ...] = (
-    # Indici principali (per ETF)
-    "MSCI World UCITS ETF", "S&P 500 UCITS ETF", "NASDAQ 100 UCITS ETF", "STOXX 600 UCITS ETF",
-    # Azioni ad alta capitalizzazione e popolari in Europa
-    "DAX 40 stocks", "CAC 40 stocks", "AEX stocks",
-    # Titoli Growth e Tech popolari su Trade Republic
-    "popular tech stocks NASDAQ", "high growth stocks NYSE", "trending fintech stocks",
-    # Query generiche per scoprire titoli caldi
-    "most active stocks XETRA", # Borsa di Francoforte
-    "top performing stocks Borsa Italiana", # Borsa di Milano
-    "breakout stocks USA",
-)

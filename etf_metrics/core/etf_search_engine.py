@@ -98,10 +98,12 @@ def get_unique_preferred_tickers(tickers: List[str]) -> List[str]:
     return list(dict.fromkeys(final_tickers))
 
 
-def discover_universe(queries: Iterable[str], quotes_per_query: int, instrument_types: List[str] = ["ETF", "ETP", "ETN"]) -> List[str]:
+def discover_universe(queries: Iterable[str], quotes_per_query: int, instrument_types: List[str] = None) -> List[str]:
     """
     Discovers a universe of instruments based on a list of queries and instrument types.
     """
+    if instrument_types is None:
+        instrument_types = ["ETF", "ETP", "ETN"]
     tickers_seen, ticker_list = set(), []
     for query in queries:
         try:

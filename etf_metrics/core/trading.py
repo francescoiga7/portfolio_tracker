@@ -10,7 +10,7 @@ def _get_latest_vix() -> Optional[float]:
     try:
         vix_series = get_series("^VIX", period="5d")
         return float(vix_series.iloc[-1]) if vix_series is not None and not vix_series.empty else None
-    except:
+    except Exception:
         return None
 
 

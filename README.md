@@ -4,12 +4,6 @@ Questa è un'applicazione web completa, costruita con Streamlit, che offre una s
 
 ## Funzionalità
 
--   **Analisi Singolo ETF**: Calcola un'ampia gamma di metriche di performance e di rischio per un singolo ETF, tra cui:
-    -   Rendimento totale e annualizzato (CAGR)
-    -   Volatilità e massimo drawdown
-    -   Sharpe, Sortino e Omega ratio
-    -   Value at Risk (VaR)
--   **Confronto Multi-ETF**: Confronta le performance di più ETF o azioni su diversi orizzonti temporali, con grafici interattivi e normalizzati.
 -   **Portfolio Tracker**: Monitora e analizza i tuoi portafogli di investimento in modo dettagliato, con:
     -   Creazione e gestione di portafogli multipli
     -   Registrazione di transazioni di acquisto e vendita
@@ -22,43 +16,44 @@ Questa è un'applicazione web completa, costruita con Streamlit, che offre una s
     -   Impostazione della frequenza di ribilanciamento
     -   Confronto con portafogli modello (es. 60/40, All-Weather)
 -   **Screener Tattico PAC**: Scopri ETP (Exchange Traded Products) con potenziale di breakout quotati sulle principali borse europee, basato su un approccio multi-fattore.
--   **Verifica Momentum**: Analizza il momentum di un elenco di ETF, correggendolo per il rischio e fornendo segnali operativi.
+-   **Trading & Backtest**: Scanner di segnali operativi e backtest di una strategia algoritmica trend-following (filtro SMA 130 + momentum a 6 mesi), con report di rischio (Sharpe, Sortino, Max Drawdown, Profit Factor).
+-   **Portafoglio Live**: Gestione operativa di un portafoglio algoritmico con stop loss / take profit trailing, sizing dinamico e regime di mercato.
 
 ## Struttura del Progetto
 
-etf_metrics_refactor/
-├── app.py                   # Entrypoint per l'avvio dell'applicazione Streamlit
-├── requirements.txt         # Dipendenze del progetto
-├── README.md                # Questo file
+```
+portfolio_tracker/
+├── app.py                          # Entrypoint per l'avvio dell'applicazione Streamlit
+├── pyproject.toml                  # Dipendenze e configurazione del progetto (Poetry)
+├── README.md                       # Questo file
 └── etf_metrics/
-├── init.py
-├── benchmark.py         # Logica per l'inferenza del benchmark di un ETF
-├── base_client.py       # Classe base per i client esterni con gestione errori e retry
-├── config.py            # Costanti, configurazioni e portafogli modello
-├── etf_info.py          # Recupero di informazioni estese su un ETF
-├── etf_search_engine.py # Logica di ricerca e filtraggio degli ETF
-├── justetf_client.py    # Client per il recupero dati da justETF
-├── metrics.py           # Funzioni per il calcolo delle metriche di performance e rischio
-├── momentum.py          # Logica per l'analisi del momentum
-├── pac_screener.py      # Logica per lo screener tattico PAC
-├── pipeline.py          # Orchestrazione dei calcoli per l'analisi di un singolo ETF
-├── portfolio_backtester.py # Logica per il backtesting di portafogli
-├── portfolio_tracker.py # Logica per il tracciamento di portafogli
-├── trackingdiff_client.py # Client per il recupero della tracking difference
-├── ui.py                # Gestione della navigazione principale e dello stato della sessione
-├── ui_etf_comparison_app.py # UI per il confronto di ETF
-├── ui_momentum_app.py   # UI per l'analisi del momentum
-├── ui_pac_screener_app.py # UI per lo screener tattico PAC
-├── ui_portfolio_backtester_app.py # UI per il backtesting di portafogli
-├── ui_portfolio_tracker_app.py # UI per il tracciamento di portafogli
-├── ui_single_etf.py     # UI per l'analisi di un singolo ETF
-├── utils.py             # Funzioni di utilità generiche
-└── yahoo_client.py      # Client per il recupero dati da Yahoo Finance
-
+    ├── ui/
+    │   ├── main.py                 # Navigazione principale e stato della sessione
+    │   ├── portfolio_tracker.py    # UI per il tracciamento di portafogli
+    │   ├── portfolio_backtester.py # UI per il backtesting di portafogli
+    │   ├── pac_screener.py         # UI per lo screener tattico PAC
+    │   ├── trading.py              # UI per scanner e backtest di trading
+    │   └── algo_live.py            # UI per il portafoglio algoritmico live
+    ├── core/
+    │   ├── portfolio_tracker.py    # Logica per il tracciamento di portafogli
+    │   ├── portfolio_backtester.py # Logica per il backtesting di portafogli
+    │   ├── pac_screener.py         # Logica per lo screener tattico PAC
+    │   ├── trading.py              # Logica per i segnali di trading
+    │   ├── automated_backtest.py   # Logica per il backtest algoritmico
+    │   ├── etf_search_engine.py    # Logica di ricerca e filtraggio degli ETF
+    │   ├── data_manager.py         # Cache locale (SQLite) delle serie storiche
+    │   └── metrics.py              # Funzioni per le metriche di performance e rischio
+    ├── clients/
+    │   ├── base_client.py          # Classe base per i client esterni (retry, errori)
+    │   └── yahoo_client.py         # Client per il recupero dati da Yahoo Finance
+    └── shared/
+        ├── config.py               # Costanti, configurazioni e portafogli modello
+        └── utils.py                # Funzioni di utilità generiche
+```
 
 ## Requisiti
 
-Per l'elenco completo delle dipendenze, si veda il file `requirements.txt`. È consigliato l'uso di **Python ≥ 3.9**.
+Per l'elenco completo delle dipendenze, si veda il file `pyproject.toml`. È consigliato l'uso di **Python ≥ 3.9**.
 
 ## Setup Rapido
 
@@ -82,7 +77,13 @@ Per l'elenco completo delle dipendenze, si veda il file `requirements.txt`. È c
 3.  **Installa le dipendenze:**
 
     ```bash
-    pip install -r requirements.txt
+    pip install -r <(poetry export -f requirements.txt)
+    ```
+
+    oppure, con Poetry:
+
+    ```bash
+    poetry install
     ```
 
 ## Avvio
@@ -91,3 +92,4 @@ Per avviare l'applicazione, esegui il seguente comando dalla root del progetto:
 
 ```bash
 streamlit run app.py
+```

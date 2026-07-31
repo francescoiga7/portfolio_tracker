@@ -1,13 +1,17 @@
+# -*- coding: utf-8 -*-
+"""Screener tattico PAC: regime di mercato, caricamento dati, metriche, ranking.
+
+Nessuna dipendenza da Streamlit: la cache e i progress bar sono gestiti dalla UI.
+Le funzioni di caricamento restituiscono i log come valore di ritorno (cacheable).
+"""
 import logging
 from typing import Dict, List, Optional, Iterable, Tuple
 import pandas as pd
-import streamlit as st
 from datetime import date
 import numpy as np
 import yfinance as yf
 import polars as pl
 
-# Assicuriamoci di importare get_info per scaricare i metadati
 from etf_metrics.clients.yahoo_client import get_info, resolve_isin_one, get_series
 from etf_metrics.core.etf_search_engine import discover_universe, get_unique_preferred_tickers
 from etf_metrics.shared.config import DEFAULT_SEED_QUERIES
@@ -16,7 +20,6 @@ from etf_metrics.core.data_manager import MarketDataManager
 logger = logging.getLogger(__name__)
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 15)
 def get_market_regime(as_of_date: Optional[date] = None) -> Dict:
     """
     Restituisce lo stato del mercato.
@@ -55,33 +58,38 @@ def get_market_regime(as_of_date: Optional[date] = None) -> Dict:
         return {"vix": 15.0, "regime": "Sconosciuto (Fallback)", "market_trend": "Laterale"}
 
 
-@st.cache_data(show_spinner="Caricamento e Gestione Dati (DB Cache)...", ttl=60 * 30)
 def fetch_screener_data(
-        log_area: List[str],
-        specific_isins: Optional[List[str]] = None,
-        instrument_types: List[str] = ["ETF", "ETP", "ETN"],
-        queries: Iterable[str] = DEFAULT_SEED_QUERIES,
-        quotes_per_query: int = 200
-) -> List[Dict]:
+    specific_isins: Optional[List[str]] = None,
+    instrument_types: Tuple[str, ...] = ("ETF", "ETP", "ETN"),
+    queries: Iterable[str] = DEFAULT_SEED_QUERIES,
+    quotes_per_query: int = 200,
+) -> Tuple[List[Dict], List[str]]:
+    """
+    Carica l'universo di strumenti (manualmente o per discovery) e aggiorna il DB.
+    Ritorna (fetched_data, logs) dove logs è la lista dei messaggi di avanzamento.
+    """
+    logs: List[str] = []
     unique_tickers = []
+
     if specific_isins:
-        log_area.append(f"**1. Modalità Manuale: {len(specific_isins)} strumenti forniti.**")
-        with st.spinner("Risoluzione ISIN/Ticker..."):
-            resolved_tickers = []
-            for item in specific_isins:
-                if len(item) == 12:
-                    ticker = resolve_isin_one(item)
-                    if ticker: resolved_tickers.append(ticker)
-                else:
-                    resolved_tickers.append(item)
-            unique_tickers = list(filter(None, resolved_tickers))
-        log_area.append(f"- Trovati {len(unique_tickers)} ticker validi.")
+        logs.append(f"**1. Modalità Manuale: {len(specific_isins)} strumenti forniti.**")
+        resolved_tickers = []
+        for item in specific_isins:
+            if len(item) == 12:
+                ticker = resolve_isin_one(item)
+                if ticker:
+                    resolved_tickers.append(ticker)
+            else:
+                resolved_tickers.append(item)
+        unique_tickers = list(filter(None, resolved_tickers))
+        logs.append(f"- Trovati {len(unique_tickers)} ticker validi.")
     else:
-        log_area.append(f"**1. Discovery Automatica...**")
-        raw_tickers = discover_universe(queries, quotes_per_query=quotes_per_query, instrument_types=instrument_types)
+        logs.append(f"**1. Discovery Automatica...**")
+        raw_tickers = discover_universe(queries, quotes_per_query=quotes_per_query, instrument_types=list(instrument_types))
         unique_tickers = get_unique_preferred_tickers(raw_tickers)
 
-    if not unique_tickers: return []
+    if not unique_tickers:
+        return [], logs
 
     db_manager = MarketDataManager()
 
@@ -89,87 +97,74 @@ def fetch_screener_data(
     already_updated = len(unique_tickers) - len(tickers_to_download)
 
     if already_updated > 0:
-        log_area.append(f"- Cache Locale: {already_updated} ticker già aggiornati oggi.")
+        logs.append(f"- Cache Locale: {already_updated} ticker già aggiornati oggi.")
 
     if tickers_to_download:
-        log_area.append(f"**2. Download Cloud per {len(tickers_to_download)} strumenti...**")
+        logs.append(f"**2. Download Cloud per {len(tickers_to_download)} strumenti...**")
         try:
-            # Download dei prezzi
             bulk_df = yf.download(tickers_to_download, period="5y", group_by='ticker', auto_adjust=False, threads=True)
 
             downloaded_data = {}
-            new_names = {}  # Dizionario per raccogliere i nomi
+            new_names = {}
 
             is_single = len(tickers_to_download) == 1
 
-            # Barra di avanzamento per il recupero metadati se sono tanti
-            progress_meta = None
-            if len(tickers_to_download) > 10:
-                progress_meta = st.progress(0, text="Recupero Nomi Asset...")
-
-            for i, ticker in enumerate(tickers_to_download):
+            for ticker in tickers_to_download:
                 try:
-                    # Estrazione Prezzi
                     if is_single:
                         df = bulk_df.copy()
                     else:
-                        if ticker not in bulk_df.columns.levels[0]: continue
+                        if ticker not in bulk_df.columns.levels[0]:
+                            continue
                         df = bulk_df[ticker].copy()
 
                     df = df.dropna(how='all')
                     if len(df) > 10:
-                        if df.index.tz is not None: df.index = df.index.tz_localize(None)
+                        if df.index.tz is not None:
+                            df.index = df.index.tz_localize(None)
                         downloaded_data[ticker] = df
 
-                        # Recupero Metadati (Name)
-                        # Nota: Questo rallenta un po' ma è necessario per avere il nome corretto
                         try:
                             info = get_info(ticker)
                             name = info.get('longName') or info.get('shortName') or ticker
                             new_names[ticker] = name
-                        except:
+                        except Exception:
                             new_names[ticker] = ticker
-                except:
+                except Exception:
                     continue
 
-                if progress_meta: progress_meta.progress((i + 1) / len(tickers_to_download))
-
-            if progress_meta: progress_meta.empty()
-
             if downloaded_data:
-                # Passiamo anche i nomi al DB Manager
                 db_manager.save_bulk_data(downloaded_data, names_dict=new_names)
-                log_area.append(f"- Salvati {len(downloaded_data)} nuovi ticker nel Database.")
+                logs.append(f"- Salvati {len(downloaded_data)} nuovi ticker nel Database.")
         except Exception as e:
-            log_area.append(f"⚠️ Errore download: {e}")
+            logs.append(f"⚠️ Errore download: {e}")
 
-    log_area.append(f"**3. Caricamento Dati Unificati...**")
+    logs.append(f"**3. Caricamento Dati Unificati...**")
 
-    # Carichiamo prezzi e nomi
     loaded_data_dict = db_manager.load_data(unique_tickers)
-    ticker_names = db_manager.get_ticker_names(unique_tickers)  # Nuova funzione
+    ticker_names = db_manager.get_ticker_names(unique_tickers)
 
     fetched_data = []
     for ticker, df in loaded_data_dict.items():
-        if df.empty or len(df) < 50: continue
+        if df.empty or len(df) < 50:
+            continue
 
-        # Recupera il nome dal DB, fallback sul ticker
         asset_name = ticker_names.get(ticker, ticker)
 
         fetched_data.append({
             "ticker": ticker,
             "series": df,
-            "name": asset_name,  # Ora usiamo la variabile corretta
+            "name": asset_name,
             "isin": db_manager.resolve_ticker_to_isin(ticker) if hasattr(db_manager, 'resolve_ticker_to_isin') else ""
         })
 
-    log_area.append(f"- **Pronti per analisi: {len(fetched_data)} strumenti.**")
-    return fetched_data
+    logs.append(f"- **Pronti per analisi: {len(fetched_data)} strumenti.**")
+    return fetched_data, logs
 
 
-@st.cache_data(show_spinner="Calcolo metriche (Engine: Polars)...", ttl=60 * 15)
 def calculate_all_metrics(fetched_data: List[Dict], as_of_date: date) -> Tuple[pd.DataFrame, List[str]]:
-    log_area = []
+    """Calcola le metriche multi-fattore (engine Polars). Ritorna (df, logs)."""
+    log_area: List[str] = []
     log_area.append(f"\n**4. Esecuzione Calcolo Metriche (Polars Accelerated)...**")
 
     if not fetched_data:
@@ -179,13 +174,12 @@ def calculate_all_metrics(fetched_data: List[Dict], as_of_date: date) -> Tuple[p
         dfs_to_concat = []
         target_date_ts = pd.to_datetime(as_of_date)
 
-        # Pre-processing per evitare errori di tipo in Polars
         for item in fetched_data:
             df = item['series'].copy()
             df = df[df.index <= target_date_ts]
-            if df.empty or len(df) < 60: continue
+            if df.empty or len(df) < 60:
+                continue
 
-            # --- GESTIONE NOME COLONNA DATE ---
             df = df.reset_index()
             if 'Date' not in df.columns:
                 if 'date' in df.columns:
@@ -194,16 +188,13 @@ def calculate_all_metrics(fetched_data: List[Dict], as_of_date: date) -> Tuple[p
                     df = df.rename(columns={'index': 'Date'})
                 else:
                     df.rename(columns={df.columns[0]: 'Date'}, inplace=True)
-            # ---------------------------------------
 
-            # Aggiungiamo metadati alle righe per portarli nel group_by
             df['ticker'] = str(item['ticker'])
-            df['name'] = str(item.get('name', item['ticker']))  # Fallback
+            df['name'] = str(item.get('name', item['ticker']))
             df['isin'] = str(item.get('isin', ''))
 
             cols = ['Date', 'Close', 'Volume', 'ticker', 'name', 'isin']
 
-            # Casting esplicito
             existing = [c for c in cols if c in df.columns]
             df_subset = df[existing].copy()
 
@@ -220,8 +211,10 @@ def calculate_all_metrics(fetched_data: List[Dict], as_of_date: date) -> Tuple[p
 
         full_pdf = pd.concat(dfs_to_concat, ignore_index=True)
 
-        if 'Volume' not in full_pdf.columns: full_pdf['Volume'] = 0.0
-        if 'isin' not in full_pdf.columns: full_pdf['isin'] = ""
+        if 'Volume' not in full_pdf.columns:
+            full_pdf['Volume'] = 0.0
+        if 'isin' not in full_pdf.columns:
+            full_pdf['isin'] = ""
         if 'Date' not in full_pdf.columns:
             raise ValueError("Colonna 'Date' mancante dopo la concatenazione.")
 
@@ -229,7 +222,6 @@ def calculate_all_metrics(fetched_data: List[Dict], as_of_date: date) -> Tuple[p
 
         metrics_lf = (
             lf.sort("Date")
-            # FIX: Aggiunto 'isin' e 'name' al group_by per conservarli
             .group_by(["ticker", "name", "isin"])
             .agg([
                 pl.last("Close").alias("current_price"),
@@ -273,7 +265,8 @@ def calculate_all_metrics(fetched_data: List[Dict], as_of_date: date) -> Tuple[p
                 else:
                     return None
 
-                if len(sma) < 126: return None
+                if len(sma) < 126:
+                    return None
 
                 with np.errstate(divide='ignore', invalid='ignore'):
                     bw = (4 * std) / sma
@@ -281,7 +274,8 @@ def calculate_all_metrics(fetched_data: List[Dict], as_of_date: date) -> Tuple[p
                 recent_bw = bw[-126:]
                 recent_bw = recent_bw[~np.isnan(recent_bw)]
 
-                if len(recent_bw) == 0: return None
+                if len(recent_bw) == 0:
+                    return None
 
                 min_bw = np.min(recent_bw)
                 current_bw = bw[-1] if not np.isnan(bw[-1]) else recent_bw[-1]
@@ -300,8 +294,6 @@ def calculate_all_metrics(fetched_data: List[Dict], as_of_date: date) -> Tuple[p
         res_df = res_df.dropna(subset=essential)
         res_df['avg_value_eur'] = res_df['avg_value_eur'].fillna(0)
 
-        st.session_state.debug_log_processing = [[t, "OK"] for t in res_df['ticker']]
-
         log_area.append(f"- Calcolo completato per {len(res_df)} ETF.")
         return res_df, log_area
 
@@ -314,15 +306,17 @@ def calculate_all_metrics(fetched_data: List[Dict], as_of_date: date) -> Tuple[p
 
 def filter_and_rank_metrics(metrics_df: pd.DataFrame, min_avg_value: float,
                             min_proximity_to_high: float, log_area: List[str]) -> pd.DataFrame:
-    if metrics_df.empty: return pd.DataFrame()
+    if metrics_df.empty:
+        return pd.DataFrame()
     df = metrics_df.copy()
 
     df = df[df['avg_value_eur'] >= min_avg_value]
-    df = df[df['is_above_ma200'] == True]
+    df = df[df['is_above_ma200'] == True]  # noqa: E712
     df = df[(df['roc_6m'] > 0) & (df['roc_12m'] > 0)]
     df = df[df['proximity_to_high'] >= min_proximity_to_high]
 
-    if df.empty: return pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame()
 
     df['quality_score'] = df['calmar_ratio'].rank(pct=True) * 100
     score_12m = df['roc_12m'].rank(pct=True) * 100
@@ -342,15 +336,10 @@ def filter_and_rank_metrics(metrics_df: pd.DataFrame, min_avg_value: float,
             df['low_vol_score'] * weights['low_vol']
     )
 
-    # FIX: Aggiunte tutte le colonne richieste dall'UI per evitare KeyError
     cols = [
         "ticker", "isin", "name", "final_score",
         "momentum_score", "quality_score", "breakout_score", "low_vol_score",
         "roc_6m", "calmar_ratio", "volatility_6m", "proximity_to_high", "avg_value_eur"
     ]
 
-    # Riordiniamo e restituiamo
     return df.sort_values("final_score", ascending=False).reset_index(drop=True)[cols]
-
-
-def _calculate_metrics_from_series(*args): return None

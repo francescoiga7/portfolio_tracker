@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 from typing import List, Optional
-import pandas as pd
 
 from .config import PREFERRED_SUFFIXES
 
@@ -19,16 +18,3 @@ def pick_preferred_symbol(candidates: List[str], preferred_suffixes=None) -> Opt
         return preferred_suffixes.index(suf) if suf in preferred_suffixes else 999
 
     return sorted(cands, key=score)[0]
-
-
-def to_percent_index(s: pd.Series) -> pd.Series:
-    """
-    Converte una serie di prezzi in indice % dal primo valore.
-    Restituisce (s / s.iloc[0] - 1) * 100, evitando errori su serie vuote/zero.
-    """
-    if s is None or len(s) == 0:
-        return s
-    base = s.iloc[0]
-    if base == 0:
-        return s
-    return (s / base - 1.0) * 100.0

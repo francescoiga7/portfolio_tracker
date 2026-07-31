@@ -104,3 +104,67 @@ def compute_var(s: pd.Series, confidence_level: float = 0.95) -> Optional[float]
     if s_clean is None: return None
     returns = s_clean.pct_change().dropna()
     return float(-returns.quantile(1 - confidence_level) * 100.0) if not returns.empty else None
+
+
+def compute_backtest_performance_metrics(df_trades: pd.DataFrame, initial_capital: float, rf_annual: float = 0.03):
+    """
+    Calcola le metriche di performance di un backtest (CAGR, Sharpe, Sortino,
+    Max Drawdown, Profit Factor) a partire dal log dei trade.
+
+    Usa la colonna Total_Equity (NAV) se presente, altrimenti il Capital (cash).
+    """
+    if df_trades is None or df_trades.empty:
+        return None
+
+    df = df_trades.copy()
+    df['Date'] = pd.to_datetime(df['Date'])
+    start_date = df['Date'].min()
+    end_date = df['Date'].max()
+
+    if start_date == end_date:
+        return None
+
+    all_dates = pd.date_range(start_date, end_date, freq='B')
+    equity_df = pd.DataFrame(index=all_dates)
+
+    val_col = 'Total_Equity' if 'Total_Equity' in df.columns else 'Capital'
+    equity_df['Value'] = np.nan
+    equity_df.iloc[0, 0] = initial_capital
+
+    daily_val_update = df.groupby('Date')[val_col].last()
+    equity_df.loc[daily_val_update.index, 'Value'] = daily_val_update
+    equity_df['Value'] = equity_df['Value'].ffill()
+
+    equity_df['Daily_Ret'] = equity_df['Value'].pct_change().fillna(0)
+
+    final_cap = equity_df['Value'].iloc[-1]
+    days = (end_date - start_date).days
+    years = days / 365.25
+    cagr = ((final_cap / initial_capital) ** (1 / years)) - 1 if years > 0 else 0
+
+    volatility = equity_df['Daily_Ret'].std() * np.sqrt(252)
+    sharpe = (cagr - rf_annual) / volatility if volatility > 0 else 0
+
+    negative_returns = equity_df[equity_df['Daily_Ret'] < 0]['Daily_Ret']
+    downside_dev = negative_returns.std() * np.sqrt(252)
+    sortino = (cagr - rf_annual) / downside_dev if downside_dev > 0 else 0
+
+    cumulative_returns = (1 + equity_df['Daily_Ret']).cumprod()
+    peak = cumulative_returns.cummax()
+    drawdown = (cumulative_returns - peak) / peak
+    max_drawdown = drawdown.min()
+
+    sells = df[df['Action'] == 'SELL']
+    gross_profit = sells[sells['PnL_Net'] > 0]['PnL_Net'].sum()
+    gross_loss = abs(sells[sells['PnL_Net'] < 0]['PnL_Net'].sum())
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.inf
+
+    return {
+        "CAGR": cagr,
+        "Volatility": volatility,
+        "Sharpe": sharpe,
+        "Sortino": sortino,
+        "Max_Drawdown": max_drawdown,
+        "Profit_Factor": profit_factor,
+        "Equity_Curve": equity_df['Value'],
+    }

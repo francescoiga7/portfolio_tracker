@@ -16,18 +16,12 @@ numpy = "*"
 plotly = "*"
 yfinance = "*"
 requests = "*"
-beautifulsoup4 = "*"
-matplotlib = "*"
-scipy = "*"
-pyarrow = "*"
-huggingface_hub = "*"
-certifi = "*"
 polars = "*"
-pandas-stubs = "*"
 
 [tool.poetry.group.dev.dependencies]
 black = "*"
 pytest = "*"
+pandas-stubs = "*"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

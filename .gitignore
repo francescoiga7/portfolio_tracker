@@ -6,3 +6,4 @@
 /market_data.db
 /live_algo_portfolio.json
 /uv.lock
+__pycache__

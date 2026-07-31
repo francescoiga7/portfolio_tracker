@@ -1,18 +1,26 @@
 # -*- coding: utf-8 -*-
+"""Logica di tracciamento portafogli: persistenza (PortfolioStore) + calcolo P&L.
+
+Nessuna dipendenza da Streamlit: la UI istanzia PortfolioStore e lo conserva in
+session_state, mentre il calcolo è puro e testabile.
+"""
 import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Any, DefaultDict
 from collections import defaultdict
 import pandas as pd
-import streamlit as st
 
 from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series
 from etf_metrics.core.trading import check_satellite_status
+from etf_metrics.shared.config import PORTFOLIO_FILE
 
 logger = logging.getLogger(__name__)
 
 
+# ----------------------------------------------------------------------------
+# Calcolo posizioni aperte / realizzato
+# ----------------------------------------------------------------------------
 def _calculate_open_positions(transactions: List[Dict[str, Any]]) -> DefaultDict[str, Dict[str, Any]]:
     """Calcola le quantità e i costi totali. Tiene traccia della data del primo acquisto attivo."""
     positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0, 'satellite': False, 'first_buy_date': None})
@@ -46,13 +54,13 @@ def _calculate_open_positions(transactions: List[Dict[str, Any]]) -> DefaultDict
                     positions[isin]['first_buy_date'] = None
                 else:
                     positions[isin]['total_cost'] -= cost_of_sold_shares
-                    if positions[isin]['total_cost'] < 0: positions[isin]['total_cost'] = 0
+                    if positions[isin]['total_cost'] < 0:
+                        positions[isin]['total_cost'] = 0
 
     return positions
 
 
-def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: float, tax_rate: float) -> List[
-    Dict[str, Any]]:
+def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: float, tax_rate: float) -> List[Dict[str, Any]]:
     """Calcola plusvalenze e minusvalenze per ogni operazione di vendita."""
     sales_gains = []
     positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0})
@@ -96,9 +104,7 @@ def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: floa
 
 
 def _fetch_current_prices_and_series(isins: List[str]) -> Dict[str, Dict[str, Any]]:
-    """
-    Recupera dati OHLCV a 10 anni per calcolare correttamente ATR e massimi.
-    """
+    """Recupera dati OHLCV a 10 anni per calcolare correttamente ATR e massimi."""
     data = {}
     fetch_period = "10y"
 
@@ -122,7 +128,7 @@ def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, A
                                     market_data: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Arricchisce posizioni con P&L e logica Satellite/Core.
-    Modificato per mostrare SEMPRE il livello di Stop Loss dinamico per i satelliti.
+    Mostra SEMPRE il livello di Stop Loss dinamico per i satelliti.
     """
     enriched = []
     for isin, data in open_positions.items():
@@ -145,13 +151,9 @@ def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, A
                     purchase_date = data.get('first_buy_date')
                     if purchase_date:
                         res = check_satellite_status(df_hist, purchase_date, data['quantity'])
-                        # res['action'] torna solitamente "HOLD" o "SELL" in inglese
-                        # res['stop_price'] contiene il livello di stop calcolato
-
                         stop_val = res.get('stop_price', 0)
                         action_eng = res.get('action', 'HOLD')
 
-                        # Traduzione per mantenere la colorazione della UI e mostrare lo STOP
                         if action_eng == "SELL":
                             signal_text = f"VENDI (Stop Rotto: {stop_val:.2f})"
                         else:
@@ -196,85 +198,97 @@ def _aggregate_portfolio_summary(open_positions_details, realized_pnl_net, trans
     }
 
 
-class PortfolioTracker:
-    @staticmethod
-    def init_session_from_json_once(filename: str = "saved_portfolio.json") -> None:
-        if st.session_state.get("_pt_loaded_once"): return
-        st.session_state.setdefault("_pt_portfolios", {})
+# ----------------------------------------------------------------------------
+# API di calcolo pubblica (pura)
+# ----------------------------------------------------------------------------
+def calculate_portfolio_pnl(transactions: List[Dict[str, Any]], commission: float = 1.0, tax_rate: float = 26.0) -> Dict[str, Any]:
+    """Calcola P&L realizzato/non realizzato, posizioni aperte e aggregati."""
+    if not transactions:
+        return {'open_positions': [], 'aggregated_positions': [], 'capital_gains': [], 'net_invested': 0,
+                'current_value': 0, 'realized_pnl': 0, 'total_pnl': 0, 'total_pnl_pct': 0}
+
+    capital_gains_realized = _calculate_realized_pnl(transactions, commission, tax_rate)
+    realized_pnl_net = sum(cg['net_pnl'] for cg in capital_gains_realized)
+    open_positions_base = _calculate_open_positions(transactions)
+    isins_to_fetch = [isin for isin, data in open_positions_base.items() if data['quantity'] > 1e-9]
+    market_data = _fetch_current_prices_and_series(isins_to_fetch)
+    open_positions_details = _enrich_open_positions_with_pnl(open_positions_base, market_data)
+    summary = _aggregate_portfolio_summary(open_positions_details, realized_pnl_net, transactions)
+    aggregated_positions = calculate_aggregated_positions(transactions, open_positions_details)
+
+    return {**summary, 'open_positions': open_positions_details, 'aggregated_positions': aggregated_positions,
+            'capital_gains': capital_gains_realized}
+
+
+def calculate_aggregated_positions(transactions, open_positions_details):
+    aggregated = []
+    all_isins = set(t['isin'] for t in transactions)
+    for isin in all_isins:
+        trans_isin = [t for t in transactions if t['isin'] == isin]
+        total_bought_qty = sum(t['quantity'] for t in trans_isin if t['type'] == 'buy')
+        total_bought_value = sum(t['quantity'] * t['price'] for t in trans_isin if t['type'] == 'buy')
+        total_sold_qty = sum(t['quantity'] for t in trans_isin if t['type'] == 'sell')
+        total_sold_value = sum(t['quantity'] * t['price'] for t in trans_isin if t['type'] == 'sell')
+        avg_buy_price = total_bought_value / total_bought_qty if total_bought_qty > 0 else 0
+        realized_pnl_gross = total_sold_value - (total_sold_qty * avg_buy_price)
+        current_pos = next((p for p in open_positions_details if p['isin'] == isin), None)
+        unrealized_pnl = current_pos['unrealized_pnl'] if current_pos else 0
+        aggregated.append({
+            'isin': isin, 'total_bought_qty': total_bought_qty, 'total_sold_qty': total_sold_qty,
+            'current_qty': current_pos['quantity'] if current_pos else 0, 'avg_buy_price': avg_buy_price,
+            'realized_pnl': realized_pnl_gross, 'unrealized_pnl': unrealized_pnl,
+            'total_pnl': realized_pnl_gross + unrealized_pnl,
+            'current_value': current_pos['current_amount'] if current_pos else 0,
+        })
+    return aggregated
+
+
+# ----------------------------------------------------------------------------
+# Persistenza portafogli (pura, senza Streamlit)
+# ----------------------------------------------------------------------------
+class PortfolioStore:
+    """Gestione in-memory dei portafogli con persistenza su file JSON."""
+
+    def __init__(self, portfolios: Dict[str, Dict[str, Any]] = None):
+        self._portfolios: Dict[str, Dict[str, Any]] = portfolios or {}
+
+    @property
+    def portfolios(self) -> Dict[str, Dict[str, Any]]:
+        return self._portfolios
+
+    @classmethod
+    def load_from_json(cls, filename: str = PORTFOLIO_FILE) -> "PortfolioStore":
         path = Path(filename)
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8")) or {}
-                st.session_state["_pt_portfolios"].update(data)
-            except Exception as e:
-                logger.warning("Impossibile leggere %s: %s", filename, e)
-        st.session_state["_pt_loaded_once"] = True
-
-    @staticmethod
-    def get_saved_portfolio_names() -> List[str]:
-        return list(st.session_state.get("_pt_portfolios", {}).keys())
-
-    @staticmethod
-    def load_portfolio_from_session(name: str) -> Dict[str, Any]:
-        return st.session_state.get("_pt_portfolios", {}).get(name, {"name": name, "transactions": []})
-
-    @staticmethod
-    def add_transaction_to_portfolio(name: str, transaction: Dict[str, Any]):
-        portfolios = st.session_state.get("_pt_portfolios", {})
-        if name not in portfolios:
-            portfolios[name] = {"name": name, "transactions": []}
-        transaction['date'] = transaction['date'].isoformat()
-        portfolios[name]["transactions"].append(transaction)
-        st.session_state["_pt_portfolios"] = portfolios
-        PortfolioTracker.save_all_portfolios_to_json()
-
-    @staticmethod
-    def save_all_portfolios_to_json(filename: str = "saved_portfolio.json") -> None:
+        if not path.exists():
+            return cls({})
         try:
-            path = Path(filename)
-            all_data = st.session_state.get("_pt_portfolios", {})
-            path.write_text(json.dumps(all_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+        except Exception as e:
+            logger.warning("Impossibile leggere %s: %s", filename, e)
+            data = {}
+        return cls(data)
+
+    def save_to_json(self, filename: str = PORTFOLIO_FILE) -> None:
+        try:
+            Path(filename).write_text(
+                json.dumps(self._portfolios, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
         except Exception as e:
             logger.warning("Errore salvataggio JSON %s: %s", filename, e)
 
-    @staticmethod
-    def calculate_portfolio_pnl(transactions: List[Dict[str, Any]], commission: float = 1.0, tax_rate: float = 26.0) -> \
-            Dict[str, Any]:
-        if not transactions:
-            return {'open_positions': [], 'aggregated_positions': [], 'capital_gains': [], 'net_invested': 0,
-                    'current_value': 0, 'realized_pnl': 0, 'total_pnl': 0, 'total_pnl_pct': 0}
+    def names(self) -> List[str]:
+        return list(self._portfolios.keys())
 
-        capital_gains_realized = _calculate_realized_pnl(transactions, commission, tax_rate)
-        realized_pnl_net = sum(cg['net_pnl'] for cg in capital_gains_realized)
-        open_positions_base = _calculate_open_positions(transactions)
-        isins_to_fetch = [isin for isin, data in open_positions_base.items() if data['quantity'] > 1e-9]
-        market_data = _fetch_current_prices_and_series(isins_to_fetch)
-        open_positions_details = _enrich_open_positions_with_pnl(open_positions_base, market_data)
-        summary = _aggregate_portfolio_summary(open_positions_details, realized_pnl_net, transactions)
-        aggregated_positions = PortfolioTracker.calculate_aggregated_positions(transactions, open_positions_details)
+    def get(self, name: str) -> Dict[str, Any]:
+        return self._portfolios.get(name, {"name": name, "transactions": []})
 
-        return {**summary, 'open_positions': open_positions_details, 'aggregated_positions': aggregated_positions,
-                'capital_gains': capital_gains_realized}
+    def ensure_portfolio(self, name: str) -> None:
+        if name not in self._portfolios:
+            self._portfolios[name] = {"name": name, "transactions": []}
 
-    @staticmethod
-    def calculate_aggregated_positions(transactions, open_positions_details):
-        aggregated = []
-        all_isins = set(t['isin'] for t in transactions)
-        for isin in all_isins:
-            trans_isin = [t for t in transactions if t['isin'] == isin]
-            total_bought_qty = sum(t['quantity'] for t in trans_isin if t['type'] == 'buy')
-            total_bought_value = sum(t['quantity'] * t['price'] for t in trans_isin if t['type'] == 'buy')
-            total_sold_qty = sum(t['quantity'] for t in trans_isin if t['type'] == 'sell')
-            total_sold_value = sum(t['quantity'] * t['price'] for t in trans_isin if t['type'] == 'sell')
-            avg_buy_price = total_bought_value / total_bought_qty if total_bought_qty > 0 else 0
-            realized_pnl_gross = total_sold_value - (total_sold_qty * avg_buy_price)
-            current_pos = next((p for p in open_positions_details if p['isin'] == isin), None)
-            unrealized_pnl = current_pos['unrealized_pnl'] if current_pos else 0
-            aggregated.append({
-                'isin': isin, 'total_bought_qty': total_bought_qty, 'total_sold_qty': total_sold_qty,
-                'current_qty': current_pos['quantity'] if current_pos else 0, 'avg_buy_price': avg_buy_price,
-                'realized_pnl': realized_pnl_gross, 'unrealized_pnl': unrealized_pnl,
-                'total_pnl': realized_pnl_gross + unrealized_pnl,
-                'current_value': current_pos['current_amount'] if current_pos else 0,
-            })
-        return aggregated
+    def add_transaction(self, name: str, transaction: Dict[str, Any]) -> None:
+        self.ensure_portfolio(name)
+        d = transaction.get('date')
+        if hasattr(d, 'isoformat'):
+            transaction['date'] = d.isoformat()
+        self._portfolios[name]["transactions"].append(transaction)

@@ -1,33 +1,22 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
-from etf_metrics.core.portfolio_backtester import parse_portfolio_input, get_all_portfolios_for_backtest
+
+from etf_metrics.core.portfolio_backtester import (
+    parse_portfolio_input,
+    get_all_portfolios_for_backtest,
+    compute_weights_from_transactions,
+)
 from etf_metrics.shared.config import FAMOUS_PORTFOLIOS
-from etf_metrics.ui.portfolio_tracker import _display_backtest_results
-from etf_metrics.core.portfolio_tracker import PortfolioTracker
+from etf_metrics.ui.components import display_backtest_results, get_portfolio_store
 
 
 def get_weights_from_portfolio(portfolio_name: str) -> str:
     """Carica un portafoglio e calcola i pesi percentuali dalle posizioni aperte."""
-    portfolio_data = PortfolioTracker.load_portfolio_from_session(portfolio_name)
-    if not portfolio_data or not portfolio_data.get("transactions"):
+    portfolio_data = get_portfolio_store().get(portfolio_name)
+    transactions = portfolio_data.get("transactions") if portfolio_data else None
+    if not transactions:
         return ""
-
-    pnl_results = PortfolioTracker.calculate_portfolio_pnl(portfolio_data["transactions"])
-    open_positions = pnl_results.get('open_positions', [])
-
-    if not open_positions:
-        return ""
-
-    total_value = sum(p['current_amount'] for p in open_positions)
-    if total_value == 0:
-        return ""
-
-    weights_str = []
-    for pos in open_positions:
-        weight = (pos['current_amount'] / total_value) * 100
-        weights_str.append(f"{pos['isin']}: {weight:.2f}")
-
-    return "\n".join(weights_str)
+    return compute_weights_from_transactions(transactions)
 
 
 def render_portfolio_backtester_ui():
@@ -65,7 +54,7 @@ def render_portfolio_backtester_ui():
     is_disabled = False
 
     if portfolio_source == "Carica da Portafoglio Esistente":
-        saved_portfolios = PortfolioTracker.get_saved_portfolio_names()
+        saved_portfolios = get_portfolio_store().names()
         if not saved_portfolios:
             st.sidebar.warning("Nessun portafoglio salvato. Creane uno nel Portfolio Tracker.")
         else:
@@ -118,7 +107,7 @@ def render_portfolio_backtester_ui():
 
     if st.session_state.get('backtest_results') and st.session_state.backtest_results.get('series'):
         st.subheader("📊 Risultati del Backtest")
-        _display_backtest_results(
+        display_backtest_results(
             st.session_state.backtest_results['series'],
             st.session_state.backtest_results['rf_ann'],
             key_prefix="main_bt"

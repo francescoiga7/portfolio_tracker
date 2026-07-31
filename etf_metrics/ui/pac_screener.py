@@ -1,7 +1,14 @@
+# -*- coding: utf-8 -*-
 import streamlit as st
 from datetime import date
-from etf_metrics.core.pac_screener import fetch_screener_data, calculate_all_metrics, filter_and_rank_metrics, get_market_regime
 import pandas as pd
+
+from etf_metrics.core.pac_screener import (
+    fetch_screener_data,
+    calculate_all_metrics,
+    filter_and_rank_metrics,
+    get_market_regime,
+)
 
 ALGORITHM_WEIGHTS = {
     "Momentum Score": 0.40,
@@ -10,13 +17,30 @@ ALGORITHM_WEIGHTS = {
     "Low Volatility Score": 0.05
 }
 
+
+@st.cache_data(show_spinner=False, ttl=60 * 15)
+def _cached_market_regime(as_of_date):
+    return get_market_regime(as_of_date=as_of_date)
+
+
+@st.cache_data(show_spinner="Caricamento e Gestione Dati (DB Cache)...", ttl=60 * 30)
+def _cached_fetch(specific_isins):
+    sis = list(specific_isins) if specific_isins else None
+    return fetch_screener_data(specific_isins=sis)
+
+
+@st.cache_data(show_spinner="Calcolo metriche (Engine: Polars)...", ttl=60 * 15)
+def _cached_metrics(fetched_data, as_of_date):
+    return calculate_all_metrics(fetched_data, as_of_date)
+
+
 def render_pac_screener_ui():
     st.title("🎯 Screener ETF")
     st.caption("Scopri ETP con potenziale di breakout quotati sulle principali borse europee.")
+
     if 'debug_log_loading' not in st.session_state:
         st.session_state.debug_log_loading = []
-    if 'debug_log_processing' not in st.session_state:
-        st.session_state.debug_log_processing = []
+
     with st.expander("📖 Metodologia e Analisi Quantitativa (Approccio 'Breakout Focused')"):
         st.markdown(f"""
               Questo screener è progettato per la parte **satellite (tattica)** di un portafoglio. Ora è sintonizzato per una strategia **"Breakout Focused"**, dando priorità agli asset che mostrano una forte compressione di volatilità pronta per un movimento esplosivo.
@@ -48,7 +72,7 @@ def render_pac_screener_ui():
 
               Il **Punteggio Finale** è una media pesata dei singoli punteggi. 
 
-              * **Formula:** $Punteggio \: Finale = \sum (Score_Fattore \times Peso_Fattore)$
+              * **Formula:** $Punteggio \\: Finale = \\sum (Score_Fattore \\times Peso_Fattore)$
 
               I pesi attuali assegnati sono:
               * **Breakout Score:** {ALGORITHM_WEIGHTS['Breakout Score (Volatilità Compressa)'] * 100:.0f}%
@@ -56,6 +80,7 @@ def render_pac_screener_ui():
               * **Trend Quality Score (Calmar):** {ALGORITHM_WEIGHTS['Trend Quality Score (Calmar)'] * 100:.0f}%
               * **Low Volatility Score:** {ALGORITHM_WEIGHTS['Low Volatility Score'] * 100:.0f}%
               """)
+
     st.sidebar.header("⚙️ Impostazioni")
     with st.sidebar.expander("1. Carica Universo Dati", expanded=True):
         source_mode = st.radio("Modalità di Ricerca", ["Scoperta Automatica Universo", "Inserisci ISIN Specifici"])
@@ -66,17 +91,16 @@ def render_pac_screener_ui():
             st.cache_data.clear()
             st.session_state.pac_screener_raw_data = None
             st.session_state.debug_log_loading = []
-            st.session_state.debug_log_processing = []
-            specific_isins = None
+            specific_isins_tuple = None
             if source_mode == "Inserisci ISIN Specifici" and specific_isins_input.strip():
-                specific_isins = [isin.strip().upper() for isin in specific_isins_input.split('\n') if isin.strip()]
-            log_list_for_fetching = []
-            st.session_state.pac_screener_raw_data = fetch_screener_data(
-                log_area=log_list_for_fetching,
-                specific_isins=specific_isins
-            )
-            st.session_state.debug_log_loading.extend(log_list_for_fetching)
+                specific_isins_tuple = tuple(
+                    isin.strip().upper() for isin in specific_isins_input.split('\n') if isin.strip()
+                )
+            data, fetch_logs = _cached_fetch(specific_isins_tuple)
+            st.session_state.pac_screener_raw_data = data
+            st.session_state.debug_log_loading = list(fetch_logs)
             st.rerun()
+
     if 'pac_screener_raw_data' in st.session_state and st.session_state.pac_screener_raw_data:
         st.sidebar.header("2. Filtri e Time Travel")
         min_avg_value = st.sidebar.number_input("Volume minimo scambiato (€)", 0, 1000000, 100000, 50000)
@@ -84,18 +108,23 @@ def render_pac_screener_ui():
         enable_time_travel = st.sidebar.checkbox("Abilita Time Travel")
         as_of_date = st.sidebar.date_input("Posizionati alla data del:", date.today(), min_value=date(2020, 1, 1), max_value=date.today(), disabled=not enable_time_travel)
         analysis_date = as_of_date if enable_time_travel else date.today()
-        market_info = get_market_regime(as_of_date=analysis_date)
+
+        market_info = _cached_market_regime(analysis_date)
         vix = market_info.get("vix")
         regime = market_info.get("regime")
         market_trend = market_info.get("market_trend")
         date_str = analysis_date.strftime('%d/%m/%Y')
+
         if regime != "Favorevole al Rischio" or market_trend == "Ribassista":
             st.warning(f"Alla data del {date_str} il mercato era in modalità Avversa o Trend Ribassista. Lo screener è disattivato.")
             return
+
         st.sidebar.success(f"Regime: {regime} (VIX: {vix:.2f})\n\nTrend: {market_trend}")
-        metrics_df, calc_log = calculate_all_metrics(st.session_state.pac_screener_raw_data, analysis_date)
+
+        metrics_df, calc_log = _cached_metrics(st.session_state.pac_screener_raw_data, analysis_date)
         current_run_log = list(calc_log)
         results = filter_and_rank_metrics(metrics_df, min_avg_value, min_prox, current_run_log)
+
         if not results.empty:
             top_etf = results.iloc[0]
             st.success(f"🏆 Candidato Migliore al {date_str}: **{top_etf['name']} ({top_etf['ticker']})**")
@@ -121,6 +150,7 @@ def render_pac_screener_ui():
             )
         else:
             st.warning("Nessun ETP ha soddisfatto i criteri alla data selezionata.")
+
         with st.expander("🔍 Debug Log"):
             st.markdown("##### Log Caricamento")
             st.markdown("\n".join(st.session_state.debug_log_loading))

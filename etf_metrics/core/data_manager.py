@@ -5,11 +5,13 @@ from datetime import date
 import logging
 import os
 
+from etf_metrics.shared.config import MARKET_DATA_DB
+
 logger = logging.getLogger(__name__)
 
 
 class MarketDataManager:
-    def __init__(self, db_path="market_data.db"):
+    def __init__(self, db_path=MARKET_DATA_DB):
         self.db_path = db_path
         self._init_db()
 

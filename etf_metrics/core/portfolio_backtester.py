@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 import logging
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 import pandas as pd
 
 from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series
 from etf_metrics.clients.base_client import DataValidator
+from etf_metrics.core.portfolio_tracker import calculate_portfolio_pnl
 
 logger = logging.getLogger(__name__)
 
@@ -240,3 +241,32 @@ def get_all_portfolios_for_backtest(
                 all_series_dict[series_name] = series_to_add
 
     return all_series_dict
+
+
+def compute_weights_from_transactions(
+    transactions: List[Dict[str, Any]],
+    commission: float = 1.0,
+    tax_rate: float = 26.0,
+) -> str:
+    """
+    Calcola i pesi percentuali delle posizioni aperte a partire dalle transazioni.
+    Restituisce una stringa multilinea nel formato 'ISIN: peso' pronta per la UI
+    del backtester.
+    """
+    if not transactions:
+        return ""
+
+    pnl_results = calculate_portfolio_pnl(transactions, commission, tax_rate)
+    open_positions = pnl_results.get('open_positions', [])
+    if not open_positions:
+        return ""
+
+    total_value = sum(p['current_amount'] for p in open_positions)
+    if total_value == 0:
+        return ""
+
+    lines = []
+    for pos in open_positions:
+        weight = (pos['current_amount'] / total_value) * 100
+        lines.append(f"{pos['isin']}: {weight:.2f}")
+    return "\n".join(lines)
