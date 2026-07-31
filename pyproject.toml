@@ -1,28 +1,22 @@
-[tool.poetry]
+[project]
 name = "portfolio-tracker"
 version = "0.1.0"
 description = "Un'applicazione web con Streamlit per l'analisi approfondita di ETF e portafogli di investimento."
-authors = ["francescoiga7 francescoiga7@gmail.com"]
 readme = "README.md"
-packages = [
-    { include = "etf_metrics" }
+requires-python = ">=3.9"
+dependencies = [
+    "streamlit",
+    "pandas",
+    "numpy",
+    "plotly",
+    "yfinance",
+    "requests",
+    "polars",
 ]
 
-[tool.poetry.dependencies]
-python = ">=3.9, <4.0"
-streamlit = "*"
-pandas = "*"
-numpy = "*"
-plotly = "*"
-yfinance = "*"
-requests = "*"
-polars = "*"
-
-[tool.poetry.group.dev.dependencies]
-black = "*"
-pytest = "*"
-pandas-stubs = "*"
-
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+[dependency-groups]
+dev = [
+    "black",
+    "pytest",
+    "pandas-stubs",
+]

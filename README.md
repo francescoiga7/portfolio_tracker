@@ -24,7 +24,7 @@ Questa è un'applicazione web completa, costruita con Streamlit, che offre una s
 ```
 portfolio_tracker/
 ├── app.py                          # Entrypoint per l'avvio dell'applicazione Streamlit
-├── pyproject.toml                  # Dipendenze e configurazione del progetto (Poetry)
+├── pyproject.toml                  # Dipendenze e configurazione del progetto (uv)
 ├── README.md                       # Questo file
 └── etf_metrics/
     ├── ui/
@@ -53,37 +53,21 @@ portfolio_tracker/
 
 ## Requisiti
 
-Per l'elenco completo delle dipendenze, si veda il file `pyproject.toml`. È consigliato l'uso di **Python ≥ 3.9**.
+Per l'elenco completo delle dipendenze, si veda il file `pyproject.toml`. È richiesto **Python ≥ 3.9**.
+La gestione delle dipendenze avviene tramite [uv](https://docs.astral.sh/uv/).
 
 ## Setup Rapido
 
-1.  **Crea un ambiente virtuale:**
+1.  **Installa uv** (se non lo hai già):
 
     ```bash
-    python -m venv .venv
+    curl -LsSf https://astral.sh/uv/install.sh | sh
     ```
 
-2.  **Attiva l'ambiente virtuale:**
-
-    -   Su Windows:
-        ```bash
-        .venv\Scripts\activate
-        ```
-    -   Su macOS/Linux:
-        ```bash
-        source .venv/bin/activate
-        ```
-
-3.  **Installa le dipendenze:**
+2.  **Sincronizza le dipendenze** (crea automaticamente l'ambiente virtuale `.venv` e installa tutto):
 
     ```bash
-    pip install -r <(poetry export -f requirements.txt)
-    ```
-
-    oppure, con Poetry:
-
-    ```bash
-    poetry install
+    uv sync
     ```
 
 ## Avvio
@@ -91,5 +75,7 @@ Per l'elenco completo delle dipendenze, si veda il file `pyproject.toml`. È con
 Per avviare l'applicazione, esegui il seguente comando dalla root del progetto:
 
 ```bash
-streamlit run app.py
+uv run streamlit run app.py
 ```
+
+`uv run` usa automaticamente l'ambiente virtuale del progetto, senza doverlo attivare manualmente.
