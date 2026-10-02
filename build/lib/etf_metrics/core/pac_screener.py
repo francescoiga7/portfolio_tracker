@@ -9,14 +9,10 @@ from typing import Dict, List, Optional, Iterable, Tuple
 import pandas as pd
 from datetime import date
 import numpy as np
+import yfinance as yf
 import polars as pl
 
-from etf_metrics.clients.yahoo_client import (
-    resolve_isin_one,
-    get_series,
-    get_series_bulk,
-    get_names_bulk,
-)
+from etf_metrics.clients.yahoo_client import get_info, resolve_isin_one, get_series
 from etf_metrics.core.etf_search_engine import discover_universe, get_unique_preferred_tickers
 from etf_metrics.shared.config import DEFAULT_SEED_QUERIES
 from etf_metrics.core.data_manager import MarketDataManager
@@ -104,26 +100,40 @@ def fetch_screener_data(
         logs.append(f"- Cache Locale: {already_updated} ticker già aggiornati oggi.")
 
     if tickers_to_download:
-        logs.append(f"**2. Download Cloud per {len(tickers_to_download)} strumenti (batch paralleli)...**")
+        logs.append(f"**2. Download Cloud per {len(tickers_to_download)} strumenti...**")
         try:
-            # Download in batch: isolati, ripristinabili, con skip automatico dei
-            # ticker in cache negativa e registrazione dei nuovi "no data found".
-            downloaded_data = get_series_bulk(
-                tickers_to_download,
-                period="5y",
-                progress_callback=lambda done, total, ok: logs.append(
-                    f"- Batch {done}/{total} completato ({ok} strumenti scaricati).")
-                if total <= 5 or done == total or done % max(1, total // 5) == 0 else None,
-            )
+            bulk_df = yf.download(tickers_to_download, period="5y", group_by='ticker', auto_adjust=False, threads=True)
 
-            failed_count = len(tickers_to_download) - len(downloaded_data)
-            if failed_count:
-                logs.append(f"- ⏭️ {failed_count} ticker senza dati: aggiunti alla cache negativa "
-                            f"(non verranno più scaricati).")
+            downloaded_data = {}
+            new_names = {}
+
+            is_single = len(tickers_to_download) == 1
+
+            for ticker in tickers_to_download:
+                try:
+                    if is_single:
+                        df = bulk_df.copy()
+                    else:
+                        if ticker not in bulk_df.columns.levels[0]:
+                            continue
+                        df = bulk_df[ticker].copy()
+
+                    df = df.dropna(how='all')
+                    if len(df) > 10:
+                        if df.index.tz is not None:
+                            df.index = df.index.tz_localize(None)
+                        downloaded_data[ticker] = df
+
+                        try:
+                            info = get_info(ticker)
+                            name = info.get('longName') or info.get('shortName') or ticker
+                            new_names[ticker] = name
+                        except Exception:
+                            new_names[ticker] = ticker
+                except Exception:
+                    continue
 
             if downloaded_data:
-                # Nomi in parallelo (una sola volta: poi restano nel DB)
-                new_names = get_names_bulk(list(downloaded_data.keys()))
                 db_manager.save_bulk_data(downloaded_data, names_dict=new_names)
                 logs.append(f"- Salvati {len(downloaded_data)} nuovi ticker nel Database.")
         except Exception as e:

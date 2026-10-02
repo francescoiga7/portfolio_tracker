@@ -16,7 +16,16 @@ Questa è un'applicazione web completa, costruita con Streamlit, che offre una s
     -   Impostazione della frequenza di ribilanciamento
     -   Confronto con portafogli modello (es. 60/40, All-Weather)
 -   **Screener Tattico PAC**: Scopri ETP (Exchange Traded Products) con potenziale di breakout quotati sulle principali borse europee, basato su un approccio multi-fattore.
--   **Trading & Backtest**: Scanner di segnali operativi e backtest di una strategia algoritmica trend-following (filtro SMA 130 + momentum a 6 mesi), con report di rischio (Sharpe, Sortino, Max Drawdown, Profit Factor).
+-   **Trading & Backtest**: Suite di **7 strategie algoritmiche** con l'obiettivo di battere il S&P500, con scanner di segnali, backtest singolo e confronto multi-strategia:
+    - **🧠 AI Enhanced Momentum** (strategia originale): filtro macro, ranking AI Score, stop ATR e take profit parziale
+    - **🐢 Dual Momentum**: rotazione mensile sui migliori momentum (poche operazioni, ideale per le commissioni)
+    - **🐻 Bear Market Regime Switcher**: compra i forti in bull, cerca inversi/difensivi in bear, cash nei regimi di crisi
+    - **📊 Volume Profile**: breakout dal Value Area con conferma di volume (POC/VAH/VAL rolling)
+    - **🌊 Order Flow**: pressione compratrice stimata dalle candele daily (CLV, Delta, CVD, giorni di accumulo)
+    - **🎯 Mean Reversion**: pullback RSI-2 solo su titoli in trend lungo (SMA200)
+    - **🐢 Turtle Breakout**: breakout Donchian 55/20 in stile Turtle Trading
+    - **Dati fake**: 5 scenari di mercato sintetici (bull, bear, crash, laterale, misto) per simulare senza connessione a Yahoo Finance, con universo di archetipi (tech, oro, obbligazioni, ETF inverso, ...)
+    - Report con KPI commissioni (totale, operazioni/anno, impatto sul capitale) e confronto con S&P500 Buy & Hold
 -   **Portafoglio Live**: Gestione operativa di un portafoglio algoritmico con stop loss / take profit trailing, sizing dinamico e regime di mercato.
 
 ## Struttura del Progetto
@@ -41,14 +50,19 @@ portfolio_tracker/
     │   ├── trading.py              # Logica per i segnali di trading
     │   ├── automated_backtest.py   # Logica per il backtest algoritmico
     │   ├── etf_search_engine.py    # Logica di ricerca e filtraggio degli ETF
-    │   ├── data_manager.py         # Cache locale (SQLite) delle serie storiche
+    │   ├── data_manager.py         # Cache locale (SQLite) delle serie storiche +
+    │   │                           # blacklist persistente dei ticker senza dati
     │   └── metrics.py              # Funzioni per le metriche di performance e rischio
     ├── clients/
     │   ├── base_client.py          # Classe base per i client esterni (retry, errori)
-    │   └── yahoo_client.py         # Client per il recupero dati da Yahoo Finance
+    │   └── yahoo_client.py         # Client Yahoo Finance: download bulk in batch,
+    │   │                           # cache negativa dei ticker "no data found",
+    │   │                           # recupero parallelo di nomi/ISIN
     └── shared/
         ├── config.py               # Costanti, configurazioni e portafogli modello
         └── utils.py                # Funzioni di utilità generiche
+├── scripts/
+    └── simulate_strategies.py  # Simulatore CLI multi-strategia su dati fake
 ```
 
 ## Requisiti
@@ -79,3 +93,85 @@ uv run streamlit run app.py
 ```
 
 `uv run` usa automaticamente l'ambiente virtuale del progetto, senza doverlo attivare manualmente.
+
+## Simulazioni senza connessione (dati fake)
+
+Se Yahoo Finance non è raggiungibile (o per stress-testare le strategie) puoi usare il simulatore CLI:
+
+```bash
+# Scenario misto, 4 anni, tutte le strategie
+python3 scripts/simulate_strategies.py
+
+# Stress test ribassista con più seed (robustezza)
+python3 scripts/simulate_strategies.py --scenario bear_market --seeds 1 7 42
+
+# Solo due strategie, broker costoso (5€/operazione)
+python3 scripts/simulate_strategies.py --strategies dual_momentum turtle_breakout --commission 5
+```
+
+Stessa cosa dall'interfaccia: **Trading → Automated Backtest / Confronto Strategie → Fonte Dati: Dati simulati (Fake)**.
+
+> ⚠️ Nota sui dati fake: servono a validare la *logica* delle strategie nei vari regimi di mercato
+> (bull, bear, crash, laterali), non a prevedere i rendimenti reali. Un algoritmo che vince solo
+> su un determinato seed/scenario è probabilmente in overfitting: verifica sempre su più seed
+> e su più scenari prima di fidarti.
+
+## 📥 Gestione Dati (download una volta, poi solo delta)
+
+La modalità **📥 Gestione Dati** dell'app scarica lo storico dei ticker che inserisci
+nel DB SQLite locale e, ai giri successivi, aggiorna **solo le righe mancanti**:
+
+- **Ticker nuovo** → download completo dello storico scelto (5y/10y/2y/max)
+- **Ticker già nel DB** → download delta dall'ultima data salvata (ultima giornata
+  inclusa, per correggere prezzi parziali) e upsert incrementale
+- I ticker con la stessa ultima data vengono **raggruppati in un solo batch**
+  `yf.download` (download parallelo, minimizza le richieste)
+- Report con righe nuove per ticker, coverage date, ticker saltati (blacklist /
+  rate limit) e tempo impiegato
+- **🌍 Aggiorna tutto il DB**: delta-update dell'intero universo in un click,
+  con skip opzionale dei già sincronizzati oggi
+- Ispezione del contenuto del DB (ticker, nome, righe, copertura, ultimo
+  aggiornamento) e della cache negativa, con reset
+
+Il DB è **SQLite in modalità WAL** (`synchronous=NORMAL`): commit rapidi e letture
+concorrenti durante le scritture — la scelta migliore per un uso locale
+single-user con serie storiche. Il file è `market_data.db` (percorso
+configurabile con `ETF_METRICS_DB`).
+
+## Ottimizzazione download dati (universi grandi, es. tutto Xetra)
+
+Il client Yahoo è ottimizzato per scaricare migliaia di ticker:
+
+- **`get_series_bulk(tickers)`**: download in **batch da 200 ticker con 16 thread**
+  (configurabile in `etf_metrics/shared/config.py`). Un batch fallito non blocca
+  l'universo, e un `progress_callback` mostra l'avanzamento in UI.
+- **Cache negativa dei "no data found"**: i ticker che non hanno dati vengono salvati
+  nella tabella `failed_tickers` del DB e **non vengono mai più riscaricati**
+  (policy `FAILED_TICKER_RETRY_DAYS`, di default permanente). Un risultato vuoto finisce
+  in blacklist **solo se Yahoo risulta raggiungibile** (health-check), così un
+  problema di rete non avvelena la blacklist. Se un ticker prima fallito produce
+  dati, viene riabilitato automaticamente.
+- **Gestione del rate limit Yahoo (HTTP 429)**: quando Yahoo risponde "Too Many
+  Requests" i download vengono **sospesi automaticamente per 10 minuti**
+  (`YAHOO_RATE_LIMIT_COOLDOWN`) invece di martellare il server — il 429 viene
+  rilevato sia come eccezione sia dai log interni di yfinance. Durante il cooldown
+  nessun ticker finisce in blacklist e la UI lo segnala chiaramente con l'attesa
+  residua. Un bulk interrotto a metà restituisce comunque i dati già scaricati.
+  Tra un batch e l'altro viene inoltre applicata una piccola pausa
+  (`BULK_BATCH_PAUSE`, 1s di default) per ridurre la probabilità di far scattare il limite.
+- **Nomi/ISIN in parallelo**: `get_names_bulk` / prefetch del motore di ricerca ETF
+  usano un thread pool (16 worker) invece di migliaia di chiamate sequenziali.
+- **Query SQL a chunk**: `load_data` / `get_tickers_needing_update` gestiscono
+  5000+ ticker senza problemi di limite parametri SQLite.
+- **Primo download automatico**: nella modalità "Dati reali" del Trading UI il
+  checkbox "📥 Scarica da Yahoo i ticker mancanti" (attivo di default) popola il DB
+  al primo avvio; i giri successivi usano solo la cache locale. I caricamenti
+  falliti non vengono memorizzati in cache: il retry funziona sempre.
+
+Dalla UI dello Screener ETF (sidebar) è possibile ispezionare e resettare la blacklist
+dei ticker senza dati. Benchmark con latenza simulata: **~20x più veloce** del
+download sequenziale, a cui si aggiunge l'azzeramento dei re-download dei ticker morti.
+
+> 💡 **Suggerimento (test / multi-istanza):** il percorso del DB dei prezzi è
+> sovrascrivibile con la variabile d'ambiente `ETF_METRICS_DB=/percorso/test.db`
+> per eseguire simulazioni e test senza toccare il database di produzione.

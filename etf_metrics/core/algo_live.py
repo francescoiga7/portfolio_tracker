@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Logica del portafoglio algoritmico live: stato, update giornaliero, metriche.
+"""Portafoglio algoritmico live: mette in PRATICA le strategie del backtest.
 
-Nessuna dipendenza da Streamlit: la UI si occupa solo di rendering e progress.
+Lo stato reale (cassa, posizioni, log) è persistito in JSON. `run_daily_update`
+replica esattamente la logica del motore di backtest (`run_market_aware_backtest`)
+sull'ultimo giorno disponibile, applicandola allo stato REALE del portafoglio
+(es. Trade Republic) e producendo le operazioni consigliate (acquisto/vendita).
+
+Nessuna dipendenza da Streamlit: la UI (o lo script cron `scripts/live_daily.py`)
+si occupa solo di rendering e stato.
 """
 import json
 import os
@@ -11,16 +17,21 @@ from typing import Dict, List, Tuple
 
 import pandas as pd
 
-from etf_metrics.clients.yahoo_client import get_series
 from etf_metrics.core.automated_backtest import (
-    calculate_advanced_metrics_vectorized,
-    calculate_ai_smart_score,
-    _assess_market_regime,
     CONFIG,
+    STRATEGIES,
+    STRATEGY_ORDER,
+    _MarketCtx,
+    _assess_market_regime,
+    calculate_advanced_metrics_vectorized,
+    check_correlation_strict,
+    get_strategy,
 )
 from etf_metrics.shared.config import ALGO_STATE_FILE
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_STRATEGY = "ai_momentum"
 
 
 def load_algo_state(filename: str = ALGO_STATE_FILE) -> Dict:
@@ -31,7 +42,16 @@ def load_algo_state(filename: str = ALGO_STATE_FILE) -> Dict:
                 return json.load(f)
         except Exception as e:
             logger.warning("Impossibile leggere %s: %s", filename, e)
-    return {"cash": 10000.0, "positions": {}, "trade_log": [], "last_update": None}
+    return _default_state()
+
+
+def _default_state() -> Dict:
+    return {
+        "cash": 10000.0, "positions": {}, "trade_log": [], "last_update": None,
+        "strategy": DEFAULT_STRATEGY, "commission": None, "max_positions": None,
+        "universe_tickers": None, "month_key": None, "buys_this_month": 0,
+        "last_buy_scan": None,
+    }
 
 
 def save_algo_state(state: Dict, filename: str = ALGO_STATE_FILE) -> None:
@@ -43,162 +63,292 @@ def save_algo_state(state: Dict, filename: str = ALGO_STATE_FILE) -> None:
         logger.warning("Errore salvataggio %s: %s", filename, e)
 
 
-def get_latest_market_data(tickers: List[str]) -> Dict[str, pd.DataFrame]:
-    """Scarica dati 2y per i ticker richiesti (più SPY) e calcola gli indicatori."""
-    data = {}
-    all_tickers = list(set(tickers + ['SPY']))
-    for t in all_tickers:
-        df = get_series(t, period="2y", as_dataframe=True)
-        if df is not None and not df.empty:
-            df = calculate_advanced_metrics_vectorized(df)
-            data[t] = df
+def get_latest_market_data(tickers: List[str], allow_download: bool = True) -> Dict[str, pd.DataFrame]:
+    """Dati 2y per i ticker richiesti (più SPY) con indicatori calcolati.
+
+    DB-first: i ticker già aggiornati oggi si leggono dal DB locale (zero rete);
+    solo i mancanti/vecchi vengono scaricati da Yahoo e salvati nel DB.
+    Gli indicatori sono calcolati CON il benchmark come riferimento (come nel
+    backtest), così le colonne RS sono disponibili alle strategie.
+    """
+    from etf_metrics.core.automated_backtest import load_recent_market_data
+    raw = load_recent_market_data(tickers, period="2y",
+                                  allow_download=allow_download, min_rows=30)
+    benchmark = CONFIG['SPY_TICKER']
+    data: Dict[str, pd.DataFrame] = {}
+    spy_df = raw.get(benchmark)
+    if spy_df is not None and not spy_df.empty:
+        data[benchmark] = calculate_advanced_metrics_vectorized(spy_df)
+    for t, df in raw.items():
+        if t == benchmark:
+            continue
+        data[t] = calculate_advanced_metrics_vectorized(df, data.get(benchmark))
     return data
 
 
-def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: bool) -> Tuple[Dict, List[str]]:
-    """
-    Esegue l'analisi giornaliera supportando azioni frazionate.
-    Ritorna (nuovo_stato, messaggi).
-    """
-    market_data = get_latest_market_data(tickers_list)
-    if 'SPY' not in market_data:
-        return state, ["⚠️ Dati SPY mancanti."]
-
-    today = datetime.now().date()
-    today_str = str(today)
-
-    # 1. ANALISI MACRO
-    spy_df = market_data['SPY']
-    price_matrix = pd.DataFrame({t: d['Close'] for t, d in market_data.items()})
-    last_date = spy_df.index[-1]
-
-    regime = _assess_market_regime(price_matrix, last_date, market_data)
-    is_bull = (regime == "BULL")
-    is_crash = (regime in ["DANGER", "VOLATILE"])
-
-    messages = [f"📅 Data Dati: {last_date.date()}", f"🌍 Regime: **{regime}**"]
-    new_log_entries = []
-
-    # 2. GESTIONE USCITE (SELL)
-    for ticker, pos in list(state['positions'].items()):
-        if ticker not in market_data:
-            continue
-        row = market_data[ticker].iloc[-1]
-        curr_price = row['Close']
-        atr = row['ATR']
-
-        reason_sell = None
-        sell_portion = 0.0
-        roi = (curr_price / pos['entry_price']) - 1
-
-        if curr_price < pos['stop_loss']:
-            reason_sell = "STOP LOSS"
-            sell_portion = 1.0
-        elif not pos.get('tp1_taken', False) and roi >= CONFIG['TP1_PCT']:
-            reason_sell = "TP1 (Lock Profit)"
-            sell_portion = 0.33
-        elif is_crash and roi < 0.05:
-            reason_sell = "MACRO RISK"
-            sell_portion = 1.0
-        else:
-            # Time Stop Check
+def _normalize_positions_dates(state: Dict) -> None:
+    """entry_date (stringa JSON) -> pd.Timestamp per l'aritmetica delle strategie."""
+    for pos in (state.get('positions') or {}).values():
+        ed = pos.get('entry_date')
+        if ed is not None and not isinstance(ed, pd.Timestamp):
             try:
-                entry_dt = datetime.strptime(pos['entry_date'], "%Y-%m-%d").date()
+                pos['entry_date'] = pd.Timestamp(str(ed))
             except Exception:
-                entry_dt = datetime.strptime(pos['entry_date'], "%Y-%m-%d %H:%M:%S").date()
-            if (today - entry_dt).days >= CONFIG['TIME_STOP_DAYS'] and roi < 0.01:
-                reason_sell = "TIME STOP"
-                sell_portion = 1.0
+                pos['entry_date'] = pd.Timestamp(datetime.now().date())
 
-        # Trailing Stop Update
-        if sell_portion < 1.0:
-            if pos.get('tp1_taken', False) or roi > 0.03:
-                new_stop = curr_price - (atr * CONFIG['STOP_LOSS_ATR_MULT'])
-                if new_stop > pos['stop_loss']:
-                    state['positions'][ticker]['stop_loss'] = new_stop
-                    messages.append(f"🛡️ {ticker}: Stop alzato a {new_stop:.2f}")
 
-        # Execute Sell
-        if reason_sell:
-            qty_sell = pos['qty'] * sell_portion
-            if not allow_fractional:
-                qty_sell = int(qty_sell)
-                if qty_sell == 0 and sell_portion > 0:
-                    qty_sell = pos['qty']
+def _serialize_positions_dates(state: Dict) -> None:
+    """entry_date (Timestamp) -> stringa ISO 'YYYY-MM-DD' per il JSON."""
+    for pos in (state.get('positions') or {}).values():
+        ed = pos.get('entry_date')
+        if isinstance(ed, pd.Timestamp):
+            pos['entry_date'] = ed.strftime('%Y-%m-%d')
 
-            if qty_sell > 0:
-                cash_in = (qty_sell * curr_price) - CONFIG['COMMISSION']
-                state['cash'] += cash_in
 
-                if sell_portion >= 0.99 or (pos['qty'] - qty_sell) < (0.01 if allow_fractional else 1):
-                    del state['positions'][ticker]
-                else:
-                    state['positions'][ticker]['qty'] -= qty_sell
-                    state['positions'][ticker]['tp1_taken'] = True
-                    state['positions'][ticker]['stop_loss'] = max(pos['stop_loss'], pos['entry_price'] * 1.01)
+def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: bool,
+                     market_data: Dict[str, pd.DataFrame] = None,
+                     strategy: str = None) -> Tuple[Dict, List[str]]:
+    """Analisi giornaliera del portafoglio REALE con la strategia scelta.
 
-                log_entry = {
-                    "Date": today_str, "Ticker": ticker, "Action": "SELL",
-                    "Price": curr_price, "Reason": reason_sell,
-                    "PnL_Net": (curr_price - pos['entry_price']) * qty_sell
-                }
-                state['trade_log'].insert(0, log_entry)
-                new_log_entries.append(f"🔴 VENDITA: {ticker} ({reason_sell})")
+    Replica il motore del backtest sull'ultimo giorno di dati disponibile:
+    - USCITE: stop loss ATR del motore + regole di uscita della strategia
+      (exit_signal) + manutenzione posizione (update_position / trailing stop)
+    - INGRESSI: filtro di regime (can_buy), scoring della strategia (entry),
+      controllo correlazione, sizing per slot, limite acquisti/mese e
+      frequenza di ribilanciamento (REBALANCE_DAYS)
 
-    # 3. GESTIONE INGRESSI (BUY)
-    if is_bull:
-        free_slots = CONFIG['MAX_POSITIONS'] - len(state['positions'])
-        if free_slots > 0 and state['cash'] > 10:
+    Args:
+        state: stato persistito (cassa, posizioni, log, strategia, costi)
+        tickers_list: candidati all'acquisto (le posizioni aperte sono sempre monitorate)
+        allow_fractional: azioni frazionarie ammesse
+        market_data: dati già caricati (opzionale; default: fetch DB-first)
+        strategy: chiave strategia (default: quella salvata nello stato)
+
+    Returns:
+        (nuovo_stato, messaggi) — i messaggi con 🔴/🟢 sono operazioni da eseguire.
+    """
+    strat_key = strategy or state.get('strategy') or DEFAULT_STRATEGY
+    state['strategy'] = strat_key
+    strat = get_strategy(strat_key)
+
+    cfg = dict(CONFIG)
+    cfg.update(strat.defaults)
+    if state.get('commission') is not None:
+        cfg['COMMISSION'] = float(state['commission'])
+    if state.get('max_positions') is not None:
+        cfg['MAX_POSITIONS'] = int(state['max_positions'])
+    benchmark = cfg['SPY_TICKER']
+    commission = float(cfg['COMMISSION'])
+
+    if market_data is None:
+        market_data = get_latest_market_data(
+            sorted(set(tickers_list or []) | set((state.get('positions') or {}).keys())))
+    if benchmark not in market_data:
+        return state, [f"⚠️ Dati {benchmark} mancanti: aggiornali dalla pagina 📥 Gestione Dati."]
+
+    # Indicatori specifici della strategia (come nel motore di backtest)
+    spy_df = market_data.get(benchmark)
+    market_data = {t: strat.prepare(df, spy_df, cfg) for t, df in market_data.items()}
+    price_matrix = pd.DataFrame({t: d['Close'] for t, d in market_data.items()}).ffill()
+
+    ref = benchmark if benchmark in market_data else list(market_data.keys())[0]
+    last_date = market_data[ref].index[-1]
+
+    regime = _assess_market_regime(price_matrix, last_date, market_data, benchmark)
+    is_bull = (regime == "BULL")
+    is_crash = (regime in ("DANGER", "VOLATILE"))
+
+    ctx = _MarketCtx()
+    ctx.cfg = cfg
+    ctx.benchmark = benchmark
+    ctx.market_data = market_data
+    ctx.price_matrix = price_matrix
+    ctx.regime = regime
+    ctx.is_crash = is_crash
+    ctx.current_date = last_date
+
+    messages = [
+        f"📅 Data dati: **{last_date.date()}**",
+        f"🧬 Strategia: **{strat.name}**",
+        f"🌍 Regime: **{regime}**",
+    ]
+
+    _normalize_positions_dates(state)
+    positions = state['positions']
+
+    # Limite acquisti mensile (azzerato al cambio mese)
+    month_key = f"{last_date.year}-{last_date.month:02d}"
+    if state.get('month_key') != month_key:
+        state['month_key'] = month_key
+        state['buys_this_month'] = 0
+    buys_this_month = int(state.get('buys_this_month', 0))
+
+    # ------------------------------------------------------------------
+    # 1. GESTIONE USCITE (vendite consigliate)
+    # ------------------------------------------------------------------
+    for t in list(positions.keys()):
+        pos = positions.get(t)
+        if pos is None:
+            continue
+        if t not in market_data or last_date not in market_data[t].index:
+            continue
+        row = market_data[t].loc[last_date]
+
+        action = None
+        # 1a. Stop loss "fisico" del motore (se la strategia usa gli stop)
+        if strat.use_stops and pos.get('stop_loss') is not None \
+                and pd.notna(pos['stop_loss']) and row['Low'] < pos['stop_loss']:
+            exit_price = max(row['Open'], pos['stop_loss'])
+            action = ("STOP LOSS", 1.0, exit_price)
+        else:
+            # 1b. Regole di uscita specifiche della strategia
+            try:
+                sig = strat.exit_signal(pos, row, ctx)
+            except Exception:
+                sig = None
+            if sig is not None:
+                reason, portion = sig[0], sig[1]
+                price = sig[2] if len(sig) > 2 and sig[2] is not None else row['Close']
+                action = (reason, portion, price)
+            else:
+                # 1c. Manutenzione posizione (trailing stop, flag TP, ecc.)
+                try:
+                    strat.update_position(pos, row, ctx)
+                except Exception:
+                    pass
+
+        if action is None:
+            continue
+
+        reason, portion, price = action
+        qty_sell = pos['qty'] * portion
+        if not allow_fractional:
+            qty_sell = int(qty_sell)
+            if qty_sell == 0 and portion > 0.9:
+                qty_sell = pos['qty']
+        if qty_sell <= 0:
+            continue
+
+        cash_in = (qty_sell * price) - commission
+        state['cash'] += cash_in
+        pnl = (price - pos['entry_price']) * qty_sell - commission
+
+        if portion >= 0.99 or (pos['qty'] - qty_sell) < (0.001 if allow_fractional else 1):
+            del positions[t]
+        else:
+            pos['qty'] -= qty_sell
+
+        state['trade_log'].insert(0, {
+            "Date": last_date.strftime('%Y-%m-%d'), "Ticker": t, "Action": "SELL",
+            "Price": float(price), "Reason": reason, "PnL_Net": round(float(pnl), 2),
+            "Qty": qty_sell, "Commission": commission, "Strategy": strat.key,
+        })
+        messages.append(f"🔴 VENDI **{t}**: {qty_sell:g} pz @ {price:.2f} — {reason}")
+
+    # ------------------------------------------------------------------
+    # 2. GESTIONE INGRESSI (acquisti consigliati)
+    # ------------------------------------------------------------------
+    buy_allowed = strat.can_buy(ctx) and \
+        (not cfg['ENABLE_MONTHLY_LIMIT'] or buys_this_month < cfg['MAX_BUYS_PER_MONTH'])
+
+    last_scan = state.get('last_buy_scan')
+    scan_due = True
+    if last_scan:
+        try:
+            scan_due = (last_date - pd.Timestamp(str(last_scan))).days >= cfg['REBALANCE_DAYS']
+        except Exception:
+            scan_due = True
+
+    if not strat.can_buy(ctx):
+        messages.append(f"ℹ️ Regime **{regime}**: la strategia non acquista in questo contesto.")
+    elif not scan_due:
+        messages.append(f"ℹ️ Prossima scansione acquisti tra "
+                        f"{cfg['REBALANCE_DAYS'] - (last_date - pd.Timestamp(str(last_scan))).days} gg.")
+    else:
+        state['last_buy_scan'] = last_date.strftime('%Y-%m-%d')
+        free_slots = cfg['MAX_POSITIONS'] - len(positions)
+
+        if free_slots <= 0:
+            messages.append(f"ℹ️ Portafoglio pieno ({cfg['MAX_POSITIONS']} posizioni).")
+        elif state['cash'] <= 50:
+            messages.append("ℹ️ Cassa insufficiente per nuovi acquisti.")
+        else:
             candidates = []
             for t in tickers_list:
-                if t == 'SPY' or t in state['positions'] or t not in market_data:
+                if t == benchmark or t in positions or t not in market_data:
                     continue
-                row = market_data[t].iloc[-1]
-                score, reason = calculate_ai_smart_score(row)
-                if score >= 60:
-                    candidates.append({'t': t, 'score': score, 'row': row, 'reason': reason})
-
+                if last_date not in market_data[t].index:
+                    continue
+                row = market_data[t].loc[last_date]
+                try:
+                    score, reason = strat.entry(row, ctx)
+                except Exception:
+                    continue
+                if score is not None and pd.notna(score) and score >= strat.min_entry_score:
+                    candidates.append({'t': t, 'score': float(score),
+                                       'row': row, 'reason': reason})
             candidates.sort(key=lambda x: x['score'], reverse=True)
 
+            if not candidates:
+                messages.append("ℹ️ Nessun candidato con punteggio sufficiente oggi.")
+
             for cand in candidates:
-                if free_slots <= 0 or state['cash'] < 10:
+                if free_slots <= 0 or state['cash'] < 50:
+                    break
+                if cfg['ENABLE_MONTHLY_LIMIT'] and buys_this_month >= cfg['MAX_BUYS_PER_MONTH']:
                     break
 
-                t = cand['t']
-                row = cand['row']
+                t, row = cand['t'], cand['row']
+                is_safe_corr, _ = check_correlation_strict(
+                    t, list(positions.keys()), price_matrix, last_date)
+                if not is_safe_corr:
+                    continue
+
+                try:
+                    risk_factor = strat.position_size_factor(row, ctx)
+                except Exception:
+                    risk_factor = 1.0
+
+                alloc_per_slot = (state['cash'] / free_slots) * risk_factor * 0.98
                 price = row['Close']
-
-                # Sizing Dinamico
-                alloc = (state['cash'] / free_slots) * 0.99
-
                 if allow_fractional:
-                    qty = alloc / price
-                    qty = round(qty, 4)
+                    qty = round(alloc_per_slot / price, 4)
                 else:
-                    qty = int(alloc / price)
-
-                cost = (qty * price) + CONFIG['COMMISSION']
+                    qty = int(alloc_per_slot / price)
+                cost = (qty * price) + commission
 
                 if qty > 0 and cost <= state['cash']:
                     state['cash'] -= cost
-                    initial_stop = price - (row['ATR'] * CONFIG['STOP_LOSS_ATR_MULT'])
-
-                    state['positions'][t] = {
-                        'qty': qty, 'entry_price': price, 'entry_date': today_str,
-                        'stop_loss': initial_stop, 'tp1_taken': False
+                    stop = strat.initial_stop(row, ctx, cfg)
+                    positions[t] = {
+                        'qty': qty, 'entry_price': float(price),
+                        'entry_date': last_date,
+                        'stop_loss': float(stop) if (stop is not None and pd.notna(stop)) else None,
+                        'tp1_taken': False, 'regime_at_entry': regime,
                     }
-
-                    log_entry = {
-                        "Date": today_str, "Ticker": t, "Action": "BUY",
-                        "Price": price, "Reason": cand['reason'], "PnL_Net": 0
-                    }
-                    state['trade_log'].insert(0, log_entry)
-                    new_log_entries.append(f"🟢 ACQUISTO: {t} (Q: {qty})")
+                    state['trade_log'].insert(0, {
+                        "Date": last_date.strftime('%Y-%m-%d'), "Ticker": t, "Action": "BUY",
+                        "Price": float(price), "Reason": cand['reason'], "PnL_Net": 0.0,
+                        "Qty": qty, "Commission": commission, "Strategy": strat.key,
+                    })
+                    buys_this_month += 1
+                    state['buys_this_month'] = buys_this_month
                     free_slots -= 1
-        elif free_slots == 0:
-            messages.append("ℹ️ Portafoglio pieno.")
-    else:
-        messages.append("⛔ Mercato non Bull: Acquisti bloccati.")
+                    stop_txt = f" (stop iniziale {float(stop):.2f})" if stop is not None else ""
+                    messages.append(f"🟢 COMPRA **{t}**: {qty:g} pz @ {price:.2f}{stop_txt} — {cand['reason']}")
 
-    state['last_update'] = today_str
-    return state, messages + new_log_entries
+    # ------------------------------------------------------------------
+    # 3. Riepilogo
+    # ------------------------------------------------------------------
+    nav = state['cash']
+    for t, p in positions.items():
+        try:
+            nav += p['qty'] * market_data[t]['Close'].iloc[-1]
+        except Exception:
+            nav += p['qty'] * p['entry_price']
+    messages.append(f"💰 Cassa: **{state['cash']:.2f}** | Posizioni aperte: **{len(positions)}** "
+                    f"| NAV stimato: **{nav:.2f}**")
+
+    _serialize_positions_dates(state)
+    state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return state, messages

@@ -7,3 +7,4 @@
 /live_algo_portfolio.json
 /uv.lock
 __pycache__
+*.egg-info

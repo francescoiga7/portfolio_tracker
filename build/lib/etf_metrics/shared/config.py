@@ -4,16 +4,13 @@ Config & costanti per il progetto ETF Metrics.
 """
 from typing import Dict, List, Tuple
 import logging
-import os
 
 logger = logging.getLogger(__name__)
 
 # --- File di stato / persistenza ---
 PORTFOLIO_FILE = "saved_portfolio.json"
 ALGO_STATE_FILE = "live_algo_portfolio.json"
-# Percorso del DB dei prezzi: sovrascrivibile con la variabile d'ambiente
-# ETF_METRICS_DB (utile per test isolati o installazioni multiutente).
-MARKET_DATA_DB = os.environ.get("ETF_METRICS_DB", "market_data.db")
+MARKET_DATA_DB = "market_data.db"
 
 # Preferenze per i suffissi dei ticker Yahoo
 PREFERRED_SUFFIXES = [".DE", ".MI", ".AS", ".L", ""]
@@ -28,23 +25,6 @@ MANUAL_ISIN_MAP: Dict[str, List[str]] = {
 }
 
 REQUEST_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; etf-metrics/1.0)"}
-
-# --- Cache negativa dei ticker senza dati ("no data found") ---
-# None = i ticker che non hanno dati non vengono MAI più scaricati (blacklist permanente).
-# Imposta un numero N di giorni per concedere un nuovo tentativo dopo N giorni
-# (utile per ETF appena quotati che potrebbero ottenere dati più avanti).
-# È sempre possibile resettare la blacklist con MarketDataManager.clear_failed_tickers().
-FAILED_TICKER_RETRY_DAYS = None
-
-# --- Download massivo (universi grandi, es. tutto Xetra) ---
-BULK_DOWNLOAD_BATCH_SIZE = 200   # ticker per chiamata yf.download (batch isolati e ripristinabili)
-BULK_DOWNLOAD_THREADS = 16       # thread paralleli per batch
-BULK_INFO_WORKERS = 16           # thread paralleli per il recupero di nomi/ISIN (get_info)
-BULK_BATCH_PAUSE = 1.0           # secondi di pausa tra i batch: riduce il rischio di 429 (0 = off)
-# Quando Yahoo risponde 429 (Too Many Requests) i download vengono sospesi per
-# questo numero di secondi invece di martellare il server: durante il cooldown
-# nessun ticker finisce in blacklist. Default: 10 minuti.
-YAHOO_RATE_LIMIT_COOLDOWN = 600
 
 # --- NUOVA STRATEGIA DI DISCOVERY A MATRICE ---
 asset_classes = ["Equity", "Government Bond", "Corporate Bond", "Aggregate Bond", "Commodity", "Real Estate"]

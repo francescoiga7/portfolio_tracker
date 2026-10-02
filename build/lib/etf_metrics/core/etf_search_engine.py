@@ -4,16 +4,15 @@ from typing import Dict, List, Iterable, Optional
 from functools import lru_cache
 from collections import defaultdict
 import re
-from concurrent.futures import ThreadPoolExecutor
 
 from etf_metrics.clients.yahoo_client import yahoo_search, get_info
 from etf_metrics.shared.utils import pick_preferred_symbol
-from etf_metrics.shared.config import PREFERRED_SUFFIXES, BULK_INFO_WORKERS
+from etf_metrics.shared.config import PREFERRED_SUFFIXES
 
 logger = logging.getLogger(__name__)
 
 
-@lru_cache(maxsize=32768)
+@lru_cache(maxsize=4096)
 def _get_info_for_ticker(ticker: str) -> Dict:
     """Cached function to get info for a ticker."""
     if not ticker:
@@ -22,28 +21,6 @@ def _get_info_for_ticker(ticker: str) -> Dict:
         return get_info(ticker=ticker) or {}
     except Exception:
         return {}
-
-
-def prefetch_ticker_infos(tickers: List[str], max_workers: int = None) -> None:
-    """Precarica in parallelo le info (ISIN/nomi) riempiendo la cache LRU.
-
-    Con universi grandi (es. tutto Xetra, ~5000 strumenti) il recupero sequenziale
-    delle info è il collo di bottiglia principale: parallelizzandolo si passa da
-    decine di minuti a qualche minuto (una sola volta, poi è tutto in cache/DB).
-    """
-    tickers = [t for t in (tickers or []) if t]
-    if not tickers:
-        return
-    workers = int(max_workers or BULK_INFO_WORKERS)
-
-    def _fetch(t: str):
-        try:
-            _get_info_for_ticker(t)
-        except Exception:
-            pass
-
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        list(ex.map(_fetch, tickers))
 
 
 def _normalize_name(name: str) -> str:
@@ -58,7 +35,7 @@ def _normalize_name(name: str) -> str:
     name = re.sub(r'[^\w\s]', '', name)
     return " ".join(name.split())
 
-@lru_cache(maxsize=32768)
+@lru_cache(maxsize=4096)
 def _get_isin_for_ticker(ticker: str) -> Optional[str]:
     """Wrapper to get ISIN from the new cached info function."""
     info = _get_info_for_ticker(ticker)
@@ -78,11 +55,6 @@ def get_unique_preferred_tickers(tickers: List[str]) -> List[str]:
     """
     if not tickers:
         return []
-
-    # Precarica le info in parallelo: il dedup qui sotto ne fa una per ticker,
-    # in sequenza sarebbe lentissimo con migliaia di strumenti.
-    if len(tickers) > 8:
-        prefetch_ticker_infos(tickers)
 
     isin_to_candidates = defaultdict(list)
     tickers_without_isin = []
