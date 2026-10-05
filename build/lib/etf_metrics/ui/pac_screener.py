@@ -9,6 +9,7 @@ from etf_metrics.core.pac_screener import (
     filter_and_rank_metrics,
     get_market_regime,
 )
+from etf_metrics.core.data_manager import MarketDataManager
 
 ALGORITHM_WEIGHTS = {
     "Momentum Score": 0.40,
@@ -100,6 +101,21 @@ def render_pac_screener_ui():
             st.session_state.pac_screener_raw_data = data
             st.session_state.debug_log_loading = list(fetch_logs)
             st.rerun()
+
+    with st.sidebar.expander("🚫 Ticker senza dati (cache negativa)", expanded=False):
+        _dm = MarketDataManager()
+        _failed_df = _dm.get_failed_tickers_info()
+        if _failed_df is None or _failed_df.empty:
+            st.caption("Nessun ticker in blacklist: tutti gli strumenti finora scaricati hanno dati.")
+        else:
+            st.caption(f"**{len(_failed_df)}** ticker 'no data found' vengono saltati ai download "
+                       "(nessuna chiamata di rete). Vengono rimossi dalla blacklist se in futuro "
+                       "producono dati.")
+            st.dataframe(_failed_df, height=220, width="stretch", hide_index=True)
+            if st.button("🧹 Reset blacklist", key="reset_failed_tickers"):
+                removed = _dm.clear_failed_tickers()
+                st.success(f"Rimossi {removed} ticker dalla blacklist: verranno ritentati al prossimo download.")
+                st.rerun()
 
     if 'pac_screener_raw_data' in st.session_state and st.session_state.pac_screener_raw_data:
         st.sidebar.header("2. Filtri e Time Travel")

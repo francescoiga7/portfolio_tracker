@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Componenti di rendering Streamlit condivisi tra le varie pagine UI."""
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -13,6 +13,98 @@ except Exception:
     HAS_PLOTLY = False
 
 from etf_metrics.core.metrics import compute_metrics_from_series, compute_sharpe_ratio
+
+
+# =====================================================================
+# Selettore universo ticker (watchlist manuale o tutto il DB locale)
+# =====================================================================
+
+UNIVERSE_WATCHLIST = "✍️ Ticker che inserisco"
+UNIVERSE_WHOLE_DB = "📦 Tutto il DB locale"
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def list_db_tickers(min_rows: int = 200) -> List[str]:
+    """Ticker presenti nel DB locale con almeno `min_rows` righe di prezzi
+    (storico sufficiente per scanner e backtest). Funziona con entrambi i
+    backend (SQLite e DuckDB)."""
+    try:
+        from etf_metrics.core.data_manager import MarketDataManager
+        dm = MarketDataManager()
+        return dm.get_tickers_with_min_rows(min_rows)
+    except Exception:
+        return []
+
+
+def render_universe_selector(
+    default_watchlist: str = "",
+    textarea_height: int = 180,
+    show_download: bool = False,
+    allow_download_default: bool = True,
+    min_rows: int = 200,
+) -> Tuple[List[str], str, bool]:
+    """Selettore condiviso dell'universo ticker (sidebar).
+
+    Due modalità:
+    - "✍️ Ticker che inserisco": watchlist manuale, con validazione live contro
+      il DB locale (✅ già scaricati / ⚠️ mancanti)
+    - "📦 Tutto il DB locale": tutti i ticker già scaricati con storico sufficiente
+
+    Con show_download=True mostra anche la checkbox di download/aggiornamento
+    delta da Yahoo (applicabile a entrambe le modalità).
+
+    Ritorna (tickers, universe_mode, allow_download).
+    """
+    db_tickers = list_db_tickers(min_rows=min_rows)
+
+    mode = st.radio(
+        "Quali ticker usare",
+        [UNIVERSE_WATCHLIST, UNIVERSE_WHOLE_DB],
+        help=("Watchlist: solo i ticker scritti qui sotto. Tutto il DB: l'intero "
+              "universo già scaricato nel database locale."),
+    )
+
+    allow_download = False
+    if mode == UNIVERSE_WHOLE_DB:
+        tickers = list(db_tickers)
+        if tickers:
+            st.caption(
+                f"📦 {len(tickers)} ticker già nel DB (≥ {min_rows} righe di storico). "
+                "Nessuna lista da scrivere: si usa direttamente ciò che è salvato."
+            )
+        else:
+            st.warning(
+                "Il DB locale non contiene ticker con storico sufficiente: "
+                "scarica i dati dalla pagina 📥 **Gestione Dati** e riprova.")
+    else:
+        txt = st.text_area(
+            "Watchlist (un ticker per riga)", default_watchlist, height=textarea_height)
+        tickers = [t.strip().upper() for t in txt.split('\n') if t.strip()]
+
+        # Validazione live contro il DB
+        if tickers and db_tickers:
+            db_set = set(db_tickers)
+            in_db = [t for t in tickers if t in db_set]
+            missing = [t for t in tickers if t not in db_set]
+            parts = [f"✅ {len(in_db)}/{len(tickers)} già nel DB."]
+            if missing:
+                shown = ", ".join(missing[:8]) + ("…" if len(missing) > 8 else "")
+                parts.append(f"⚠️ Non nel DB: {shown}")
+            st.caption(" ".join(parts))
+        elif tickers and not db_tickers:
+            st.caption("ℹ️ Il DB locale è vuoto: i ticker verranno scaricati da Yahoo.")
+
+    if show_download:
+        allow_download = st.checkbox(
+            "📥 Aggiorna da Yahoo i dati mancanti o vecchi",
+            value=allow_download_default,
+            help=("Download con logica delta: completo solo per i ticker nuovi, "
+                  "aggiornamento incrementale per gli altri. I ticker in cache negativa "
+                  "non vengono ritentati; con rate limit (429) si usa il DB locale. "
+                  "Disattivalo per lavorare solo offline."),
+        )
+
+    return tickers, mode, allow_download
 
 
 def get_portfolio_store():

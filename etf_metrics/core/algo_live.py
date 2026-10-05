@@ -21,11 +21,14 @@ from etf_metrics.core.automated_backtest import (
     CONFIG,
     STRATEGIES,
     STRATEGY_ORDER,
+    BENCH_PROXY_KEY,
     _MarketCtx,
     _assess_market_regime,
+    build_benchmark_proxy,
     calculate_advanced_metrics_vectorized,
     check_correlation_strict,
     get_strategy,
+    load_recent_market_data,
 )
 from etf_metrics.shared.config import ALGO_STATE_FILE
 
@@ -71,7 +74,6 @@ def get_latest_market_data(tickers: List[str], allow_download: bool = True) -> D
     Gli indicatori sono calcolati CON il benchmark come riferimento (come nel
     backtest), così le colonne RS sono disponibili alle strategie.
     """
-    from etf_metrics.core.automated_backtest import load_recent_market_data
     raw = load_recent_market_data(tickers, period="2y",
                                   allow_download=allow_download, min_rows=30)
     benchmark = CONFIG['SPY_TICKER']
@@ -79,10 +81,19 @@ def get_latest_market_data(tickers: List[str], allow_download: bool = True) -> D
     spy_df = raw.get(benchmark)
     if spy_df is not None and not spy_df.empty:
         data[benchmark] = calculate_advanced_metrics_vectorized(spy_df)
+    else:
+        # Senza SPY (es. universo Xetra puro): benchmark di riserva equal-weight
+        # dell'universo, così regime e RS restano significativi
+        proxy = build_benchmark_proxy(raw)
+        if proxy is not None:
+            data[BENCH_PROXY_KEY] = calculate_advanced_metrics_vectorized(proxy)
+    bench_ref = data.get(benchmark)
+    if bench_ref is None:
+        bench_ref = data.get(BENCH_PROXY_KEY)
     for t, df in raw.items():
-        if t == benchmark:
+        if t in (benchmark, BENCH_PROXY_KEY):
             continue
-        data[t] = calculate_advanced_metrics_vectorized(df, data.get(benchmark))
+        data[t] = calculate_advanced_metrics_vectorized(df, bench_ref)
     return data
 
 
@@ -143,8 +154,13 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
     if market_data is None:
         market_data = get_latest_market_data(
             sorted(set(tickers_list or []) | set((state.get('positions') or {}).keys())))
+    # Benchmark effettivo: SPY se disponibile, altrimenti proxy equal-weight
+    # dell'universo (universi Xetra senza titoli USA)
+    if benchmark not in market_data and BENCH_PROXY_KEY in market_data:
+        benchmark = BENCH_PROXY_KEY
     if benchmark not in market_data:
-        return state, [f"⚠️ Dati {benchmark} mancanti: aggiornali dalla pagina 📥 Gestione Dati."]
+        return state, [f"⚠️ Dati insufficienti (nemmeno il benchmark di riserva): "
+                       "aggiorna i dati dalla pagina 📥 Gestione Dati."]
 
     # Indicatori specifici della strategia (come nel motore di backtest)
     spy_df = market_data.get(benchmark)

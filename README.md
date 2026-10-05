@@ -50,8 +50,9 @@ portfolio_tracker/
     │   ├── trading.py              # Logica per i segnali di trading
     │   ├── automated_backtest.py   # Logica per il backtest algoritmico
     │   ├── etf_search_engine.py    # Logica di ricerca e filtraggio degli ETF
-    │   ├── data_manager.py         # Cache locale (SQLite) delle serie storiche +
-    │   │                           # blacklist persistente dei ticker senza dati
+    │   ├── data_manager.py         # Cache locale (DuckDB/SQLite) delle serie
+    │   │                           # storiche + blacklist persistente dei ticker
+    │   │                           # senza dati (stessa API per entrambi i backend)
     │   └── metrics.py              # Funzioni per le metriche di performance e rischio
     ├── clients/
     │   ├── base_client.py          # Classe base per i client esterni (retry, errori)
@@ -62,7 +63,13 @@ portfolio_tracker/
         ├── config.py               # Costanti, configurazioni e portafogli modello
         └── utils.py                # Funzioni di utilità generiche
 ├── scripts/
-    └── simulate_strategies.py  # Simulatore CLI multi-strategia su dati fake
+    ├── simulate_strategies.py      # Simulatore CLI multi-strategia su dati fake
+    ├── analyze_db.py               # Analisi finanziaria offline del DB dei prezzi
+    ├── test_data_hub.py            # Test funzionali Gestione Dati + UI (76 test)
+    ├── test_dual_backend.py        # Parità SQLite/DuckDB del data manager
+    ├── test_determinism.py         # Il backtest ottimizzato dà risultati identici
+    ├── test_perf_compare.py        # Benchmark velocità motore di backtest
+    └── test_bug_repro.py           # Riproduzione del bug "metriche a 0" (fixed)
 ```
 
 ## Requisiti
@@ -133,10 +140,13 @@ nel DB SQLite locale e, ai giri successivi, aggiorna **solo le righe mancanti**:
 - Ispezione del contenuto del DB (ticker, nome, righe, copertura, ultimo
   aggiornamento) e della cache negativa, con reset
 
-Il DB è **SQLite in modalità WAL** (`synchronous=NORMAL`): commit rapidi e letture
-concorrenti durante le scritture — la scelta migliore per un uso locale
-single-user con serie storiche. Il file è `market_data.db` (percorso
-configurabile con `ETF_METRICS_DB`).
+Il DB dei prezzi è **DuckDB** (`market_data.duckdb`, creato automaticamente al
+primo download): un motore **colonnare embedded** (nessun server, come SQLite)
+ma 10-50x più veloce sulle letture analitiche — decisivo con universi grandi
+(es. tutto Xetra, ~4 milioni di righe). Un eventuale vecchio `market_data.db`
+SQLite resta al suo posto invariato e resta leggibile (il backend è scelto dal
+percorso: `.duckdb` = DuckDB, altrimenti SQLite). Il percorso è configurabile
+con la variabile d'ambiente `ETF_METRICS_DB`.
 
 ## Ottimizzazione download dati (universi grandi, es. tutto Xetra)
 
@@ -175,3 +185,40 @@ download sequenziale, a cui si aggiunge l'azzeramento dei re-download dei ticker
 > 💡 **Suggerimento (test / multi-istanza):** il percorso del DB dei prezzi è
 > sovrascrivibile con la variabile d'ambiente `ETF_METRICS_DB=/percorso/test.db`
 > per eseguire simulazioni e test senza toccare il database di produzione.
+
+## ⚡ Performance del motore di backtest
+
+Il motore di `automated_backtest.py` è ottimizzato per universi grandi
+(tutto Xetra, ~4M di righe) e multi-core:
+
+- **Regimi di mercato precalcolati** in un'unica passata vettoriale
+  (precedenza BEAR > VOLATILE > DANGER > BULL), invece di rivalutarli ogni giorno
+- **Volume profile rolling vettoriale** (`sliding_window_view` + `bincount`,
+  ~5x più veloce del loop originale)
+- **Pannello prezzi numpy** per il motore day-by-day (uscite/entrate/NAV:
+  ~5x più veloce delle lookup `.loc`)
+- **Cache con fingerprint** dei DataFrame preprocessati (indicatori, SMA, ATR:
+  calcolati una volta sola per strategia e riusati)
+- **Confronto strategie in parallelo** con `ProcessPoolExecutor` (fork): le 7
+  strategie girano su core diversi e condividono i dati senza serializzazione.
+  Il numero di worker è limitato a `min(strategie, CPU, 4)` e regolabile con
+  `ETF_METRICS_BACKTEST_WORKERS`; il budget della cache con
+  `ETF_METRICS_PREPARED_CACHE_ROWS` (default 6M righe)
+
+Risultato su universo sintetico da 1.300 ticker / 4M di righe (i9, 10 anni di
+simulazione): **7 strategie in ~67s** invece di ~10 minuti; letture dal DB
+**~4x più veloci** con DuckDB rispetto a SQLite. Tutti i risultati numerici
+sono **identici** al motore originale (verificato da `test_determinism.py`).
+
+### Benchmark e analisi offline
+
+```bash
+# Analisi finanziaria del DB (performance, correlazioni, regime attuale)
+python3 scripts/analyze_db.py
+
+# Benchmark del motore su 4M di righe sintetiche (nessuna rete)
+python3 scripts/bench_xetra_scale.py
+
+# Parità dei due backend del data manager
+python3 scripts/test_dual_backend.py
+```

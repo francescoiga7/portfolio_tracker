@@ -11,9 +11,45 @@ logger = logging.getLogger(__name__)
 # --- File di stato / persistenza ---
 PORTFOLIO_FILE = "saved_portfolio.json"
 ALGO_STATE_FILE = "live_algo_portfolio.json"
-# Percorso del DB dei prezzi: sovrascrivibile con la variabile d'ambiente
-# ETF_METRICS_DB (utile per test isolati o installazioni multiutente).
-MARKET_DATA_DB = os.environ.get("ETF_METRICS_DB", "market_data.db")
+
+
+def resolve_market_db_path() -> str:
+    """Percorso del DB dei prezzi, risolto a RUNTIME (non a import).
+
+    Precedenza:
+    1. variabile d'ambiente ETF_METRICS_DB (scelta esplicita)
+    2. market_data.duckdb, se esiste e duckdb è installato (backend analitico,
+       10-50x più veloce sulle letture: è il backend di default)
+    3. market_data.db (SQLite, legacy: usato solo se è l'unico DB presente
+       e duckdb non è ancora stato creato)
+    4. market_data.duckdb nuovo (installazioni da zero: il Gestore Dati crea
+       e popola direttamente il DB DuckDB)
+
+    La risoluzione a runtime permette il cambio di backend senza riavviare
+    l'app (basta un refresh della pagina Streamlit).
+    """
+    explicit = os.environ.get("ETF_METRICS_DB")
+    if explicit:
+        return explicit
+    duck_importable = False
+    try:
+        import duckdb  # noqa: F401
+        duck_importable = True
+    except Exception:
+        logger.warning("Il modulo 'duckdb' non è installato: il Gestore Dati userebbe "
+                       "SQLite. (pip install duckdb)")
+    if os.path.exists("market_data.duckdb"):
+        if duck_importable:
+            return "market_data.duckdb"
+    elif duck_importable and not os.path.exists("market_data.db"):
+        # installazione da zero: si parte direttamente con DuckDB
+        return "market_data.duckdb"
+    return "market_data.db"
+
+
+# Percorso del DB dei prezzi (compatibilità: usare resolve_market_db_path()
+# per leggere il valore aggiornato, es. dopo una migrazione a DuckDB)
+MARKET_DATA_DB = resolve_market_db_path()
 
 # Preferenze per i suffissi dei ticker Yahoo
 PREFERRED_SUFFIXES = [".DE", ".MI", ".AS", ".L", ""]

@@ -23,6 +23,18 @@ from etf_metrics.ui.components import (
 )
 from etf_metrics.core.metrics import compute_backtest_performance_metrics
 
+
+def _bench_curve_and_label(bh_curves):
+    """(serie_benchmark, etichetta): S&P500 se presente, proxy universo altrimenti."""
+    if not bh_curves:
+        return None, None
+    if 'benchmark' in bh_curves:
+        return bh_curves['benchmark'], "S&P500"
+    if 'benchmark_proxy' in bh_curves:
+        return bh_curves['benchmark_proxy'], "Universo (proxy)"
+    return None, None
+
+
 DEFAULT_TRADING_LIST = """NVDA
 TSLA
 AMD
@@ -212,12 +224,12 @@ def _render_strategy_report(df_trades, final_cap, initial_capital, strategy_name
 
     # Confronto con benchmark (obiettivo: battere S&P500)
     if bh_curves:
-        bench = bh_curves.get('benchmark')
+        bench, bench_lbl = _bench_curve_and_label(bh_curves)
         if bench is not None and len(bench) > 1:
             bench_final = bench.iloc[-1]
             alpha = final_cap - bench_final
             st.markdown(
-                f"**🏁 Obiettivo 'battere S&P500':** Benchmark B&H = **€{bench_final:,.0f}** → "
+                f"**🏁 Obiettivo 'battere {bench_lbl}':** Benchmark B&H = **€{bench_final:,.0f}** → "
                 f"{'🟢 strategia VINCE' if final_cap > bench_final else '🔴 strategia perde'} "
                 f"di **€{abs(alpha):,.0f}** ({(alpha / initial_capital) * 100:+.1f}% sul capitale iniziale)."
             )
@@ -235,8 +247,9 @@ def _render_strategy_report(df_trades, final_cap, initial_capital, strategy_name
             simple_curve = df_trades.drop_duplicates(subset=['Date'], keep='last').set_index('Date')['Capital']
             curves["Strategia"] = simple_curve
         if bh_curves:
-            if 'benchmark' in bh_curves:
-                curves["S&P500 Buy&Hold"] = bh_curves['benchmark']
+            bench_s, bench_lbl = _bench_curve_and_label(bh_curves)
+            if bench_s is not None:
+                curves[f"{bench_lbl} Buy&Hold"] = bench_s
             if 'equal_weight' in bh_curves:
                 curves["Universo Eq. Weight"] = bh_curves['equal_weight']
         st.line_chart(align_equity_curves(curves))
@@ -454,10 +467,11 @@ def render_trading_ui():
                     "Commissioni (€)": comm,
                 })
 
-            bench_final = bh_curves['benchmark'].iloc[-1] if 'benchmark' in bh_curves else None
+            bench_s, bench_name = _bench_curve_and_label(bh_curves)
+            bench_final = float(bench_s.iloc[-1]) if bench_s is not None else None
             if bench_final is not None:
                 rows.append({
-                    "Strategia": "🏁 S&P500 Buy & Hold",
+                    "Strategia": f"🏁 {bench_name} Buy & Hold",
                     "Finale (€)": float(bench_final),
                     "Rend. Tot. %": ((bench_final - initial_capital) / initial_capital) * 100,
                     "CAGR %": np.nan, "Max DD %": np.nan, "Sharpe": np.nan,
@@ -484,7 +498,8 @@ def render_trading_ui():
                 st.success(
                     f"🥇 Migliore: **{best['Strategia']}** con €{best['Finale (€)']:,.0f} "
                     f"({best['Rend. Tot. %']:+.1f}%) — "
-                    + (f"**batte il S&P500** (€{bench_final:,.0f})." if beats else "sotto il S&P500 in questo scenario.")
+                    + (f"**batte il benchmark** (€{bench_final:,.0f})." if beats
+                       else "sotto il benchmark in questo scenario.")
                 )
                 cheapest = min(valid, key=lambda r: r["Commissioni (€)"])
                 st.caption(
@@ -502,8 +517,9 @@ def render_trading_ui():
                 elif not r["trades"].empty:
                     curves[r["name"]] = r["trades"].drop_duplicates(
                         subset=['Date'], keep='last').set_index('Date')['Capital']
-            if 'benchmark' in bh_curves:
-                curves["S&P500 Buy&Hold"] = bh_curves['benchmark']
+            bench_s2, bench_lbl2 = _bench_curve_and_label(bh_curves)
+            if bench_s2 is not None:
+                curves[f"{bench_lbl2} Buy&Hold"] = bench_s2
             if 'equal_weight' in bh_curves:
                 curves["Universo Eq. Weight"] = bh_curves['equal_weight']
 

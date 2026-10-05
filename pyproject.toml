@@ -12,6 +12,7 @@ dependencies = [
     "yfinance",
     "requests",
     "polars",
+    "duckdb",
 ]
 
 [dependency-groups]

@@ -113,11 +113,10 @@ def render_data_hub_ui():
   riscaricati; puoi ispezionarli e resettarli in fondo alla pagina.
 - **Rate limit Yahoo (429)**: il download si sospende per ~10 minuti invece di
   martellare il server; i dati già scaricati vengono comunque salvati.
-- Il DB è un unico file (**DuckDB** di default, `market_data.duckdb`; percorso
-  configurabile con la variabile d'ambiente `ETF_METRICS_DB`). DuckDB è un motore
-  **colonnare embedded** (niente server, come SQLite) ma 10-50x più veloce in
-  lettura: fondamentale con tutto Xetra e milioni di righe nel backtest.
-  Un eventuale vecchio `market_data.db` SQLite resta dove sta, invariato.
+- Il DB è un unico file (percorso configurabile con la variabile d'ambiente
+  `ETF_METRICS_DB`). Due backend:
+  **SQLite** (legacy) e **DuckDB** (consigliato, 10-50x più veloce in lettura:
+  fondamentale con tutto Xetra e milioni di righe).
             """
         )
 
@@ -133,6 +132,42 @@ def render_data_hub_ui():
     c4.metric("Dimensione DB", f"{stats['db_mb']:.1f} MB")
     c5.metric("Cache negativa", stats['failed'])
     c6.metric("Backend", "🦆 DuckDB" if stats.get('backend') == 'duckdb' else "SQLite")
+
+    # ------------------------------------------------------------------
+    # Migrazione a DuckDB (backend analitico, per universi grandi)
+    # ------------------------------------------------------------------
+    if stats.get('backend') != 'duckdb':
+        try:
+            import duckdb  # noqa: F401
+            has_duckdb = True
+        except Exception:
+            has_duckdb = False
+        with st.expander("🚀 Migra a DuckDB (letture 10-50x più veloci)", expanded=False):
+            st.markdown(
+                "DuckDB è un motore **colonnare embedded** pensato per l'analisi: con "
+                "milioni di righe (es. tutto Xetra) le letture del backtest diventano "
+                "istantanee rispetto a SQLite. Il vecchio file SQLite **non viene "
+                "toccato** (resta come backup) e l'app usa il nuovo DB al refresh "
+                "della pagina.")
+            if not has_duckdb:
+                st.warning("Installa prima il modulo: `pip install duckdb`")
+            elif st.button("🚀 Migra ora", type="primary"):
+                from etf_metrics.core.db_migration import migrate_sqlite_to_duckdb
+                try:
+                    with st.spinner("Migrazione in corso..."):
+                        report = migrate_sqlite_to_duckdb(
+                            dm.db_path, force=False,
+                            progress_callback=lambda f: st.progress(
+                                min(1.0, f), text="Copia delle righe di prezzi..."))
+                    st.success(f"✅ Migrati {report['tickers']:,} ticker e "
+                               f"{report['price_rows']:,} righe in "
+                               f"{report['elapsed_sec']:.1f}s. "
+                               "Aggiorna la pagina per usare il nuovo DB.")
+                except FileExistsError:
+                    st.info("Il DB DuckDB esiste già: rimuovi `market_data.duckdb` "
+                            "se vuoi rifare la migrazione da zero.")
+                except FileNotFoundError as e:
+                    st.error(str(e))
 
     st.divider()
 

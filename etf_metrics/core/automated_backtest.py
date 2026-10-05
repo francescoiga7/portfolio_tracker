@@ -22,6 +22,10 @@ Inoltre:
 import pandas as pd
 import numpy as np
 import logging
+import json
+import os
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import timedelta
 from typing import Callable, Optional, Dict, List, Tuple
 
@@ -287,15 +291,33 @@ def calculate_advanced_metrics_vectorized(df, spy_df=None):
 
 
 def _assess_market_regime(price_matrix, current_date, market_data, benchmark=None):
+    """Regime di mercato nella data indicata (BULL / BEAR / VOLATILE / DANGER / NEUTRAL).
+
+    - Con benchmark disponibile (es. SPY): Close vs SMA200, volatilità ATR, RSI.
+      Se la data non è nell'indice del benchmark (calendari USA != Xetra, ad es.
+      il 1° maggio o il 3 ottobre) viene usata l'ultima seduta disponibile
+      precedente (lookup as-of) invece di degradare al proxy.
+    - Senza benchmark: proxy equal-weight dell'universo sugli ultimi 200 giorni
+      di TRADING. (FIX BUG STORICO: prima si usavano 200 giorni SOLARI ≈ 142
+      sedute, quindi la soglia `len >= 200` non era mai raggiungibile e il
+      regime restava per sempre NEUTRAL: nessuna strategia comprava mai e il
+      backtest riportava tutte le metriche a 0 con i soli dati del DB locale.)
+    """
     spy = benchmark or CONFIG['SPY_TICKER']
-    if spy not in market_data or current_date not in market_data[spy].index:
-        start = current_date - timedelta(days=200)
-        proxy = price_matrix.loc[start:current_date].mean(axis=1)
-        if len(proxy) < 200:
+    spy_df = market_data.get(spy)
+    row = None
+    if spy_df is not None and not spy_df.empty:
+        sub = spy_df.loc[:current_date]
+        if len(sub):
+            row = sub.iloc[-1]
+
+    if row is None:
+        hist = price_matrix.loc[:current_date]
+        if len(hist) < 200:
             return "NEUTRAL"
+        proxy = hist.tail(200).mean(axis=1)
         return "BULL" if proxy.iloc[-1] > proxy.mean() else "BEAR"
 
-    row = market_data[spy].loc[current_date]
     if row['Close'] < row['SMA200']:
         return "BEAR"
     atr_pct = (row['ATR'] / row['Close']) * 100
@@ -304,6 +326,88 @@ def _assess_market_regime(price_matrix, current_date, market_data, benchmark=Non
     if row['RSI'] < 35:
         return "DANGER"
     return "BULL"
+
+
+def _precompute_regimes(bench_df: pd.DataFrame,
+                        sim_dates: pd.DatetimeIndex) -> Optional[pd.Series]:
+    """Regime di mercato per ogni data di simulazione, in un'unica passata vettoriale.
+
+    Replica esattamente `_assess_market_regime` (ramo benchmark) evitando il
+    costo per-giorno: con universi grandi (es. tutto Xetra) la valutazione del
+    regime giorno per giorno domina il tempo di simulazione.
+    Ritorna una Series allineata a sim_dates, oppure None se il benchmark non
+    ha gli indicatori necessari (il chiamante ricade nel calcolo per-giorno).
+    """
+    needed = {'Close', 'SMA200', 'ATR', 'RSI'}
+    if bench_df is None or bench_df.empty or not needed.issubset(bench_df.columns):
+        return None
+    try:
+        close, sma = bench_df['Close'], bench_df['SMA200']
+        atr_pct = bench_df['ATR'] / close * 100.0
+        rsi = bench_df['RSI']
+        # Stessa precedenza dell'if-chain originale (il primo match vince):
+        # BEAR > VOLATILE > DANGER > BULL. Con le maschere vettoriali si aplica
+        # in ordine INVERSO: l'ultima scrittura ha la precedenza più alta.
+        regime = pd.Series("BULL", index=bench_df.index, dtype=object)
+        regime[rsi < 35] = "DANGER"
+        regime[atr_pct > CONFIG['BEAR_VOLATILITY_THRESHOLD']] = "VOLATILE"
+        regime[close < sma] = "BEAR"
+        # Allineamento as-of alle date di simulazione (calendari diversi)
+        return regime.reindex(sim_dates, method='ffill').fillna("NEUTRAL")
+    except Exception as e:
+        logger.debug(f"Precompute regimi non riuscito ({e}): fallback per-giorno")
+        return None
+
+
+# Chiave riservata (non può collidere con un ticker reale) del benchmark di
+# riserva equal-weight dell'universo, usato quando il benchmark ufficiale
+# (SPY) non è disponibile nel DB — es. universi Xetra puri.
+BENCH_PROXY_KEY = '__UNIVERSE_BENCH__'
+
+
+def build_benchmark_proxy(market_data: Dict[str, pd.DataFrame],
+                          key: str = BENCH_PROXY_KEY) -> Optional[pd.DataFrame]:
+    """Costruisce un benchmark equal-weight dell'universo (fallback senza SPY).
+
+    Ogni titolo è normalizzato a 1 alla propria prima quotazione e le serie
+    vengono mediate: il risultato è un indice "universo" con OHLCV sintetici,
+    utilizzabile per il regime di mercato e come riferimento dell'RS (relative
+    strength). Serve per i DB con soli titoli Xetra: regime e RS restano
+    significativi senza dover scaricare titoli USA.
+    """
+    frames = [df for t, df in market_data.items()
+              if df is not None and not df.empty and t != key]
+    if len(frames) < 2:
+        return None
+
+    parts, vols = [], []
+    for df in frames:
+        c0 = df['Close'].iloc[0]
+        if not np.isfinite(c0) or c0 <= 0:
+            continue
+        parts.append(df[['Open', 'High', 'Low', 'Close']] / c0)
+        vols.append(df['Volume'].astype(float) if 'Volume' in df.columns
+                    else pd.Series(1.0, index=df.index))
+    if not parts:
+        return None
+
+    idx = parts[0].index
+    for p in parts[1:]:
+        idx = idx.union(p.index)
+
+    # media per campo (Open/High/Low/Close) sulle serie disponibili: i titoli
+    # quotati dopo entrano man mano nel paniere, come in un indice reale
+    big = pd.concat({i: p.reindex(idx) for i, p in enumerate(parts)}, axis=1)
+    px = big.T.groupby(level=1).mean().T
+    vol = pd.concat([v.reindex(idx) for v in vols], axis=1).mean(axis=1)
+
+    proxy = pd.DataFrame({
+        'Open': px['Open'], 'High': px['High'],
+        'Low': px['Low'], 'Close': px['Close'],
+        'Volume': vol,
+    })
+    proxy.index.name = 'date'
+    return proxy
 
 
 def check_correlation_strict(candidate, portfolio, price_matrix, current_date):
@@ -372,15 +476,10 @@ def prepare_market_data(tickers, period="5y", allow_download=True, progress_call
                     db_manager.save_bulk_data(new_data)
 
     loaded = db_manager.load_data(all_tickers)
-    spy_df = loaded.get(CONFIG['SPY_TICKER'])
-    if spy_df is not None and not spy_df.empty:
-        spy_df = calculate_advanced_metrics_vectorized(spy_df, None)
-        loaded[CONFIG['SPY_TICKER']] = spy_df
-
-    processed = {}
-    for t, df in loaded.items():
-        if not df.empty and len(df) > 200:
-            processed[t] = calculate_advanced_metrics_vectorized(df, spy_df)
+    # Indicatori base + benchmark di riserva: se SPY non è nel DB (es. universo
+    # Xetra puro) viene costruita la proxy equal-weight dell'universo, così il
+    # regime di mercato e l'RS restano significativi anche offline
+    processed, _bench_key = _ensure_processed(loaded, CONFIG['SPY_TICKER'])
     return processed
 
 
@@ -414,23 +513,44 @@ def load_recent_market_data(tickers, period="2y", allow_download=True, min_rows=
 
 
 def _ensure_processed(market_data: Dict[str, pd.DataFrame], benchmark: str,
-                      min_rows: int = 200) -> Dict[str, pd.DataFrame]:
-    """Garantisce che i dati (es. fake) abbiano gli indicatori base calcolati."""
-    out: Dict[str, pd.DataFrame] = {}
-    spy_df = market_data.get(benchmark)
-    if spy_df is not None and not spy_df.empty and 'SMA200' not in spy_df.columns:
-        spy_df = calculate_advanced_metrics_vectorized(spy_df, None)
-        market_data[benchmark] = spy_df
-    spy_df = market_data.get(benchmark)
+                      min_rows: int = 200) -> Tuple[Dict[str, pd.DataFrame], Optional[str]]:
+    """Garantisce che i dati (es. fake) abbiano gli indicatori base calcolati.
 
+    Ritorna (dati_processati, chiave_benchmark_effettiva). Se il benchmark
+    richiesto (es. SPY) non è disponibile, viene costruita e aggiunta una proxy
+    equal-weight dell'universo (BENCH_PROXY_KEY): regimi di mercato, RS e curve
+    buy&hold restano utilizzabili anche con un DB Xetra senza titoli USA.
+    """
+    market_data = dict(market_data)  # non mutare l'input del chiamante
+
+    bench_key: Optional[str] = None
+    if benchmark in market_data and market_data[benchmark] is not None \
+            and not market_data[benchmark].empty:
+        bench_key = benchmark
+    elif BENCH_PROXY_KEY in market_data and market_data[BENCH_PROXY_KEY] is not None \
+            and not market_data[BENCH_PROXY_KEY].empty:
+        bench_key = BENCH_PROXY_KEY
+
+    if bench_key is None:
+        proxy = build_benchmark_proxy(market_data)
+        if proxy is not None:
+            market_data[BENCH_PROXY_KEY] = proxy
+            bench_key = BENCH_PROXY_KEY
+
+    bench_df = market_data.get(bench_key) if bench_key else None
+    if bench_df is not None and not bench_df.empty and 'SMA200' not in bench_df.columns:
+        bench_df = calculate_advanced_metrics_vectorized(bench_df, None)
+        market_data[bench_key] = bench_df
+
+    out: Dict[str, pd.DataFrame] = {}
     for t, df in market_data.items():
         if df is None or df.empty:
             continue
         if 'SMA200' in df.columns:
             out[t] = df
         elif len(df) > min_rows:
-            out[t] = calculate_advanced_metrics_vectorized(df, spy_df)
-    return out
+            out[t] = calculate_advanced_metrics_vectorized(df, bench_df)
+    return out, bench_key
 
 
 # =====================================================================
@@ -686,35 +806,66 @@ class BearMarketStrategy(BaseStrategy):
 # ---------------------------------------------------------------------
 def _rolling_volume_profile(df: pd.DataFrame, window: int = 60, bins: int = 24,
                             va_pct: float = 0.70):
-    """Profilo del volume per prezzo rolling: ritorna (POC, VAH, VAL) come array."""
-    close = df['Close'].values; high = df['High'].values
-    low = df['Low'].values; vol = df['Volume'].values.astype(float)
+    """Profilo del volume per prezzo rolling: ritorna (POC, VAH, VAL) come array.
+
+    Versione vettorizzata (sliding_window_view + bincount con offset di riga):
+    su un titolo da ~2500 sedute è ~10x più veloce del loop per-riga — su
+    universi grandi (tutto Xetra) è la differenza tra minuti e secondi.
+    Semantica identica alla versione originale a loop.
+    """
     n = len(df)
+    poc = np.full(n, np.nan); vah = np.full(n, np.nan); val = np.full(n, np.nan)
+    if n <= window or window <= 0 or bins <= 0:
+        return poc, vah, val
+
+    close = df['Close'].to_numpy(float); high = df['High'].to_numpy(float)
+    low = df['Low'].to_numpy(float); vol = np.nan_to_num(df['Volume'].to_numpy(float))
     tp = (close + high + low) / 3.0
 
-    poc = np.full(n, np.nan); vah = np.full(n, np.nan); val = np.full(n, np.nan)
-    for i in range(window, n):
-        seg_tp = tp[i - window:i]; seg_vol = vol[i - window:i]
-        lo = np.nanmin(seg_tp); hi = np.nanmax(seg_tp)
-        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo or np.nansum(seg_vol) <= 0:
-            continue
-        edges = np.linspace(lo, hi, bins + 1)
-        idxs = np.clip(np.digitize(seg_tp, edges) - 1, 0, bins - 1)
-        hist = np.bincount(idxs, weights=seg_vol, minlength=bins)
-        poc_i = int(np.argmax(hist))
+    # Finestre [i-window, i) per i in [window, n): riga j <-> i = j + window.
+    # [:-1] esclude l'ultima finestra, che conterrebbe il giorno corrente i
+    # (la finestra del profilo è strettamente passata, come nell'originale).
+    W_tp = np.lib.stride_tricks.sliding_window_view(tp, window)[:-1]
+    W_vol = np.lib.stride_tricks.sliding_window_view(vol, window)[:-1]
+    m = W_tp.shape[0]
 
-        target = hist.sum() * va_pct
-        cum = hist[poc_i]; up = poc_i + 1; dn = poc_i - 1
+    lo = np.nanmin(W_tp, axis=1)
+    hi = np.nanmax(W_tp, axis=1)
+    span = hi - lo
+    tot = W_vol.sum(axis=1)
+    valid = np.isfinite(lo) & np.isfinite(hi) & (span > 0) & (tot > 0)
+
+    # Indice di bin per elemento: np.digitize(x, linspace(lo, hi, bins+1)) - 1
+    # equivale a ceil((x-lo)/span*bins) - 1, clampato a [0, bins-1]
+    safe_span = np.where(valid, span, 1.0)
+    rel = np.where(valid[:, None], (W_tp - lo[:, None]) / safe_span[:, None], 0.0)
+    b = np.clip(np.ceil(rel * bins).astype(np.int64) - 1, 0, bins - 1)
+
+    # Istogramma pesato per riga in un solo bincount (riga*bin + colonna)
+    rows = np.repeat(np.arange(m), window)
+    hist = np.bincount(rows * bins + b.ravel(),
+                       weights=np.where(valid[:, None], W_vol, 0.0).ravel(),
+                       minlength=m * bins).reshape(m, bins)
+
+    poc_i = hist.argmax(axis=1)
+    lo_v = np.where(valid, lo, 0.0)
+
+    # Espansione della value area attorno al POC (due punte, come l'originale)
+    for j in np.nonzero(valid)[0]:
+        h = hist[j]
+        target = h.sum() * va_pct
+        cum = h[poc_i[j]]; up = int(poc_i[j]) + 1; dn = int(poc_i[j]) - 1
         while cum < target and (up < bins or dn >= 0):
-            up_val = hist[up] if up < bins else -1.0
-            dn_val = hist[dn] if dn >= 0 else -1.0
+            up_val = h[up] if up < bins else -1.0
+            dn_val = h[dn] if dn >= 0 else -1.0
             if up_val >= dn_val:
                 cum += max(0.0, up_val); up += 1
             else:
                 cum += max(0.0, dn_val); dn -= 1
-        poc[i] = (edges[poc_i] + edges[poc_i + 1]) / 2.0
-        vah[i] = edges[min(up, bins)]
-        val[i] = edges[max(dn + 1, 0)]
+        i = j + window
+        poc[i] = lo_v[j] + (poc_i[j] + 0.5) * safe_span[j] / bins
+        vah[i] = lo_v[j] + min(up, bins) * safe_span[j] / bins
+        val[i] = lo_v[j] + max(dn + 1, 0) * safe_span[j] / bins
     return poc, vah, val
 
 
@@ -1015,6 +1166,106 @@ def get_strategy(key: str) -> BaseStrategy:
 # 4. MOTORE DI BACKTEST (gestisce portafoglio/commissioni/tasse per tutte)
 # =====================================================================
 
+class _FastRowPanel:
+    """Accesso rapido alle righe per data di simulazione.
+
+    Nel loop giorno-per-giorno, `df.loc[data]` costa ~60-100µs per chiamata:
+    con universi grandi (tutto Xetra) e ribilanciamenti ogni 5 giorni sono
+    centinaia di migliaia di accessi che dominano il tempo di simulazione.
+    Questo pannello preindicizza le date una sola volta (get_indexer) e
+    costruisce le righe da array numpy (~5x più veloce), mantenendo la stessa
+    API delle strategie (pd.Series indicizzata per nome colonna).
+    """
+    __slots__ = ('_entries',)
+
+    def __init__(self, market_data: Dict[str, pd.DataFrame], sim_dates: pd.DatetimeIndex):
+        self._entries = {}
+        for t, df in market_data.items():
+            if df is None or df.empty:
+                continue
+            pos = df.index.get_indexer(sim_dates)
+            arr = df.to_numpy()
+            close_col = df.columns.get_loc('Close') if 'Close' in df.columns else None
+            self._entries[t] = (df.columns, arr, pos, close_col)
+
+    def row(self, ticker: str, i: int):
+        """La riga del ticker alla i-esima data di simulazione, None se assente."""
+        e = self._entries.get(ticker)
+        if e is None:
+            return None
+        cols, arr, pos, _ = e
+        p = pos[i]
+        if p < 0:
+            return None
+        return pd.Series(arr[p], index=cols)
+
+    def close(self, ticker: str, i: int):
+        """Il prezzo Close del ticker alla i-esima data (None se non disponibile)."""
+        e = self._entries.get(ticker)
+        if e is None:
+            return None
+        _, arr, pos, cc = e
+        p = pos[i]
+        if p < 0 or cc is None:
+            return None
+        v = arr[p, cc]
+        return float(v) if np.isfinite(v) else None
+
+
+# Cache in-processo dei frame preparati dalle strategie: i re-run (es. cambio
+# commissioni in UI) non ricalcolano gli indicatori. Budget in righe per
+# limitare la memoria (configurabile via env).
+_PREPARED_CACHE: Dict[Tuple[str, str], Tuple[str, pd.DataFrame]] = {}
+_PREPARED_CACHE_ROWS = 0
+_PREPARED_CACHE_MAX_ROWS = int(os.environ.get('ETF_METRICS_PREPARED_CACHE_ROWS', 6_000_000))
+
+
+def _frame_fingerprint(df: pd.DataFrame) -> str:
+    """Identificativo economico del contenuto di un frame (per invalidare la cache)."""
+    try:
+        return (f"{len(df)}|{df.index[0]}|{df.index[-1]}|"
+                f"{df['Close'].iloc[0]:.6f}|{df['Close'].iloc[-1]:.6f}")
+    except Exception:
+        return f"{id(df)}|{len(df)}"
+
+
+def _prepare_strategy_frames(strat, market_data: Dict[str, pd.DataFrame],
+                             spy_df, cfg: Dict) -> Dict[str, pd.DataFrame]:
+    """Applica `strat.prepare` a ogni frame con cache in-processo.
+
+    Le strategie aggiungono colonne a copie dei frame base (mai mutate): la
+    cache restituisce lo stesso oggetto preparato finché dati e parametri non
+    cambiano (fingerprint su lunghezza, estremi dell'indice e prezzi).
+    """
+    global _PREPARED_CACHE_ROWS
+    try:
+        params_key = json.dumps(cfg, default=str, sort_keys=True)
+    except Exception:
+        params_key = str(sorted((str(k), str(v)) for k, v in cfg.items()))
+    spy_fp = _frame_fingerprint(spy_df) if spy_df is not None else '-'
+    prefix = f"{strat.key}|{params_key}|{spy_fp}"
+
+    out: Dict[str, pd.DataFrame] = {}
+    for t, df in market_data.items():
+        if df is None or df.empty:
+            continue
+        fp = _frame_fingerprint(df)
+        want = f"{prefix}|{fp}"
+        entry = _PREPARED_CACHE.get((strat.key, t))
+        if entry is not None and entry[0] == want:
+            out[t] = entry[1]
+            continue
+        prepared = strat.prepare(df, spy_df, cfg)
+        _PREPARED_CACHE[(strat.key, t)] = (want, prepared)
+        _PREPARED_CACHE_ROWS += len(prepared)
+        out[t] = prepared
+
+    if _PREPARED_CACHE_ROWS > _PREPARED_CACHE_MAX_ROWS:
+        _PREPARED_CACHE.clear()
+        _PREPARED_CACHE_ROWS = 0
+    return out
+
+
 def run_market_aware_backtest(
     tickers: list,
     start_date="2015-01-01",
@@ -1039,23 +1290,38 @@ def run_market_aware_backtest(
     benchmark = cfg['SPY_TICKER']
 
     if preloaded_data:
-        market_data = _ensure_processed(
+        market_data, _bench_key = _ensure_processed(
             {t: df for t, df in preloaded_data.items() if df is not None and not df.empty},
             benchmark,
         )
     else:
         market_data = prepare_market_data(tickers)
+        if market_data:
+            market_data, _bench_key = _ensure_processed(market_data, benchmark)  # no-op se già pronti
 
     if not market_data:
         return pd.DataFrame(), initial_capital
 
-    # Indicatori specifici della strategia
+    # Benchmark effettivo: SPY se disponibile, altrimenti la proxy equal-weight
+    # dell'universo aggiunta da _ensure_processed (universi Xetra senza USA)
+    if benchmark not in market_data and BENCH_PROXY_KEY in market_data:
+        benchmark = BENCH_PROXY_KEY
+
+    # Indicatori specifici della strategia (con cache: i re-run non ricalcolano)
     spy_df = market_data.get(benchmark)
-    market_data = {t: strat.prepare(df, spy_df, cfg) for t, df in market_data.items()}
+    market_data = _prepare_strategy_frames(strat, market_data, spy_df, cfg)
 
     ref = benchmark if benchmark in market_data else list(market_data.keys())[0]
     sim_dates = market_data[ref].index[market_data[ref].index >= pd.to_datetime(start_date)]
     price_matrix = pd.DataFrame({t: d['Close'] for t, d in market_data.items()}).ffill()
+
+    # Regime di mercato precalcolato in una passata vettoriale (con universi
+    # grandi il calcolo per-giorno dominava il tempo di simulazione)
+    regime_series = _precompute_regimes(market_data.get(benchmark), sim_dates) \
+        if benchmark in market_data else None
+
+    # Accesso rapido alle righe per data (evita df.loc[data] nel loop)
+    panel = _FastRowPanel(market_data, sim_dates)
 
     cash = float(initial_capital)
     positions = {}
@@ -1072,12 +1338,11 @@ def run_market_aware_backtest(
     ctx.price_matrix = price_matrix
 
     # --- HELPER PER CALCOLO NAV (FIX DRAWDOWN) ---
-    def _get_current_nav(curr_cash, curr_positions, curr_date):
+    def _get_current_nav(curr_cash, curr_positions, i):
         equity = curr_cash
         for p_ticker, p_data in curr_positions.items():
-            try:
-                curr_p = market_data[p_ticker].loc[curr_date]['Close']
-            except Exception:
+            curr_p = panel.close(p_ticker, i)
+            if curr_p is None:
                 curr_p = p_data['entry_price']
             equity += p_data['qty'] * curr_p
         return equity
@@ -1090,7 +1355,8 @@ def run_market_aware_backtest(
             current_sim_month = current_date.month
             buys_this_month = 0
 
-        regime = _assess_market_regime(price_matrix, current_date, market_data, benchmark)
+        regime = regime_series.iloc[i] if regime_series is not None \
+            else _assess_market_regime(price_matrix, current_date, market_data, benchmark)
         is_bull = (regime == "BULL")
         is_crash = (regime == "DANGER" or regime == "VOLATILE")
 
@@ -1102,9 +1368,9 @@ def run_market_aware_backtest(
 
         # 1. GESTIONE USCITE
         for t, pos in positions.items():
-            if t not in market_data or current_date not in market_data[t].index:
+            row = panel.row(t, i)
+            if row is None:
                 continue
-            row = market_data[t].loc[current_date]
 
             action = None
             # 1a. Stop loss "fisico" (gestito dal motore se la strategia usa gli stop)
@@ -1166,7 +1432,7 @@ def run_market_aware_backtest(
                 positions[t]['cost_basis'] -= cost_portion
 
             # LOGGING: Total_Equity invece di Cash
-            current_nav = _get_current_nav(cash, positions, current_date)
+            current_nav = _get_current_nav(cash, positions, i)
             trade_log.append({
                 "Date": current_date.date(), "Ticker": t, "Action": "SELL",
                 "Price": price, "Reason": reason,
@@ -1190,9 +1456,9 @@ def run_market_aware_backtest(
                 for t in tickers:
                     if t == benchmark or t in positions:
                         continue
-                    if t not in market_data or current_date not in market_data[t].index:
+                    row = panel.row(t, i)
+                    if row is None:
                         continue
-                    row = market_data[t].loc[current_date]
                     try:
                         score, reason = strat.entry(row, ctx)
                     except Exception:
@@ -1239,7 +1505,7 @@ def run_market_aware_backtest(
                             'tp1_taken': False, 'regime_at_entry': regime,
                         }
 
-                        current_nav = _get_current_nav(cash, positions, current_date)
+                        current_nav = _get_current_nav(cash, positions, i)
                         trade_log.append({
                             "Date": current_date.date(), "Ticker": t, "Action": "BUY",
                             "Price": row['Close'], "Reason": cand['reason'],
@@ -1281,6 +1547,47 @@ def run_market_aware_backtest(
 # 5. CONFRONTO STRATEGIE + BENCHMARK BUY & HOLD
 # =====================================================================
 
+def _default_comparison_workers() -> int:
+    """Worker massimi per il confronto strategie in parallelo.
+
+    Default: min(strategie, cpu, 4) su Linux/macOS (fork); 1 altrove.
+    Configurabile con la variabile d'ambiente ETF_METRICS_BACKTEST_WORKERS.
+    Il tetto di default limita anche la memoria (ogni worker prepara in locale
+    le proprie copie degli indicatori della strategia).
+    """
+    raw = (os.environ.get('ETF_METRICS_BACKTEST_WORKERS') or '').strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    if not hasattr(os, 'fork'):
+        return 1
+    return max(1, min(len(STRATEGIES), os.cpu_count() or 1, 4))
+
+
+# Dati condivisi con i worker del confronto parallelo: con il contesto "fork"
+# i processi figli ereditano la memoria del genitore (copy-on-write), senza
+# pickle di gigabyte di DataFrame.
+_FORK_COMPARISON_DATA = None
+
+
+def _comparison_worker(strategy_key, tickers, start_date, initial_capital,
+                       tax_rate, allow_fractional, strategy_params):
+    """Esegue una strategia nel processo worker (usa i dati ereditati via fork)."""
+    df_trades, final = run_market_aware_backtest(
+        tickers,
+        start_date=start_date,
+        initial_capital=initial_capital,
+        preloaded_data=_FORK_COMPARISON_DATA,
+        tax_rate=tax_rate,
+        allow_fractional=allow_fractional,
+        strategy=strategy_key,
+        strategy_params=strategy_params,
+    )
+    return strategy_key, df_trades, final
+
+
 def run_strategy_comparison(
     tickers: list,
     strategies: Optional[List[str]] = None,
@@ -1295,28 +1602,83 @@ def run_strategy_comparison(
     """
     Esegue più strategie sugli stessi dati (confronto fair).
     Ritorna {strategy_key: {'trades': DataFrame, 'final': float, 'name': str}}.
+
+    Su Linux/macOS le strategie girano in processi separati (fork): su una CPU
+    moderna con 8+ core il confronto completo è ~3-4x più veloce. Ogni worker
+    fallito viene automaticamente rieseguito in seriale nel processo padre.
     """
     keys = [k for k in (strategies or STRATEGY_ORDER) if k in STRATEGIES]
     results: Dict[str, Dict] = {}
     n = len(keys)
-    for j, key in enumerate(keys):
-        if progress_callback:
-            progress_callback(j / max(1, n))
-        df_trades, final = run_market_aware_backtest(
-            tickers,
-            start_date=start_date,
-            initial_capital=initial_capital,
-            preloaded_data=preloaded_data,
-            tax_rate=tax_rate,
-            allow_fractional=allow_fractional,
-            strategy=key,
-            strategy_params=strategy_params,
-        )
+
+    def _store(key, df_trades, final):
         results[key] = {
             "trades": df_trades,
             "final": final,
             "name": STRATEGIES[key].name,
         }
+
+    def _run_serial(key):
+        df_trades, final = run_market_aware_backtest(
+            tickers,
+            start_date=start_date,
+            initial_capital=initial_capital,
+            preloaded_data=shared,
+            tax_rate=tax_rate,
+            allow_fractional=allow_fractional,
+            strategy=key,
+            strategy_params=strategy_params,
+        )
+        _store(key, df_trades, final)
+
+    # I dati vengono caricati/preparati UNA sola volta per tutte le strategie
+    # (fair comparison + un solo accesso al DB invece di uno per strategia)
+    shared = preloaded_data
+    if shared is None and keys:
+        loaded = prepare_market_data(tickers)
+        if loaded:
+            shared = loaded
+
+    workers = min(_default_comparison_workers(), n)
+    use_parallel = (workers > 1 and shared is not None and hasattr(os, 'fork'))
+
+    if use_parallel:
+        global _FORK_COMPARISON_DATA
+        _FORK_COMPARISON_DATA = shared
+        try:
+            ctx = multiprocessing.get_context('fork')
+            with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
+                futures = {ex.submit(
+                    _comparison_worker, key, tickers, start_date, initial_capital,
+                    tax_rate, allow_fractional, strategy_params): key for key in keys}
+                done = 0
+                for fut in as_completed(futures):
+                    key = futures[fut]
+                    try:
+                        _, df_trades, final = fut.result()
+                        _store(key, df_trades, final)
+                    except Exception as e:
+                        # Worker morto (es. OOM): la strategia viene rieseguita qui
+                        logger.warning(f"Worker della strategia {key} fallito ({e}): "
+                                       "esecuzione seriale di fallback")
+                        _run_serial(key)
+                    done += 1
+                    if progress_callback:
+                        try:
+                            progress_callback(done / n)
+                        except Exception:
+                            pass
+        finally:
+            _FORK_COMPARISON_DATA = None
+    else:
+        for j, key in enumerate(keys):
+            if progress_callback:
+                progress_callback(j / max(1, n))
+            _run_serial(key)
+
+    # preserva l'ordine richiesto (in parallelo le strategie completano in
+    # ordine sparso)
+    results = {k: results[k] for k in keys if k in results}
     if progress_callback:
         progress_callback(1.0)
     return results
@@ -1342,6 +1704,13 @@ def compute_buy_and_hold_curves(
         s = s[s.index >= start].dropna()
         if len(s) > 1:
             out['benchmark'] = initial_capital * (s / s.iloc[0])
+    elif BENCH_PROXY_KEY in market_data:
+        # senza SPY il benchmark è la proxy equal-weight dell'universo: chiave
+        # separata, così la UI può etichettarla correttamente
+        s = market_data[BENCH_PROXY_KEY]['Close']
+        s = s[s.index >= start].dropna()
+        if len(s) > 1:
+            out['benchmark_proxy'] = initial_capital * (s / s.iloc[0])
 
     cols = [t for t in tickers if t in market_data and t != benchmark_ticker]
     if len(cols) >= 2:

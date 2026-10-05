@@ -26,18 +26,12 @@ UNIVERSE_WHOLE_DB = "📦 Tutto il DB locale"
 @st.cache_data(ttl=60, show_spinner=False)
 def list_db_tickers(min_rows: int = 200) -> List[str]:
     """Ticker presenti nel DB locale con almeno `min_rows` righe di prezzi
-    (storico sufficiente per scanner e backtest)."""
+    (storico sufficiente per scanner e backtest). Funziona con entrambi i
+    backend (SQLite e DuckDB)."""
     try:
-        import sqlite3
-        from etf_metrics.shared.config import MARKET_DATA_DB
-        conn = sqlite3.connect(MARKET_DATA_DB)
-        try:
-            df = pd.read_sql(
-                "SELECT ticker, COUNT(*) AS n FROM prices GROUP BY ticker HAVING n >= ?",
-                conn, params=[min_rows])
-            return sorted(df['ticker'].tolist()) if not df.empty else []
-        finally:
-            conn.close()
+        from etf_metrics.core.data_manager import MarketDataManager
+        dm = MarketDataManager()
+        return dm.get_tickers_with_min_rows(min_rows)
     except Exception:
         return []
 
