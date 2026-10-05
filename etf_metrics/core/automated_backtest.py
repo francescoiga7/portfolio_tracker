@@ -369,43 +369,73 @@ def build_benchmark_proxy(market_data: Dict[str, pd.DataFrame],
                           key: str = BENCH_PROXY_KEY) -> Optional[pd.DataFrame]:
     """Costruisce un benchmark equal-weight dell'universo (fallback senza SPY).
 
-    Ogni titolo è normalizzato a 1 alla propria prima quotazione e le serie
-    vengono mediate: il risultato è un indice "universo" con OHLCV sintetici,
-    utilizzabile per il regime di mercato e come riferimento dell'RS (relative
-    strength). Serve per i DB con soli titoli Xetra: regime e RS restano
-    significativi senza dover scaricare titoli USA.
+    Indice a ribilanciamento giornaliero: ogni giorno la variazione % di ogni
+    titolo (calcolata sulla propria serie di sedute) viene mediata in parti
+    uguali tra i titoli quotati quel giorno e composta in un livello. Così il
+    peso di ogni titolo resta 1/N ogni giorno, indipendentemente da quando è
+    stato quotato e da quanto è salito in passato.
+
+    NOTA: non normalizzare i livelli e mediarli — un indice fatto così pesa
+    ogni titolo in proporzione alla sua performance cumulata storica (paniere
+    sovrappesato sui vincitori) e non è un benchmark equal-weight.
+
+    OHLCV sintetici (per regime ATR/RSI e RS), utilizzabile come riferimento
+    del benchmark quando nel DB non c'è SPY (es. universi Xetra puri).
     """
     frames = [df for t, df in market_data.items()
               if df is not None and not df.empty and t != key]
     if len(frames) < 2:
         return None
 
-    parts, vols = [], []
-    for df in frames:
-        c0 = df['Close'].iloc[0]
-        if not np.isfinite(c0) or c0 <= 0:
-            continue
-        parts.append(df[['Open', 'High', 'Low', 'Close']] / c0)
-        vols.append(df['Volume'].astype(float) if 'Volume' in df.columns
-                    else pd.Series(1.0, index=df.index))
-    if not parts:
-        return None
+    idx = frames[0].index
+    for df in frames[1:]:
+        idx = idx.union(df.index)
 
-    idx = parts[0].index
-    for p in parts[1:]:
-        idx = idx.union(p.index)
+    # Close dell'indice: media equal-weight dei ritorni giornalieri (ogni titolo
+    # pesa 1/N ogni giorno, indipendentemente da performance cumulata passata)
+    crets, orats, hrats, lrats = {}, {}, {}, {}
+    for i, df in enumerate(frames):
+        c = df['Close']
+        r = c.pct_change()
+        crets[i] = r.replace([np.inf, -np.inf], np.nan).reindex(idx)
+        # scostamenti intraday rispetto al PROPRIO close: h >= max(o, 1),
+        # l <= min(o, 1) per titolo -> le medie preservano l'ordine OHLC
+        if {'Open', 'High', 'Low'} <= set(df.columns):
+            cc = c.where(np.isfinite(c) & (c > 0))
+            orats[i] = (df['Open'] / cc).reindex(idx)
+            hrats[i] = (df['High'] / cc).reindex(idx)
+            lrats[i] = (df['Low'] / cc).reindex(idx)
 
-    # media per campo (Open/High/Low/Close) sulle serie disponibili: i titoli
-    # quotati dopo entrano man mano nel paniere, come in un indice reale
-    big = pd.concat({i: p.reindex(idx) for i, p in enumerate(parts)}, axis=1)
-    px = big.T.groupby(level=1).mean().T
-    vol = pd.concat([v.reindex(idx) for v in vols], axis=1).mean(axis=1)
+    mean_cr = pd.DataFrame(crets).mean(axis=1)  # solo i quotati quel giorno
+    close = (1.0 + mean_cr.fillna(0.0)).cumprod()
+
+    def _ratio_mean(d):
+        if not d:
+            return None
+        return pd.DataFrame(d).mean(axis=1)
+
+    o = _ratio_mean(orats)
+    h = _ratio_mean(hrats)
+    l = _ratio_mean(lrats)
+    open_ = close * (o.fillna(1.0) if o is not None else 1.0)
+    high = close * (h.fillna(1.0) if h is not None else 1.0)
+    low = close * (l.fillna(1.0) if l is not None else 1.0)
+
+    if 'Volume' in frames[0].columns:
+        vols = pd.concat(
+            [df['Volume'].astype(float).reindex(idx) for df in frames], axis=1)
+        vol = vols.mean(axis=1)
+    else:
+        vol = pd.Series(1.0, index=idx)
 
     proxy = pd.DataFrame({
-        'Open': px['Open'], 'High': px['High'],
-        'Low': px['Low'], 'Close': px['Close'],
+        'Open': open_, 'High': high, 'Low': low, 'Close': close,
         'Volume': vol,
     })
+    # belt & braces: ordine OHLC garantito anche con set di titoli diversi
+    # tra i campi (NaN indipendenti)
+    proxy['High'] = proxy[['High', 'Open', 'Close']].max(axis=1)
+    proxy['Low'] = proxy[['Low', 'Open', 'Close']].min(axis=1)
     proxy.index.name = 'date'
     return proxy
 

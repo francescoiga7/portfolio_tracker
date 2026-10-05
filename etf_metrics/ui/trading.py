@@ -12,6 +12,8 @@ from etf_metrics.core.automated_backtest import (
     prepare_market_data,
     compute_buy_and_hold_curves,
     align_equity_curves,
+    BENCH_PROXY_KEY,
+    CONFIG,
     STRATEGIES,
     STRATEGY_ORDER,
 )
@@ -93,6 +95,37 @@ def _describe_real_load(market_data, tickers, download_attempted):
     return " ".join(parts)
 
 
+def _offer_spy_benchmark(market_data):
+    """Se il benchmark di riserva è il proxy dell'universo (SPY assente dal DB)
+    lo segnala e offre il download immediato di SPY.
+
+    Il benchmark di confronto DEVE essere l'S&P500: il proxy equal-weight
+    dell'universo è solo un ripiego offline (regime e RS riferiti ai titoli
+    stessi dell'universo, non a un indice di mercato).
+    """
+    bench = CONFIG['SPY_TICKER']
+    if bench in market_data or BENCH_PROXY_KEY not in market_data:
+        return
+    with st.expander("🏁 Benchmark: S&P500 non disponibile (uso il proxy dell'universo)"):
+        st.markdown(
+            "**SPY non è nel DB locale**, quindi il benchmark e il filtro macro di "
+            "regime usano un indice equal-weight dei tuoi ticker (etichetta "
+            "\"Universo (proxy)\"). Per confrontarti con il **vero S&P500** "
+            "scarica SPY una volta: resterà nel DB e verrà usato automaticamente "
+            "(anche per regime e RS).")
+        if st.button(f"📥 Scarica {bench} nel DB (benchmark S&P500)",
+                     key="download_spy_benchmark"):
+            try:
+                from etf_metrics.core.data_updater import update_tickers
+                with st.spinner(f"Download {bench}..."):
+                    update_tickers([bench], period="max")
+                _load_real_data.clear()  # il cache dei dati non contiene SPY
+                st.success(f"{bench} salvato nel DB: ricarico i dati...")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Download di {bench} non riuscito (connessione assente?): {e}")
+
+
 def _load_real_data_for_backtest(tickers, universe_mode, allow_download_ui, start_date_backtest):
     """Carica i dati reali per il backtest (DB locale + aggiornamento delta opzionale).
 
@@ -141,6 +174,7 @@ def _load_real_data_for_backtest(tickers, universe_mode, allow_download_ui, star
         return None
 
     st.caption(_describe_real_load(market_data, tickers, allow_download_ui))
+    _offer_spy_benchmark(market_data)
     return market_data, str(start_date_backtest), tickers
 
 

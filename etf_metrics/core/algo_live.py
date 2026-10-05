@@ -74,9 +74,18 @@ def get_latest_market_data(tickers: List[str], allow_download: bool = True) -> D
     Gli indicatori sono calcolati CON il benchmark come riferimento (come nel
     backtest), così le colonne RS sono disponibili alle strategie.
     """
-    raw = load_recent_market_data(tickers, period="2y",
-                                  allow_download=allow_download, min_rows=30)
     benchmark = CONFIG['SPY_TICKER']
+    # SPY nel DB (anche se non nell'universo): usato come benchmark REALE per
+    # regime e RS. Senza SPY si ricade sul proxy equal-weight dell'universo.
+    load_list = [t for t in tickers if t != benchmark]
+    try:
+        from etf_metrics.core.data_manager import MarketDataManager
+        if benchmark in MarketDataManager().get_all_tickers():
+            load_list.append(benchmark)
+    except Exception:
+        pass
+    raw = load_recent_market_data(load_list, period="2y",
+                                  allow_download=allow_download, min_rows=30)
     data: Dict[str, pd.DataFrame] = {}
     spy_df = raw.get(benchmark)
     if spy_df is not None and not spy_df.empty:
