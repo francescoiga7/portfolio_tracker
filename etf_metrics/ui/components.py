@@ -24,6 +24,16 @@ UNIVERSE_WHOLE_DB = "📦 Tutto il DB locale"
 
 
 @st.cache_data(ttl=60, show_spinner=False)
+def count_db_tickers() -> int:
+    """Numero TOTALE di ticker nel DB locale (senza filtro min_rows)."""
+    try:
+        from etf_metrics.core.data_manager import MarketDataManager
+        return len(MarketDataManager().get_all_tickers())
+    except Exception:
+        return 0
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def list_db_tickers(min_rows: int = 200) -> List[str]:
     """Ticker presenti nel DB locale con almeno `min_rows` righe di prezzi
     (storico sufficiente per scanner e backtest). Funziona con entrambi i
@@ -68,8 +78,14 @@ def render_universe_selector(
     if mode == UNIVERSE_WHOLE_DB:
         tickers = list(db_tickers)
         if tickers:
+            total = count_db_tickers()
+            excluded = max(0, total - len(tickers))
+            extra = (f"; {excluded} su {total} esclusi: storico troppo corto "
+                     f"per gli indicatori (servono ≥ {min_rows} sedute per SMA200/"
+                     "Donchian/momentum)") if excluded else ""
             st.caption(
-                f"📦 {len(tickers)} ticker già nel DB (≥ {min_rows} righe di storico). "
+                f"📦 {len(tickers)} ticker già nel DB (≥ {min_rows} righe di "
+                f"storico{extra}). "
                 "Nessuna lista da scrivere: si usa direttamente ciò che è salvato."
             )
         else:

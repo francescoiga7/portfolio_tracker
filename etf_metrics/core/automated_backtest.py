@@ -701,49 +701,6 @@ class AIMomentumStrategy(BaseStrategy):
 
 
 # ---------------------------------------------------------------------
-# 3b. Dual Momentum (Antonacci) — la strategia "low commissioni"
-# ---------------------------------------------------------------------
-class DualMomentumStrategy(BaseStrategy):
-    key = "dual_momentum"
-    name = "🐢 Dual Momentum (rotazione mensile)"
-    description = """
-**Dual Momentum in stile Antonacci** — la strategia "low commissioni" per eccellenza.
-
-- **Ogni 21 giorni** (rotazione mensile): classifica i ticker per **momentum a 12 mesi**.
-- **Momentum assoluto:** acquista solo se il momentum del ticker è **positivo**
-  (in bear market prolungato resta in cash: è il filtro anti-orma).
-- **Uscita:** quando il momentum torna negativo → vendita e rotazione.
-  Nessun stop loss giornaliero, solo un ampio stop di sicurezza 5x ATR.
-- **Poche operazioni all'anno** (tipicamente 3-8): ideale se le commissioni ti mangiano i profitti.
-"""
-    requires_bull = False
-    min_entry_score = 1
-    defaults = {
-        'MAX_POSITIONS': 2, 'REBALANCE_DAYS': 21, 'ENABLE_MONTHLY_LIMIT': True,
-        'MAX_BUYS_PER_MONTH': 6, 'STOP_LOSS_ATR_MULT': 5.0, 'MOMENTUM_LOOKBACK': 252,
-    }
-
-    def prepare(self, df, spy_df=None, cfg=None):
-        lb = (cfg or {}).get('MOMENTUM_LOOKBACK', 252)
-        df = df.copy()
-        df['MOM_LB'] = df['Close'].pct_change(lb)
-        return df
-
-    def entry(self, row, ctx):
-        mom = row.get('MOM_LB')
-        if mom is None or pd.isna(mom) or mom <= 0:
-            return 0, "Momentum non positivo"
-        lb = ctx.cfg.get('MOMENTUM_LOOKBACK', 252)
-        return mom * 100.0, f"Dual Momentum {lb}gg: {mom:+.1%}"
-
-    def exit_signal(self, pos, row, ctx):
-        mom = row.get('MOM_LB')
-        if mom is not None and pd.notna(mom) and mom < 0:
-            return ("MOMENTUM FLIP", 1.0, row['Close'])
-        return None
-
-
-# ---------------------------------------------------------------------
 # 3c. Bear Market / Regime Switcher
 # ---------------------------------------------------------------------
 class BearMarketStrategy(BaseStrategy):
@@ -964,139 +921,6 @@ class VolumeProfileStrategy(BaseStrategy):
 
 
 # ---------------------------------------------------------------------
-# 3e. Order Flow (approssimato da candele daily)
-# ---------------------------------------------------------------------
-class OrderFlowStrategy(BaseStrategy):
-    key = "orderflow"
-    name = "🌊 Order Flow (CVD & Accumulo)"
-    description = """
-**Order Flow approssimato da candele daily** — stima la pressione compratrice reale.
-
-- **Delta proxy:** `Volume × posizione del close nel range H-L` (CLV in [-1, +1]):
-  close vicino all'alto con volume alto = netto acquista.
-- **CVD** (Cumulative Volume Delta): somma cumulativa del delta, con la sua media 20gg.
-- **Giorni di accumulo:** close nel 40% superiore del range con volume sopra la media.
-- **Acquista** quando: sopra SMA50, CVD > media CVD (accumulo in corso) e
-  **≥ 3 giorni di accumulo** negli ultimi 10, con RS positivo.
-- **Esce** in distribuzione (CVD sotto la media per 3 giorni), a rottura SMA50 o trailing 3x ATR.
-"""
-    min_entry_score = 60
-    defaults = {
-        'MAX_POSITIONS': 3, 'REBALANCE_DAYS': 5, 'ENABLE_MONTHLY_LIMIT': True,
-        'MAX_BUYS_PER_MONTH': 4, 'STOP_LOSS_ATR_MULT': 3.0,
-    }
-
-    def prepare(self, df, spy_df=None, cfg=None):
-        df = df.copy()
-        rng_ = (df['High'] - df['Low'])
-        clv = ((df['Close'] - df['Low']) - (df['High'] - df['Close'])) / rng_.mask(rng_ == 0)
-        df['CLV'] = clv.fillna(0.0)
-
-        df['Vol_SMA20'] = df['Volume'].rolling(20).mean()
-        df['DELTA'] = df['Volume'] * df['CLV']
-        df['CVD'] = df['DELTA'].cumsum()
-        df['CVD_SMA'] = df['CVD'].rolling(20).mean()
-
-        acc = ((df['CLV'] > 0.6) & (df['Volume'] > df['Vol_SMA20'])).astype(int)
-        df['ACC_DAYS'] = acc.rolling(10).sum()
-        cvd_weak = (df['CVD'] < df['CVD_SMA']).astype(int)
-        df['CVD_WEAK_DAYS'] = cvd_weak.rolling(3).sum()
-        return df
-
-    def entry(self, row, ctx):
-        c = row['Close']
-        sma50, cvd, cvd_sma = row.get('SMA50'), row.get('CVD'), row.get('CVD_SMA')
-        acc = row.get('ACC_DAYS')
-        if any(v is None or pd.isna(v) for v in (sma50, cvd, cvd_sma, acc)):
-            return 0, "Dati insufficienti"
-        if c <= sma50:
-            return 0, "Sotto SMA50"
-        if cvd <= cvd_sma:
-            return 0, "CVD sotto la media"
-        if acc < 3:
-            return 0, f"Accumulo insufficiente ({acc:.0f}/10gg)"
-
-        rs = row.get('RS_Score', 0.0)
-        score = 45 + acc * 5.0 + float(np.clip(rs, -10, 15))
-        return score, f"Accumulo {acc:.0f}gg | CVD>SMA | RS {rs:+.1f}"
-
-    def exit_signal(self, pos, row, ctx):
-        weak = row.get('CVD_WEAK_DAYS')
-        sma50 = row.get('SMA50')
-        if weak is not None and pd.notna(weak) and weak >= 3:
-            return ("DISTRIBUZIONE (CVD)", 1.0, row['Close'])
-        if sma50 is not None and pd.notna(sma50) and row['Close'] < sma50:
-            return ("SMA50 ROTTA", 1.0, row['Close'])
-        return None
-
-    def update_position(self, pos, row, ctx):
-        c = row['Close']
-        roi = (c / pos['entry_price']) - 1
-        if roi > 0.05:
-            atr = row.get('ATR')
-            if atr is not None and pd.notna(atr):
-                new_stop = c - atr * ctx.cfg['STOP_LOSS_ATR_MULT']
-                if pos.get('stop_loss') is None or new_stop > pos['stop_loss']:
-                    pos['stop_loss'] = new_stop
-
-
-# ---------------------------------------------------------------------
-# 3f. Mean Reversion (pullback profondo)
-# ---------------------------------------------------------------------
-class MeanReversionStrategy(BaseStrategy):
-    key = "mean_reversion"
-    name = "🎯 Mean Reversion (RSI-2 Pullback)"
-    description = """
-**Mean Reversion** — compra i panic dip dei titoli in trend lungo.
-
-- **Acquista** quando `RSI a 2 giorni < 10` (caduta brusca) MA il titolo resta in
-  trend lungo (`Close > SMA200`): stai comprando il panico, non il declino.
-- **Esce** al ripristino della media: `RSI-2 > 80` o close sopra SMA20.
-- **Difese:** stop ATR 2.5x, time stop 10 giorni (se non recupera, si esce).
-- Buon complemento al trend following: guadagna dove le strategie di trend stanno flat.
-"""
-    min_entry_score = 60
-    defaults = {
-        'MAX_POSITIONS': 3, 'REBALANCE_DAYS': 5, 'ENABLE_MONTHLY_LIMIT': True,
-        'MAX_BUYS_PER_MONTH': 6, 'STOP_LOSS_ATR_MULT': 2.5, 'TIME_STOP_DAYS': 10,
-    }
-
-    def prepare(self, df, spy_df=None, cfg=None):
-        df = df.copy()
-        delta = df['Close'].diff()
-        gain = delta.clip(lower=0).rolling(2).mean()
-        loss = (-delta.clip(upper=0)).rolling(2).mean()
-        rs = gain / loss.mask(loss == 0)
-        df['RSI_2'] = (100 - 100 / (1 + rs)).fillna(50)
-        df['SMA_20'] = df['Close'].rolling(20).mean()
-        return df
-
-    def entry(self, row, ctx):
-        rsi2 = row.get('RSI_2'); sma200 = row.get('SMA200')
-        if rsi2 is None or pd.isna(rsi2) or sma200 is None or pd.isna(sma200):
-            return 0, "Dati insufficienti"
-        if row['Close'] <= sma200:
-            return 0, "Sotto SMA200 (no trend lungo)"
-        if rsi2 >= 10:
-            return 0, f"RSI2 {rsi2:.0f} non abbastanza basso"
-
-        rs = row.get('RS_Score', 0.0)
-        score = 60 + (10 - rsi2) * 1.5 + (10 if pd.notna(rs) and rs > 0 else 0)
-        return score, f"Pullback RSI2 {rsi2:.0f} su trend SMA200"
-
-    def exit_signal(self, pos, row, ctx):
-        rsi2 = row.get('RSI_2'); sma20 = row.get('SMA_20')
-        if rsi2 is not None and pd.notna(rsi2) and rsi2 > 80:
-            return ("RIPRISTINO RSI2", 1.0, row['Close'])
-        if sma20 is not None and pd.notna(sma20) and row['Close'] > sma20:
-            return ("MEDIA RAGGIUNTA (SMA20)", 1.0, row['Close'])
-        days_held = (ctx.current_date - pos['entry_date']).days
-        if days_held >= ctx.cfg['TIME_STOP_DAYS']:
-            return ("TIME STOP", 1.0, row['Close'])
-        return None
-
-
-# ---------------------------------------------------------------------
 # 3g. Turtle / Donchian Breakout
 # ---------------------------------------------------------------------
 class TurtleBreakoutStrategy(BaseStrategy):
@@ -1165,23 +989,148 @@ class TurtleBreakoutStrategy(BaseStrategy):
 
 
 # ---------------------------------------------------------------------
+# 3b. Trend Fusion — il meglio di Turtle Breakout, AI Momentum e Volume Profile
+# ---------------------------------------------------------------------
+class TrendFusionStrategy(BaseStrategy):
+    key = "trend_fusion"
+    name = "🌊 Trend Fusion (Turtle + Bear Switch)"
+    description = """
+**Trend Fusion** — Turtle Trading in regime normale, gestione difensiva in crisi.
+
+- **Regime `BULL` (tartaruga 🐢):** compra quando il close rompe il **massimo
+  degli ultimi 55 giorni** con volume > 1.2x la media e prezzo sopra SMA50
+  (entry Turtle pura). Le posizioni vengono gestite con l'uscita **Donchian
+  LL20**, che lascia correre i trend, e trailing stop 3x ATR dopo il +5%.
+- **Regime `BEAR` (scudo 🐻):** cerca i titoli che **salgono mentre il mercato
+  scende** (momentum 63gg positivo, sopra SMA50, ADX solido): ETF inversi,
+  oro, obbligazioni, titoli difensivi.
+- **Regime `VOLATILE` / `DANGER` / `NEUTRAL`:** nessun nuovo acquisto (cash).
+- **Uscite in crisi (BEAR/VOLATILE/DANGER):** le posizioni in perdita o con
+  poco profitto (< 5%) vengono chiuse subito (flip di regime), i vincitori
+  restano con trailing stop; rottura SMA50 = uscita.
+- **Frequenza:** pochissimi trade di qualità, come lo storico dei Turtle.
+"""
+    min_entry_score = 60
+    requires_bull = False
+    defaults = {
+        'MAX_POSITIONS': 3, 'REBALANCE_DAYS': 5, 'ENABLE_MONTHLY_LIMIT': True,
+        'MAX_BUYS_PER_MONTH': 4, 'STOP_LOSS_ATR_MULT': 3.0,
+        'TIME_STOP_DAYS': 90,
+    }
+
+    def can_buy(self, ctx):
+        # acquisti solo nei due regimi operativi: BULL (turtle) e BEAR (scudo)
+        return ctx.regime in ("BULL", "BEAR")
+
+    def prepare(self, df, spy_df=None, cfg=None):
+        df = df.copy()
+        df['HH_55'] = df['High'].rolling(55).max().shift(1)
+        df['LL_20'] = df['Low'].rolling(20).min().shift(1)
+        vol_sma = df['Volume'].rolling(20).mean()
+        df['Vol_Ratio'] = df['Volume'] / vol_sma.replace(0, np.nan)
+        df['MOM_63'] = df['Close'].pct_change(63)
+        return df
+
+    # ------------------------------------------------------------- ENTRY
+    def entry(self, row, ctx):
+        if ctx.regime == "BULL":
+            return self._entry_turtle(row)
+        if ctx.regime == "BEAR":
+            return self._entry_bear_shield(row)
+        return 0, f"Cash (regime {ctx.regime})"
+
+    def _entry_turtle(self, row):
+        """Entry Turtle pura: breakout Donchian 55 con conferma di volume."""
+        c = row['Close']
+        hh, sma50, vr = row.get('HH_55'), row.get('SMA50'), row.get('Vol_Ratio')
+        if any(v is None or pd.isna(v) for v in (hh, sma50, vr)):
+            return 0, "Dati insufficienti"
+        if c <= sma50:
+            return 0, "Sotto SMA50"
+        if c <= hh:
+            return 0, "Nessun breakout 55gg"
+        if vr < 1.2:
+            return 0, f"Volume debole (x{vr:.1f})"
+        rs = row.get('RS_Score', 0.0)
+        score = 55 + min(35.0, (c / hh - 1) * 300.0) \
+                + float(np.clip(rs, -15, 20)) + min(10.0, (vr - 1.2) * 20.0)
+        return max(0, score), f"TURTLE: breakout 55gg {hh:.2f} | Vol x{vr:.1f} | RS {rs:+.0f}"
+
+    def _entry_bear_shield(self, row):
+        """Entry Bear Shield: chi sale mentre il mercato scende."""
+        c = row['Close']
+        sma50, rs, adx = row.get('SMA50'), row.get('RS_Score', 0.0), row.get('ADX')
+        mom = row.get('MOM_63')
+        if sma50 is None or pd.isna(sma50):
+            return 0, "Dati insufficienti"
+        if adx is not None and pd.notna(adx) and adx < 20:
+            return 0, "Trend debole (ADX)"
+        if c <= sma50:
+            return 0, "Sotto SMA50 (bear)"
+        if mom is None or pd.isna(mom) or mom <= 0:
+            return 0, "Momentum 63gg non positivo"
+        score = 55 + (rs if pd.notna(rs) else 0) * 2 + min(15.0, mom * 100.0)
+        return max(0, score), f"BEAR SHIELD: Mom63 {mom:+.1%} | RS {rs:+.1f}"
+
+    # ------------------------------------------------------------- EXIT
+    def exit_signal(self, pos, row, ctx):
+        c = row['Close']
+        roi = (c / pos['entry_price']) - 1
+        born_in_bear = pos.get('regime_at_entry') == "BEAR"
+
+        if ctx.regime in ("BEAR", "VOLATILE", "DANGER"):
+            # crisi: difesa attiva (Bear Market). Esce subito ciò che NON è
+            # difensivo (aperto in BULL e mai partito); le posizioni scudo
+            # aperte in BEAR restano in posizione anche se il regime sfarfalla
+            # tra BEAR/VOLATILE/DANGER — è il loro terreno.
+            if not born_in_bear and roi < 0.05:
+                return (f"REGIME FLIP ({ctx.regime})", 1.0, c)
+            sma50 = row.get('SMA50')
+            if sma50 is not None and pd.notna(sma50) and c < sma50:
+                return ("SMA50 ROTTA", 1.0, c)
+            return None
+
+        # regime normale: gestione Turtle — l'uscita Donchian lascia correre.
+        # Una posizione scudo che non ha reso nel bear esce per liberare
+        # capitale per i nuovi breakout.
+        if born_in_bear and roi < 0.05:
+            return ("FINE BEAR (flip)", 1.0, c)
+        ll = row.get('LL_20')
+        if ll is not None and pd.notna(ll) and c < ll:
+            return ("DONCHIAN EXIT (LL20)", 1.0, c)
+        days_held = (ctx.current_date - pos['entry_date']).days
+        if days_held >= ctx.cfg['TIME_STOP_DAYS'] and roi < 0.02:
+            return ("TIME STOP", 1.0, c)
+        return None
+
+    def update_position(self, pos, row, ctx):
+        # trailing stop 3x ATR dopo il +5% (comune a Turtle e Bear)
+        c = row['Close']
+        roi = (c / pos['entry_price']) - 1
+        if roi > 0.05:
+            atr = row.get('ATR')
+            if atr is not None and pd.notna(atr):
+                new_stop = c - atr * ctx.cfg['STOP_LOSS_ATR_MULT']
+                if pos.get('stop_loss') is None or new_stop > pos['stop_loss']:
+                    pos['stop_loss'] = new_stop
+
+
+# ---------------------------------------------------------------------
 # REGISTRO STRATEGIE
 # ---------------------------------------------------------------------
 STRATEGIES: Dict[str, BaseStrategy] = {
     s.key: s for s in [
         AIMomentumStrategy(),
-        DualMomentumStrategy(),
+        TrendFusionStrategy(),
         BearMarketStrategy(),
         VolumeProfileStrategy(),
-        OrderFlowStrategy(),
-        MeanReversionStrategy(),
         TurtleBreakoutStrategy(),
     ]
 }
 
 STRATEGY_ORDER: List[str] = [
-    "ai_momentum", "dual_momentum", "bear_market",
-    "volume_profile", "orderflow", "mean_reversion", "turtle_breakout",
+    "ai_momentum", "trend_fusion", "bear_market",
+    "volume_profile", "turtle_breakout",
 ]
 
 

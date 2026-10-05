@@ -16,13 +16,11 @@ Questa è un'applicazione web completa, costruita con Streamlit, che offre una s
     -   Impostazione della frequenza di ribilanciamento
     -   Confronto con portafogli modello (es. 60/40, All-Weather)
 -   **Screener Tattico PAC**: Scopri ETP (Exchange Traded Products) con potenziale di breakout quotati sulle principali borse europee, basato su un approccio multi-fattore.
--   **Trading & Backtest**: Suite di **7 strategie algoritmiche** con l'obiettivo di battere il S&P500, con scanner di segnali, backtest singolo e confronto multi-strategia:
+-   **Trading & Backtest**: Suite di **5 strategie algoritmiche** con l'obiettivo di battere il S&P500, con scanner di segnali, backtest singolo e confronto multi-strategia:
     - **🧠 AI Enhanced Momentum** (strategia originale): filtro macro, ranking AI Score, stop ATR e take profit parziale
-    - **🐢 Dual Momentum**: rotazione mensile sui migliori momentum (poche operazioni, ideale per le commissioni)
+    - **🌊 Trend Fusion**: fusione dei tre algoritmi migliori del confronto storico — entry in confluenza (breakout Donchian 55 + Value Area High + volume ≥ 1.5x + ADX/RS), TP parziale con lock a breakeven, uscita Donchian LL20 che lascia correre il trend
     - **🐻 Bear Market Regime Switcher**: compra i forti in bull, cerca inversi/difensivi in bear, cash nei regimi di crisi
     - **📊 Volume Profile**: breakout dal Value Area con conferma di volume (POC/VAH/VAL rolling)
-    - **🌊 Order Flow**: pressione compratrice stimata dalle candele daily (CLV, Delta, CVD, giorni di accumulo)
-    - **🎯 Mean Reversion**: pullback RSI-2 solo su titoli in trend lungo (SMA200)
     - **🐢 Turtle Breakout**: breakout Donchian 55/20 in stile Turtle Trading
     - **Dati fake**: 5 scenari di mercato sintetici (bull, bear, crash, laterale, misto) per simulare senza connessione a Yahoo Finance, con universo di archetipi (tech, oro, obbligazioni, ETF inverso, ...)
     - Report con KPI commissioni (totale, operazioni/anno, impatto sul capitale) e confronto con S&P500 Buy & Hold
@@ -113,7 +111,7 @@ python3 scripts/simulate_strategies.py
 python3 scripts/simulate_strategies.py --scenario bear_market --seeds 1 7 42
 
 # Solo due strategie, broker costoso (5€/operazione)
-python3 scripts/simulate_strategies.py --strategies dual_momentum turtle_breakout --commission 5
+python3 scripts/simulate_strategies.py --strategies turtle_breakout trend_fusion --commission 5
 ```
 
 Stessa cosa dall'interfaccia: **Trading → Automated Backtest / Confronto Strategie → Fonte Dati: Dati simulati (Fake)**.
@@ -186,6 +184,20 @@ download sequenziale, a cui si aggiunge l'azzeramento dei re-download dei ticker
 > sovrascrivibile con la variabile d'ambiente `ETF_METRICS_DB=/percorso/test.db`
 > per eseguire simulazioni e test senza toccare il database di produzione.
 
+## 🏁 Benchmark di confronto: S&P500
+
+Il benchmark di riferimento del Trading (curva Buy & Hold, filtro macro di
+regime, RS dei titoli) è **SPY**, l'ETF sull'S&P500. `prepare_market_data` lo
+**aggiunge automaticamente** all'universo scaricato: la prima volta che esegui
+un backtest con l'aggiornamento da Yahoo attivo, SPY viene scaricato e salvato
+nel DB — da lì in poi resta disponibile anche offline.
+
+Se SPY non è nel DB (es. run offline con DB appena creato) l'app usa come
+riparo un **indice equal-weight dell'universo** (etichetta "Universo (proxy)"
+nelle curve) e la pagina Trading lo segnala con un pulsante per scaricare SPY
+subito. Il proxy è un ripiego: per confrontare le performance con l'S&P500
+tienilo nel DB.
+
 ## ⚡ Performance del motore di backtest
 
 Il motore di `automated_backtest.py` è ottimizzato per universi grandi
@@ -206,7 +218,7 @@ Il motore di `automated_backtest.py` è ottimizzato per universi grandi
   `ETF_METRICS_PREPARED_CACHE_ROWS` (default 6M righe)
 
 Risultato su universo sintetico da 1.300 ticker / 4M di righe (i9, 10 anni di
-simulazione): **7 strategie in ~67s** invece di ~10 minuti; letture dal DB
+simulazione): **tutte le strategie in ~67s** invece di ~10 minuti; letture dal DB
 **~4x più veloci** con DuckDB rispetto a SQLite. Tutti i risultati numerici
 sono **identici** al motore originale (verificato da `test_determinism.py`).
 

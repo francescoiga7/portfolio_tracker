@@ -320,7 +320,7 @@ def render_trading_ui():
 
     with st.expander("🧠 Logica Operativa"):
         st.markdown("""
-        Suite di **7 strategie algoritmiche** testabili in backtest sui **dati reali del DB
+        Suite di **5 strategie algoritmiche** testabili in backtest sui **dati reali del DB
         locale**, con l'obiettivo di **battere il S&P500** restando in poche posizioni e
         facendo **pochissime operazioni** (le commissioni non devono mangiarsi i profitti).
 

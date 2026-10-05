@@ -148,6 +148,10 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
         (nuovo_stato, messaggi) — i messaggi con 🔴/🟢 sono operazioni da eseguire.
     """
     strat_key = strategy or state.get('strategy') or DEFAULT_STRATEGY
+    if strat_key not in STRATEGIES:
+        # strategia rimossa (es. dual_momentum/mean_reversion/orderflow cancellate):
+        # ricade su quella di default senza crashare
+        strat_key = DEFAULT_STRATEGY
     state['strategy'] = strat_key
     strat = get_strategy(strat_key)
 
