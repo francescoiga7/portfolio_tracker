@@ -12,16 +12,24 @@ logger = logging.getLogger(__name__)
 PORTFOLIO_FILE = "saved_portfolio.json"
 ALGO_STATE_FILE = "live_algo_portfolio.json"
 
+# Directory di default dello store Parquet dei prezzi (partizioni mensili)
+PARQUET_STORE_DIR = "market_data_parquet"
+
 
 def resolve_market_db_path() -> str:
-    """Percorso del DB dei prezzi, risolto a RUNTIME (non a import).
+    """Percorso dello store dei prezzi, risolto a RUNTIME (non a import).
 
     Precedenza:
-    1. variabile d'ambiente ETF_METRICS_DB (scelta esplicita)
-    2. market_data.duckdb, se esiste e duckdb è installato (backend analitico,
-       10-50x più veloce sulle letture: viene preferito appena disponibile,
-       es. subito dopo la migrazione dalla pagina 📥 Gestione Dati)
-    3. market_data.db (SQLite, legacy)
+    1. variabile d'ambiente ETF_METRICS_DB (scelta esplicita: directory
+       Parquet oppure file .db SQLite legacy)
+    2. market_data_parquet/, se esiste (backend Parquet: è il backend di
+       default, formato colonnare aperto con partizioni mensili)
+    3. market_data.duckdb, se esiste (legacy: convertito automaticamente
+       in Parquet al primo uso)
+    4. market_data.db (SQLite, legacy: usato solo se è l'unico DB presente
+       e lo store Parquet non è ancora stato creato)
+    5. market_data_parquet nuovo (installazioni da zero: il Gestore Dati
+       crea e popola direttamente lo store Parquet)
 
     La risoluzione a runtime permette il cambio di backend senza riavviare
     l'app (basta un refresh della pagina Streamlit).
@@ -29,18 +37,17 @@ def resolve_market_db_path() -> str:
     explicit = os.environ.get("ETF_METRICS_DB")
     if explicit:
         return explicit
+    if os.path.isdir(PARQUET_STORE_DIR):
+        return PARQUET_STORE_DIR
     if os.path.exists("market_data.duckdb"):
-        try:
-            import duckdb  # noqa: F401
-            return "market_data.duckdb"
-        except Exception:
-            logger.warning("Trovato market_data.duckdb ma il modulo 'duckdb' non è "
-                           "installato: si usa il DB SQLite. (pip install duckdb)")
-    return "market_data.db"
+        return "market_data.duckdb"
+    if os.path.exists("market_data.db"):
+        return "market_data.db"
+    return PARQUET_STORE_DIR
 
 
-# Percorso del DB dei prezzi (compatibilità: usare resolve_market_db_path()
-# per leggere il valore aggiornato, es. dopo una migrazione a DuckDB)
+# Percorso dello store dei prezzi (compatibilità: usare resolve_market_db_path()
+# per leggere il valore aggiornato, es. dopo una migrazione a Parquet)
 MARKET_DATA_DB = resolve_market_db_path()
 
 # Preferenze per i suffissi dei ticker Yahoo

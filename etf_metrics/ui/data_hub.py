@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""UI: Gestione Dati di Mercato (download incrementale nel DB SQLite).
+"""UI: Gestione Dati di Mercato (download incrementale nello store Parquet).
 
 Scarica una sola volta lo storico dei ticker richiesti; ai giri successivi
 aggiorna SOLO il delta (le righe successive all'ultima data salvata).
 """
+import os
+
 import pandas as pd
 import streamlit as st
 
@@ -93,6 +95,40 @@ def _run_update(tickers: list, period: str, force_full: bool, skip_updated_today
     _render_report(report)
 
 
+def _render_migrate_to_parquet(dm):
+    """Pulsante di migrazione dello storage SQLite legacy → Parquet."""
+    with st.expander("🚀 Migra lo storage a Parquet (partizioni mensili)",
+                     expanded=False):
+        st.markdown(
+            "Il DB SQLite legacy può essere convertito nello store **Parquet** "
+            "partizionato per mese: formato colonnare aperto, letture più veloci "
+            "e aggiornamenti incrementali che riscrivono solo i mesi coinvolti. "
+            "Il file `.db` **non viene modificato**: resta come backup, ma l'app "
+            "userà da subito il nuovo store `market_data_parquet/`."
+        )
+        if os.environ.get("ETF_METRICS_DB"):
+            st.warning(
+                "La variabile d'ambiente ETF_METRICS_DB è impostata e continua a "
+                "puntare al DB SQLite: rimuovila (o puntala alla directory "
+                "Parquet) dopo la migrazione, altrimenti l'app continuerà a usare "
+                "il vecchio backend."
+            )
+        if st.button("🚀 Migra a Parquet", key="dh_migrate_parquet"):
+            from etf_metrics.core.store_migration import migrate_sqlite_to_parquet
+            try:
+                with st.spinner("Migrazione in corso…"):
+                    report = migrate_sqlite_to_parquet(dm.db_path)
+                st.success(
+                    f"Migrazione completata in {report['elapsed_sec']:.1f}s: "
+                    f"{report['price_rows']:,} righe di prezzi, "
+                    f"{report['tickers']} ticker, {report['months']} mesi → "
+                    f"`{report['dest']}`"
+                )
+                st.rerun()
+            except Exception as e:
+                st.error(f"Migrazione non riuscita: {e}")
+
+
 def render_data_hub_ui():
     st.title("📥 Gestione Dati di Mercato")
     st.markdown(
@@ -113,11 +149,15 @@ def render_data_hub_ui():
   riscaricati; puoi ispezionarli e resettarli in fondo alla pagina.
 - **Rate limit Yahoo (429)**: il download si sospende per ~10 minuti invece di
   martellare il server; i dati già scaricati vengono comunque salvati.
-- Il DB è un unico file (**DuckDB** di default, `market_data.duckdb`; percorso
-  configurabile con la variabile d'ambiente `ETF_METRICS_DB`). DuckDB è un motore
-  **colonnare embedded** (niente server, come SQLite) ma 10-50x più veloce in
-  lettura: fondamentale con tutto Xetra e milioni di righe nel backtest.
-  Un eventuale vecchio `market_data.db` SQLite resta dove sta, invariato.
+- Il DB è una directory di file **Parquet partizionati per mese**
+  (`market_data_parquet/`, default; percorso configurabile con la variabile
+  d'ambiente `ETF_METRICS_DB`). Parquet è un formato **colonnare aperto**:
+  letture veloci con proiezione delle colonne e pruning dei row-group, e
+  aggiornamenti incrementali economici — ogni upsert riscrive solo le
+  partizioni dei mesi coinvolti, senza mai toccare lo storico. Un eventuale
+  vecchio `market_data.db` SQLite resta dove sta, invariato (ed è migrabile
+  con il pulsante qui sotto); un vecchio `market_data.duckdb` viene convertito
+  automaticamente al primo uso.
             """
         )
 
@@ -132,7 +172,16 @@ def render_data_hub_ui():
     c3.metric("Ultima sincronizzazione", str(stats['last_sync'] or "—"))
     c4.metric("Dimensione DB", f"{stats['db_mb']:.1f} MB")
     c5.metric("Cache negativa", stats['failed'])
-    c6.metric("Backend", "🦆 DuckDB" if stats.get('backend') == 'duckdb' else "SQLite")
+    c6.metric("Backend", "🧊 Parquet" if stats.get('backend') == 'parquet' else "SQLite")
+
+    if stats.get('backend') == 'parquet':
+        st.caption(
+            f"🧊 Store Parquet in `{stats['path']}` — "
+            f"{stats.get('partitions') or 0} partizioni mensili "
+            "(`prices/month=YYYY-MM/`)"
+        )
+    else:
+        _render_migrate_to_parquet(dm)
 
     st.divider()
 

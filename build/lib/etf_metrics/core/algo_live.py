@@ -21,11 +21,14 @@ from etf_metrics.core.automated_backtest import (
     CONFIG,
     STRATEGIES,
     STRATEGY_ORDER,
+    BENCH_PROXY_KEY,
     _MarketCtx,
     _assess_market_regime,
+    build_benchmark_proxy,
     calculate_advanced_metrics_vectorized,
     check_correlation_strict,
     get_strategy,
+    load_recent_market_data,
 )
 from etf_metrics.shared.config import ALGO_STATE_FILE
 
@@ -71,11 +74,18 @@ def get_latest_market_data(tickers: List[str], allow_download: bool = True) -> D
     Gli indicatori sono calcolati CON il benchmark come riferimento (come nel
     backtest), così le colonne RS sono disponibili alle strategie.
     """
-    from etf_metrics.core.automated_backtest import (
-        load_recent_market_data, build_benchmark_proxy, BENCH_PROXY_KEY)
-    raw = load_recent_market_data(tickers, period="2y",
-                                  allow_download=allow_download, min_rows=30)
     benchmark = CONFIG['SPY_TICKER']
+    # SPY nel DB (anche se non nell'universo): usato come benchmark REALE per
+    # regime e RS. Senza SPY si ricade sul proxy equal-weight dell'universo.
+    load_list = [t for t in tickers if t != benchmark]
+    try:
+        from etf_metrics.core.data_manager import MarketDataManager
+        if benchmark in MarketDataManager().get_all_tickers():
+            load_list.append(benchmark)
+    except Exception:
+        pass
+    raw = load_recent_market_data(load_list, period="2y",
+                                  allow_download=allow_download, min_rows=30)
     data: Dict[str, pd.DataFrame] = {}
     spy_df = raw.get(benchmark)
     if spy_df is not None and not spy_df.empty:
@@ -86,7 +96,9 @@ def get_latest_market_data(tickers: List[str], allow_download: bool = True) -> D
         proxy = build_benchmark_proxy(raw)
         if proxy is not None:
             data[BENCH_PROXY_KEY] = calculate_advanced_metrics_vectorized(proxy)
-    bench_ref = data.get(benchmark) or data.get(BENCH_PROXY_KEY)
+    bench_ref = data.get(benchmark)
+    if bench_ref is None:
+        bench_ref = data.get(BENCH_PROXY_KEY)
     for t, df in raw.items():
         if t in (benchmark, BENCH_PROXY_KEY):
             continue
@@ -136,6 +148,10 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
         (nuovo_stato, messaggi) — i messaggi con 🔴/🟢 sono operazioni da eseguire.
     """
     strat_key = strategy or state.get('strategy') or DEFAULT_STRATEGY
+    if strat_key not in STRATEGIES:
+        # strategia rimossa (es. dual_momentum/mean_reversion/orderflow cancellate):
+        # ricade su quella di default senza crashare
+        strat_key = DEFAULT_STRATEGY
     state['strategy'] = strat_key
     strat = get_strategy(strat_key)
 

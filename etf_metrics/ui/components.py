@@ -37,7 +37,7 @@ def count_db_tickers() -> int:
 def list_db_tickers(min_rows: int = 200) -> List[str]:
     """Ticker presenti nel DB locale con almeno `min_rows` righe di prezzi
     (storico sufficiente per scanner e backtest). Funziona con entrambi i
-    backend (SQLite e DuckDB)."""
+    backend (SQLite e Parquet)."""
     try:
         from etf_metrics.core.data_manager import MarketDataManager
         dm = MarketDataManager()

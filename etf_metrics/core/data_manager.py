@@ -1,71 +1,96 @@
 import sqlite3
 import pandas as pd
-import numpy as np
 from datetime import date, timedelta
 from typing import Optional, Dict, List, Tuple
 import logging
 import os
 import threading
 
-from etf_metrics.shared.config import FAILED_TICKER_RETRY_DAYS, resolve_market_db_path
+from etf_metrics.shared.config import (
+    FAILED_TICKER_RETRY_DAYS,
+    PARQUET_STORE_DIR,
+    resolve_market_db_path,
+)
+from etf_metrics.core.parquet_store import ParquetStore
 
 logger = logging.getLogger(__name__)
 
 # Numero massimo di parametri per query SQL (compatibilità con SQLite vecchi, limite 999)
 _SQL_CHUNK_SIZE = 500
 
-# Lock globale per le scritture DuckDB: le connessioni allo stesso file sono
-# coordinate dall'engine, ma le transazioni di scrittura vengono serializzate
-# esplicitamente (l'app è multithread con Streamlit).
-_DUCK_WRITE_LOCK = threading.Lock()
-
-
-def _duckdb_available() -> bool:
-    try:
-        import duckdb  # noqa: F401
-        return True
-    except Exception:
-        return False
+# Serializza la conversione one-shot del file DuckDB legacy (l'app è multithread)
+_CONVERT_LOCK = threading.Lock()
 
 
 class MarketDataManager:
-    """Gestore del DB dei prezzi con doppio backend: SQLite (legacy) o DuckDB.
+    """Gestore del DB dei prezzi con doppio backend: Parquet (default) o SQLite (legacy).
 
-    Il backend è scelto dal percorso del DB (estensione `.duckdb`) oppure, con
-    il percorso di default, dal file presente su disco. L'API pubblica è
-    identica per entrambi i backend.
+    Il backend è scelto dal percorso (estensione `.db`/`.sqlite` = SQLite,
+    directory o altro = Parquet). Un file `.duckdb` legacy viene convertito
+    automaticamente allo store Parquet al primo uso (e rinominato in
+    `.pre-parquet.bak`). L'API pubblica è identica per entrambi i backend.
 
-    Perché DuckDB: è un motore colonnare embedded che sulle letture analitiche
-    (milioni di righe OHLCV, es. tutto Xetra) è 10-50x più veloce di SQLite e
-    restituisce DataFrame pandas in modo nativo, senza la conversione riga per
-    riga di `pd.read_sql`. Il Gestore Dati (pagina 📥) scarica direttamente
-    qui; il vecchio `market_data.db` SQLite resta al suo posto, invariato,
-    e resta usabile passandone il percorso esplicitamente.
+    Perché Parquet partizionato per mese: è un formato colonnare aperto che
+    pyarrow legge con proiezione delle colonne e pruning dei row-group (decisivo
+    con milioni di righe OHLCV, es. tutto Xetra), e gli upsert incrementali
+    riscrivono SOLO le partizioni dei mesi coinvolti: lo storico passato non
+    viene mai toccato. Il Gestore Dati (pagina 📥) scarica direttamente qui; il
+    vecchio `market_data.db` SQLite resta al suo posto, invariato, e resta
+    usabile passandone il percorso esplicitamente (o migrandolo con il
+    pulsante "🚀 Migra a Parquet" della UI).
     """
 
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
             db_path = resolve_market_db_path()
+        db_path = str(db_path)
+
+        if db_path.lower().endswith('.duckdb'):
+            # Legacy DuckDB: conversione one-shot allo store Parquet
+            db_path = self._convert_legacy_duckdb(db_path)
+
         self.db_path = db_path
-        if str(db_path).lower().endswith('.duckdb'):
-            if not _duckdb_available():
-                raise RuntimeError(
-                    "Il DB dei prezzi è DuckDB ma il modulo 'duckdb' non è installato "
-                    "(pip install duckdb). In alternativa rinomini/rimuova il file "
-                    ".duckdb per tornare al DB SQLite.")
-            self.backend = 'duckdb'
-        else:
+        if db_path.lower().endswith(('.db', '.sqlite', '.sqlite3')) \
+                or os.path.isfile(db_path):
             self.backend = 'sqlite'
+        else:
+            self.backend = 'parquet'
+            self._store = ParquetStore(db_path)
         self._init_db()
 
+    def _convert_legacy_duckdb(self, db_path: str) -> str:
+        """Converte un DB DuckDB legacy nello store Parquet (one-shot) e ritorna
+        il percorso dello store. Al termine il file `.duckdb` viene rinominato
+        in `<nome>.duckdb.pre-parquet.bak` (i dati originali restano intatti)."""
+        if not os.path.exists(db_path):
+            raise RuntimeError(
+                "Il percorso del DB dei prezzi punta a un file DuckDB legacy che "
+                "non esiste. Il backend DuckDB è stato sostituito da Parquet: punti "
+                "la variabile d'ambiente ETF_METRICS_DB a una directory Parquet "
+                "(o a un file .db SQLite), oppure rimuovila per usare il default.")
+        from etf_metrics.core.store_migration import migrate_duckdb_to_parquet
+        with _CONVERT_LOCK:
+            dest = os.path.join(os.path.dirname(os.path.abspath(db_path)),
+                                PARQUET_STORE_DIR)
+            report = migrate_duckdb_to_parquet(db_path, dest)
+            backup = db_path + '.pre-parquet.bak'
+            try:
+                if os.path.exists(backup):
+                    os.remove(backup)
+                os.rename(db_path, backup)
+            except OSError as e:
+                logger.warning(
+                    f"Impossibile rinominare {db_path} in {backup}: {e}")
+            logger.info(
+                f"DB DuckDB legacy convertito in Parquet ({report['price_rows']:,} "
+                f"righe, {report['tickers']} ticker) → {dest}")
+            return dest
+
     # ------------------------------------------------------------------
-    # Connessioni / primitive
+    # Connessioni / primitive (backend SQLite legacy)
     # ------------------------------------------------------------------
 
     def _get_conn(self):
-        if self.backend == 'duckdb':
-            import duckdb
-            return duckdb.connect(self.db_path)
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         # Ottimizzazione commit: con WAL, synchronous=NORMAL è sicuro e molto più veloce
         try:
@@ -75,17 +100,15 @@ class MarketDataManager:
         return conn
 
     def _query_df(self, query: str, params: Optional[list] = None) -> pd.DataFrame:
-        """SELECT -> DataFrame (nativo per DuckDB, pd.read_sql per SQLite)."""
+        """SELECT SQLite -> DataFrame."""
         conn = self._get_conn()
         try:
-            if self.backend == 'duckdb':
-                return conn.execute(query, params or []).df()
             return pd.read_sql(query, conn, params=params)
         finally:
             conn.close()
 
     def _query_rows(self, query: str, params: Optional[list] = None) -> list:
-        """SELECT -> lista di tuple."""
+        """SELECT SQLite -> lista di tuple."""
         conn = self._get_conn()
         try:
             return conn.execute(query, params or []).fetchall()
@@ -97,29 +120,10 @@ class MarketDataManager:
     # ------------------------------------------------------------------
 
     def _init_db(self):
-        """Inizializza le tabelle se non esistono (schema identico per backend)."""
-        if self.backend == 'duckdb':
-            self._init_db_duckdb()
-        else:
+        """Inizializza lo storage se non esiste (schema identico per backend)."""
+        if self.backend == 'sqlite':
             self._init_db_sqlite()
-
-    def _init_db_duckdb(self):
-        import duckdb
-        with _DUCK_WRITE_LOCK:
-            conn = duckdb.connect(self.db_path)
-            try:
-                conn.execute('''CREATE TABLE IF NOT EXISTS updates (
-                    ticker VARCHAR PRIMARY KEY, name VARCHAR, last_updated DATE)''')
-                conn.execute('''CREATE TABLE IF NOT EXISTS prices (
-                    date TIMESTAMP, ticker VARCHAR, open DOUBLE, high DOUBLE,
-                    low DOUBLE, close DOUBLE, volume DOUBLE,
-                    PRIMARY KEY (ticker, date))''')
-                conn.execute('''CREATE TABLE IF NOT EXISTS failed_tickers (
-                    ticker VARCHAR PRIMARY KEY, reason VARCHAR, first_failed DATE,
-                    last_failed DATE, attempts INTEGER DEFAULT 1)''')
-                conn.commit()
-            finally:
-                conn.close()
+        # Parquet: le directory dello store vengono create da ParquetStore.__init__
 
     def _init_db_sqlite(self):
         conn = self._get_conn()
@@ -161,7 +165,7 @@ class MarketDataManager:
             )
         ''')
 
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_ticker ON prices (ticker)')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ticker ON prices (ticker)")
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS failed_tickers (
@@ -185,17 +189,22 @@ class MarketDataManager:
         if not tickers: return []
 
         today = date.today().isoformat()
-        date_eq = "last_updated = CAST(? AS DATE)" if self.backend == 'duckdb' else "last_updated = ?"
         updated_set = set()
         try:
-            for i in range(0, len(tickers), _SQL_CHUNK_SIZE):
-                chunk = tickers[i:i + _SQL_CHUNK_SIZE]
-                placeholders = ','.join(['?'] * len(chunk))
-                query = (f"SELECT ticker FROM updates WHERE {date_eq} "
-                         f"AND ticker IN ({placeholders})")
-                updated_df = self._query_df(query, [today] + chunk)
-                if not updated_df.empty:
-                    updated_set.update(updated_df['ticker'].values)
+            if self.backend == 'parquet':
+                updates = self._store.read_updates()
+                if not updates.empty:
+                    updated_set = set(
+                        updates.loc[updates['last_updated'] == today, 'ticker'])
+            else:
+                for i in range(0, len(tickers), _SQL_CHUNK_SIZE):
+                    chunk = tickers[i:i + _SQL_CHUNK_SIZE]
+                    placeholders = ','.join(['?'] * len(chunk))
+                    query = (f"SELECT ticker FROM updates WHERE last_updated = ? "
+                             f"AND ticker IN ({placeholders})")
+                    updated_df = self._query_df(query, [today] + chunk)
+                    if not updated_df.empty:
+                        updated_set.update(updated_df['ticker'].values)
         except Exception:
             updated_set = set()
 
@@ -213,7 +222,8 @@ class MarketDataManager:
         """Normalizza un frame OHLCV (output yfinance) nello schema della tabella prices:
         colonne [date, ticker, open, high, low, close, volume], date come stringa ISO
         'YYYY-MM-DD HH:MM:SS' (stesso formato scritto da to_sql: serve per far
-        combaciare la PRIMARY KEY (ticker, date) negli upsert incrementali)."""
+        combaciare la PRIMARY KEY (ticker, date) negli upsert incrementali SQLite;
+        il backend Parquet riconverte in datetime prima di scrivere)."""
         if df is None or df.empty:
             return None
 
@@ -247,29 +257,23 @@ class MarketDataManager:
         df_to_save = df_to_save.drop_duplicates(subset=['date']).sort_values('date')
         return df_to_save
 
-    def _upsert_updates(self, conn, ticker: str, asset_name: Optional[str], today: str):
-        """Upsert della riga del ticker nella tabella updates.
+    @staticmethod
+    def _frames_to_prices_df(frames: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """Concatena i frame normalizzati in un unico DataFrame prezzi con
+        date datetime64 (input del backend Parquet)."""
+        return pd.concat(
+            [f.assign(date=pd.to_datetime(f['date'])) for f in frames.values()],
+            ignore_index=True)
 
-        Nota SQL: SQLite non ha il tipo DATE (CAST(? AS DATE) troncherebbe la
-        stringa ISO a intero!), quindi il parametro viene passato tale e quale;
-        DuckDB invece esige il cast esplicito verso DATE.
-        """
-        if self.backend == 'duckdb':
-            conn.execute("""
-                INSERT INTO updates (ticker, name, last_updated)
-                VALUES (?, ?, CAST(? AS DATE))
-                ON CONFLICT(ticker) DO UPDATE SET
-                    last_updated=excluded.last_updated,
-                    name=COALESCE(excluded.name, updates.name)
-            """, (ticker, asset_name, today))
-        else:
-            conn.execute("""
-                INSERT INTO updates (ticker, name, last_updated)
-                VALUES (?, ?, ?)
-                ON CONFLICT(ticker) DO UPDATE SET
-                    last_updated=excluded.last_updated,
-                    name=COALESCE(excluded.name, updates.name)
-            """, (ticker, asset_name, today))
+    def _upsert_updates(self, conn, ticker: str, asset_name: Optional[str], today: str):
+        """Upsert della riga del ticker nella tabella updates (backend SQLite)."""
+        conn.execute("""
+            INSERT INTO updates (ticker, name, last_updated)
+            VALUES (?, ?, ?)
+            ON CONFLICT(ticker) DO UPDATE SET
+                last_updated=excluded.last_updated,
+                name=COALESCE(excluded.name, updates.name)
+        """, (ticker, asset_name, today))
 
     def save_bulk_data(self, data_dict: dict, names_dict: dict = None):
         """
@@ -283,42 +287,35 @@ class MarketDataManager:
         today = date.today().isoformat()
         if names_dict is None: names_dict = {}
 
-        if self.backend == 'duckdb':
-            with _DUCK_WRITE_LOCK:
-                conn = self._get_conn()
-                try:
-                    for ticker, df in data_dict.items():
-                        df_to_save = self._normalize_ohlcv_frame(ticker, df)
-                        if df_to_save is None or df_to_save.empty:
-                            continue
-                        conn.execute("DELETE FROM prices WHERE ticker = ?", [ticker])
-                        conn.register("_bulk", df_to_save)
-                        conn.execute(
-                            "INSERT INTO prices SELECT CAST(date AS TIMESTAMP), ticker, "
-                            "open, high, low, close, volume FROM _bulk")
-                        conn.unregister("_bulk")
-                        conn.execute("DELETE FROM failed_tickers WHERE ticker = ?", [ticker])
-                        self._upsert_updates(conn, ticker, names_dict.get(ticker), today)
-                    conn.commit()
-                    logger.info(f"Salvati {len(data_dict)} ticker nel database (DuckDB).")
-                except Exception as e:
-                    conn.rollback()
-                    logger.error(f"Errore salvataggio DB: {e}")
-                finally:
-                    conn.close()
+        frames = {}
+        for ticker, df in data_dict.items():
+            norm = self._normalize_ohlcv_frame(ticker, df)
+            if norm is not None and not norm.empty:
+                frames[ticker] = norm
+        if not frames:
+            return
+
+        if self.backend == 'parquet':
+            try:
+                new_df = self._frames_to_prices_df(frames)
+                with self._store.write_lock:
+                    self._store.replace_prices(new_df)
+                    self._store.remove_failed(list(frames.keys()))
+                    self._store.upsert_updates(
+                        {t: (names_dict.get(t), today) for t in frames})
+                logger.info(f"Salvati {len(frames)} ticker nello store Parquet "
+                            f"({len(new_df):,} righe).")
+            except Exception as e:
+                logger.error(f"Errore salvataggio store Parquet: {e}")
             return
 
         # --- SQLite (percorso originale) ---
         conn = self._get_conn()
         try:
-            for ticker, df in data_dict.items():
-                df_to_save = self._normalize_ohlcv_frame(ticker, df)
-                if df_to_save is None or df_to_save.empty:
-                    continue
-
+            for ticker, df in frames.items():
                 # Rimuovi vecchi prezzi per questo ticker per evitare duplicati sporchi
                 conn.execute("DELETE FROM prices WHERE ticker = ?", (ticker,))
-                df_to_save.to_sql('prices', conn, if_exists='append', index=False)
+                df.to_sql('prices', conn, if_exists='append', index=False)
 
                 # Se un ticker precedentemente fallito ora ha dati, toglierlo dalla blacklist
                 conn.execute("DELETE FROM failed_tickers WHERE ticker = ?", (ticker,))
@@ -326,7 +323,7 @@ class MarketDataManager:
                 self._upsert_updates(conn, ticker, names_dict.get(ticker), today)
 
             conn.commit()
-            logger.info(f"Salvati {len(data_dict)} ticker nel database.")
+            logger.info(f"Salvati {len(frames)} ticker nel database.")
 
         except Exception as e:
             logger.error(f"Errore salvataggio DB: {e}")
@@ -349,62 +346,46 @@ class MarketDataManager:
         names_dict = names_dict or {}
         stats = {}
 
-        if self.backend == 'duckdb':
-            with _DUCK_WRITE_LOCK:
-                conn = self._get_conn()
-                try:
-                    for ticker, df in data_dict.items():
-                        norm = self._normalize_ohlcv_frame(ticker, df)
-                        if norm is None or norm.empty:
-                            continue
+        frames = {}
+        for ticker, df in data_dict.items():
+            norm = self._normalize_ohlcv_frame(ticker, df)
+            if norm is not None and not norm.empty:
+                frames[ticker] = norm
+        if not frames:
+            return {}
 
-                        row = conn.execute(
-                            "SELECT MAX(date) FROM prices WHERE ticker = ?", [ticker]).fetchone()
-                        last_before = row[0] if row and row[0] else None
-                        # confronto come stringa ISO (stesso formato delle righe normalizzate)
-                        last_before_str = (last_before.strftime('%Y-%m-%d %H:%M:%S')
-                                           if last_before else None)
-
-                        conn.register("_bulk", norm)
-                        conn.execute("""
-                            INSERT INTO prices SELECT CAST(date AS TIMESTAMP), ticker,
-                                open, high, low, close, volume FROM _bulk
-                            ON CONFLICT (ticker, date) DO UPDATE SET
-                                open=excluded.open, high=excluded.high, low=excluded.low,
-                                close=excluded.close, volume=excluded.volume""")
-                        conn.unregister("_bulk")
-
-                        conn.execute("DELETE FROM failed_tickers WHERE ticker = ?", [ticker])
-                        self._upsert_updates(conn, ticker, names_dict.get(ticker), today)
-
-                        cnt, first, last = conn.execute(
-                            "SELECT COUNT(*), MIN(date), MAX(date) FROM prices WHERE ticker = ?",
-                            [ticker]).fetchone()
-                        new_rows = (int((norm['date'] > last_before_str).sum())
-                                    if last_before_str else len(norm))
-                        stats[ticker] = {
-                            'new_rows': new_rows,
-                            'total_rows': int(cnt or 0),
-                            'first': first,
-                            'last': last,
-                        }
-                    conn.commit()
-                    logger.info(f"Merge incrementale di {len(stats)} ticker completato (DuckDB).")
-                except Exception as e:
-                    conn.rollback()
-                    logger.error(f"Errore merge incrementale DB: {e}")
-                finally:
-                    conn.close()
+        if self.backend == 'parquet':
+            try:
+                with self._store.write_lock:
+                    # Ultima data presente PRIMA del merge: serve a contare le righe nuove
+                    last_before = self._store.last_dates(list(frames.keys()))
+                    # Upsert nelle sole partizioni mensili coinvolte
+                    self._store.merge_prices(self._frames_to_prices_df(frames))
+                    self._store.remove_failed(list(frames.keys()))
+                    self._store.upsert_updates(
+                        {t: (names_dict.get(t), today) for t in frames})
+                    after = self._store.ticker_row_stats(list(frames.keys()))
+                for t, norm in frames.items():
+                    lb = last_before.get(t)
+                    cnt, first, last = after.get(t, (0, None, None))
+                    dates = pd.to_datetime(norm['date'])
+                    new_rows = int((dates > lb).sum()) if lb is not None else len(norm)
+                    stats[t] = {
+                        'new_rows': new_rows,
+                        'total_rows': int(cnt or 0),
+                        'first': first,
+                        'last': last,
+                    }
+                logger.info(
+                    f"Merge incrementale di {len(stats)} ticker completato (Parquet).")
+            except Exception as e:
+                logger.error(f"Errore merge incrementale store Parquet: {e}")
             return stats
 
         # --- SQLite (percorso originale) ---
         conn = self._get_conn()
         try:
-            for ticker, df in data_dict.items():
-                norm = self._normalize_ohlcv_frame(ticker, df)
-                if norm is None or norm.empty:
-                    continue
-
+            for ticker, norm in frames.items():
                 # Ultima data presente PRIMA del merge: serve a contare le righe nuove
                 row = conn.execute(
                     "SELECT MAX(date) FROM prices WHERE ticker = ?", (ticker,)).fetchone()
@@ -449,6 +430,12 @@ class MarketDataManager:
         (query a chunk per universi grandi). Base per gli aggiornamenti delta."""
         if not tickers:
             return {}
+        if self.backend == 'parquet':
+            try:
+                return self._store.last_dates(tickers)
+            except Exception as e:
+                logger.error(f"Errore get_last_dates: {e}")
+                return {}
         out = {}
         try:
             for i in range(0, len(tickers), _SQL_CHUNK_SIZE):
@@ -467,9 +454,18 @@ class MarketDataManager:
     def get_tickers_updated_today(self) -> set:
         """Insieme dei ticker con last_updated = oggi nella tabella updates."""
         today = date.today().isoformat()
-        date_eq = "last_updated = CAST(? AS DATE)" if self.backend == 'duckdb' else "last_updated = ?"
+        if self.backend == 'parquet':
+            try:
+                updates = self._store.read_updates()
+                if updates.empty:
+                    return set()
+                return set(updates.loc[updates['last_updated'] == today, 'ticker'])
+            except Exception as e:
+                logger.error(f"Errore get_tickers_updated_today: {e}")
+                return set()
         try:
-            rows = self._query_df(f"SELECT ticker FROM updates WHERE {date_eq}", [today])
+            rows = self._query_df("SELECT ticker FROM updates WHERE last_updated = ?",
+                                  [today])
             return set(rows['ticker'].values) if not rows.empty else set()
         except Exception as e:
             logger.error(f"Errore get_tickers_updated_today: {e}")
@@ -480,6 +476,18 @@ class MarketDataManager:
         assenti dalla tabella updates (nuovi) sia quelli con nome vuoto."""
         if not tickers:
             return []
+        if self.backend == 'parquet':
+            try:
+                updates = self._store.read_updates()
+                if updates.empty:
+                    return list(tickers)
+                have_name = set(
+                    updates.loc[updates['name'].notna() & (updates['name'] != ''),
+                                'ticker'])
+            except Exception as e:
+                logger.error(f"Errore get_tickers_missing_name: {e}")
+                have_name = set()
+            return [t for t in tickers if t not in have_name]
         have_name = set()
         try:
             for i in range(0, len(tickers), _SQL_CHUNK_SIZE):
@@ -496,6 +504,15 @@ class MarketDataManager:
 
     def get_all_tickers(self) -> list:
         """Tutti i ticker noti al DB (dalla tabella updates, con fallback su prices)."""
+        if self.backend == 'parquet':
+            try:
+                updates = self._store.read_updates()
+                if updates.empty:
+                    return self._store.distinct_tickers()
+                return sorted(updates['ticker'].tolist())
+            except Exception as e:
+                logger.error(f"Errore get_all_tickers: {e}")
+                return []
         try:
             rows = self._query_df("SELECT ticker FROM updates")
             if rows.empty:
@@ -508,6 +525,12 @@ class MarketDataManager:
     def get_tickers_with_min_rows(self, min_rows: int = 200) -> list:
         """Ticker con almeno `min_rows` righe di prezzi (storico sufficiente per
         scanner e backtest). Usato dal selettore universo della UI."""
+        if self.backend == 'parquet':
+            try:
+                return self._store.tickers_with_min_rows(min_rows)
+            except Exception as e:
+                logger.error(f"Errore get_tickers_with_min_rows: {e}")
+                return []
         try:
             rows = self._query_df(
                 "SELECT ticker FROM prices GROUP BY ticker HAVING COUNT(*) >= ?",
@@ -520,11 +543,35 @@ class MarketDataManager:
     def get_all_tickers_info(self) -> pd.DataFrame:
         """Tabella riassuntiva del contenuto del DB: ticker, nome, righe, copertura
         date e data dell'ultimo aggiornamento (per la UI Gestione Dati)."""
-        last_updated = ("CAST(u.last_updated AS VARCHAR)" if self.backend == 'duckdb'
-                        else "u.last_updated")
+        if self.backend == 'parquet':
+            try:
+                updates = self._store.read_updates()
+                if updates.empty:
+                    return pd.DataFrame(
+                        columns=['ticker', 'name', 'last_updated', 'rows',
+                                 'first_date', 'last_date'])
+                price_stats = self._store.ticker_row_stats()
+                rows = []
+                for r in updates.sort_values('ticker').itertuples(index=False):
+                    cnt, first, last = price_stats.get(r.ticker, (0, None, None))
+                    rows.append({
+                        'ticker': r.ticker,
+                        'name': r.name if pd.notna(r.name) else None,
+                        'last_updated': (r.last_updated
+                                         if pd.notna(r.last_updated) else None),
+                        'rows': cnt,
+                        'first_date': first,
+                        'last_date': last,
+                    })
+                return pd.DataFrame(
+                    rows, columns=['ticker', 'name', 'last_updated', 'rows',
+                                   'first_date', 'last_date'])
+            except Exception as e:
+                logger.error(f"Errore get_all_tickers_info: {e}")
+                return pd.DataFrame()
         try:
-            return self._query_df(f"""
-                SELECT u.ticker, u.name, {last_updated} AS last_updated,
+            return self._query_df("""
+                SELECT u.ticker, u.name, u.last_updated,
                        COUNT(p.date) AS rows,
                        MIN(p.date) AS first_date, MAX(p.date) AS last_date
                 FROM updates u LEFT JOIN prices p ON p.ticker = u.ticker
@@ -537,6 +584,20 @@ class MarketDataManager:
 
     def get_db_stats(self) -> dict:
         """Statistiche globali del DB (per la UI Gestione Dati)."""
+        if self.backend == 'parquet':
+            try:
+                st = self._store.stats()
+                return {
+                    'tickers': st['tickers'], 'rows': st['rows'],
+                    'last_sync': st['last_sync'], 'failed': st['failed'],
+                    'db_mb': st['db_mb'], 'partitions': st['partitions'],
+                    'backend': self.backend, 'path': self.db_path,
+                }
+            except Exception as e:
+                logger.error(f"Errore get_db_stats: {e}")
+                return {'tickers': 0, 'rows': 0, 'last_sync': None, 'failed': 0,
+                        'db_mb': 0.0, 'partitions': 0,
+                        'backend': self.backend, 'path': self.db_path}
         try:
             row = self._query_rows(
                 "SELECT COUNT(DISTINCT ticker), COUNT(*) FROM prices")[0]
@@ -553,45 +614,42 @@ class MarketDataManager:
                 'last_sync': str(last_sync) if last_sync is not None else None,
                 'failed': int(failed or 0),
                 'db_mb': size_mb,
+                'partitions': None,
                 'backend': self.backend,
                 'path': self.db_path,
             }
         except Exception as e:
             logger.error(f"Errore get_db_stats: {e}")
             return {'tickers': 0, 'rows': 0, 'last_sync': None, 'failed': 0,
-                    'db_mb': 0.0, 'backend': self.backend, 'path': self.db_path}
+                    'db_mb': 0.0, 'partitions': None,
+                    'backend': self.backend, 'path': self.db_path}
 
     def load_data(self, tickers: list) -> dict:
         """Carica i dati dal DB per i ticker richiesti (query a chunk per universi grandi)."""
         if not tickers: return {}
 
-        frames = []
         try:
-            for i in range(0, len(tickers), _SQL_CHUNK_SIZE):
-                chunk = tickers[i:i + _SQL_CHUNK_SIZE]
-                placeholders = ','.join(['?'] * len(chunk))
-                query = (f"SELECT date, ticker, open, high, low, close, volume "
-                         f"FROM prices WHERE ticker IN ({placeholders})")
-                if self.backend == 'duckdb':
-                    conn = self._get_conn()
-                    try:
-                        frames.append(conn.execute(query, chunk).df())
-                    finally:
-                        conn.close()
-                else:
+            if self.backend == 'parquet':
+                df_all = self._store.load_frames(tickers)
+            else:
+                frames = []
+                for i in range(0, len(tickers), _SQL_CHUNK_SIZE):
+                    chunk = tickers[i:i + _SQL_CHUNK_SIZE]
+                    placeholders = ','.join(['?'] * len(chunk))
+                    query = (f"SELECT date, ticker, open, high, low, close, volume "
+                             f"FROM prices WHERE ticker IN ({placeholders})")
                     conn = self._get_conn()
                     try:
                         frames.append(pd.read_sql(query, conn, params=chunk,
                                                   parse_dates=['date']))
                     finally:
                         conn.close()
+                df_all = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         except Exception as e:
             logger.error(f"Errore load_data: {e}")
             return {}
 
-        df_all = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
-        if df_all.empty:
+        if df_all is None or df_all.empty:
             return {}
 
         result = {}
@@ -608,6 +666,21 @@ class MarketDataManager:
         """Recupera un dizionario {ticker: name} dal database (query a chunk)."""
         if not tickers: return {}
 
+        if self.backend == 'parquet':
+            try:
+                updates = self._store.read_updates()
+                if updates.empty:
+                    return {t: t for t in tickers}
+                updates = updates[updates['ticker'].isin(set(tickers))]
+                names = {}
+                for r in updates.itertuples(index=False):
+                    # Se il nome è nullo/NaN usa il ticker
+                    names[r.ticker] = r.name if (pd.notna(r.name) and r.name) else r.ticker
+                return {t: names.get(t, t) for t in tickers}
+            except Exception as e:
+                logger.error(f"Errore recupero nomi: {e}")
+                return {t: t for t in tickers}
+
         rows = []
         try:
             for i in range(0, len(tickers), _SQL_CHUNK_SIZE):
@@ -620,7 +693,6 @@ class MarketDataManager:
             return {t: t for t in tickers}
 
         # Crea dizionario, se il nome è nullo/NaN usa il ticker
-        # (NULL torna come NaN da DuckDB e da pd.read_sql)
         return {row['ticker']: (row['name'] if pd.notna(row['name']) and row['name']
                                 else row['ticker']) for row in rows}
 
@@ -633,25 +705,11 @@ class MarketDataManager:
         Se un ticker è già presente, incrementa i tentativi e aggiorna la data."""
         if not tickers: return
         today = date.today().isoformat()
-        if self.backend == 'duckdb':
-            with _DUCK_WRITE_LOCK:
-                conn = self._get_conn()
-                try:
-                    for t in tickers:
-                        conn.execute("""
-                            INSERT INTO failed_tickers (ticker, reason, first_failed, last_failed, attempts)
-                            VALUES (?, ?, CAST(? AS DATE), CAST(? AS DATE), 1)
-                            ON CONFLICT(ticker) DO UPDATE SET
-                                last_failed=excluded.last_failed,
-                                attempts=failed_tickers.attempts + 1,
-                                reason=excluded.reason
-                        """, (t, reason, today, today))
-                    conn.commit()
-                except Exception as e:
-                    conn.rollback()
-                    logger.error(f"Errore registrazione failed_tickers: {e}")
-                finally:
-                    conn.close()
+        if self.backend == 'parquet':
+            try:
+                self._store.record_failed(tickers, reason, today)
+            except Exception as e:
+                logger.error(f"Errore registrazione failed_tickers: {e}")
             return
 
         conn = self._get_conn()
@@ -681,17 +739,28 @@ class MarketDataManager:
         """
         if retry_days is None:
             retry_days = FAILED_TICKER_RETRY_DAYS
+        if self.backend == 'parquet':
+            try:
+                failed = self._store.read_failed()
+                if failed.empty:
+                    return set()
+                if retry_days is None:
+                    return set(failed['ticker'])
+                # Blacklist attiva solo se il fallimento è più recente della finestra
+                # di retry: retry_days=0 -> nessun ticker è blacklistato (retry sempre)
+                cutoff = (date.today() - timedelta(days=int(retry_days))).isoformat()
+                return set(failed.loc[failed['last_failed'] > cutoff, 'ticker'])
+            except Exception as e:
+                logger.error(f"Errore lettura failed_tickers: {e}")
+                return set()
         try:
             if retry_days is None:
                 rows = self._query_df("SELECT ticker FROM failed_tickers")
             else:
-                # Blacklist attiva solo se il fallimento è più recente della finestra di retry:
-                # retry_days=0 -> nessun ticker è blacklistato (retry sempre)
                 cutoff = (date.today() - timedelta(days=int(retry_days))).isoformat()
-                cmp_sql = ("last_failed > CAST(? AS DATE)" if self.backend == 'duckdb'
-                           else "last_failed > ?")
                 rows = self._query_df(
-                    f"SELECT ticker FROM failed_tickers WHERE {cmp_sql}", [cutoff])
+                    "SELECT ticker FROM failed_tickers WHERE last_failed > ?",
+                    [cutoff])
             return set(rows['ticker'].values) if not rows.empty else set()
         except Exception as e:
             logger.error(f"Errore lettura failed_tickers: {e}")
@@ -699,6 +768,16 @@ class MarketDataManager:
 
     def get_failed_tickers_info(self) -> pd.DataFrame:
         """Dettaglio dei ticker in blacklist (per UI/debug)."""
+        if self.backend == 'parquet':
+            try:
+                failed = self._store.read_failed()
+                if failed.empty:
+                    return failed
+                return failed.sort_values(
+                    ['last_failed', 'ticker'], ascending=[False, True])
+            except Exception as e:
+                logger.error(f"Errore lettura failed_tickers: {e}")
+                return pd.DataFrame()
         try:
             return self._query_df(
                 "SELECT ticker, reason, first_failed, last_failed, attempts "
@@ -709,30 +788,12 @@ class MarketDataManager:
 
     def clear_failed_tickers(self, tickers: list = None) -> int:
         """Svuota la blacklist (tutti i ticker o solo quelli indicati). Ritorna il numero rimossi."""
-        if self.backend == 'duckdb':
-            with _DUCK_WRITE_LOCK:
-                conn = self._get_conn()
-                try:
-                    if tickers:
-                        removed = 0
-                        for t in tickers:
-                            # il rowcount di DuckDB vale -1: si conta prima di cancellare
-                            n = conn.execute("SELECT COUNT(*) FROM failed_tickers "
-                                             "WHERE ticker = ?", [t]).fetchone()[0]
-                            conn.execute("DELETE FROM failed_tickers WHERE ticker = ?", [t])
-                            removed += int(n or 0)
-                        conn.commit()
-                        return removed
-                    n = conn.execute("SELECT COUNT(*) FROM failed_tickers").fetchone()[0]
-                    conn.execute("DELETE FROM failed_tickers")
-                    conn.commit()
-                    return int(n or 0)
-                except Exception as e:
-                    conn.rollback()
-                    logger.error(f"Errore pulizia failed_tickers: {e}")
-                    return 0
-                finally:
-                    conn.close()
+        if self.backend == 'parquet':
+            try:
+                return self._store.remove_failed(tickers)
+            except Exception as e:
+                logger.error(f"Errore pulizia failed_tickers: {e}")
+                return 0
 
         conn = self._get_conn()
         try:
