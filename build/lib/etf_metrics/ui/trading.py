@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import date
+from typing import Dict
 
 from etf_metrics.clients.yahoo_client import (get_failed_tickers,
                                               is_rate_limited, rate_limit_wait_seconds)
@@ -315,14 +316,37 @@ def _build_strategy_params(commission, max_positions, tax_rate=None):
     return params
 
 
+def _yearly_returns(equity: pd.Series) -> Dict[int, float]:
+    """Rendimenti % per anno civile da una curva equity (per il check di
+    robustezza per sottoperiodi: una strategia che rende solo in un regime
+    specifico è sospetta di overfitting)."""
+    if equity is None or equity.empty:
+        return {}
+    eq = equity.dropna()
+    if eq.empty:
+        return {}
+    out: Dict[int, float] = {}
+    prev = eq.iloc[0]
+    for y in sorted(set(eq.index.year)):
+        vals = eq[eq.index.year == y]
+        out[y] = (vals.iloc[-1] / prev - 1.0) * 100.0
+        prev = vals.iloc[-1]
+    return out
+
+
 def render_trading_ui():
     st.title("💹 Trading & Backtest")
 
     with st.expander("🧠 Logica Operativa"):
-        st.markdown("""
-        Suite di **5 strategie algoritmiche** testabili in backtest sui **dati reali del DB
+        st.markdown(f"""
+        Suite di **{len(STRATEGY_ORDER)} strategie algoritmiche** testabili in backtest sui **dati reali del DB
         locale**, con l'obiettivo di **battere il S&P500** restando in poche posizioni e
         facendo **pochissime operazioni** (le commissioni non devono mangiarsi i profitti).
+
+        📒 **Registro strategie**: la cronaca completa — strategie attive, ritirate
+        (con numeri e motivi del pensionamento) ed esperimenti — vive in
+        `docs/STRATEGY_LEDGER.md`. Le ritirate sono riattivabili da
+        `etf_metrics/core/retired_strategies.py`.
 
         **Flusso consigliato:** valida le strategie in *Confronto Strategie*, poi metti in
         pratica la migliore con **💲 Portafoglio Live** (stessa logica, operazioni giornaliere
@@ -440,6 +464,28 @@ def render_trading_ui():
             "il confronto è fair. L'obiettivo è battere il S&P500 (Buy & Hold del benchmark)."
         )
 
+        with st.expander("⚠️ Limiti del backtest: come leggere i risultati senza farsi ingannare"):
+            st.markdown(
+                "**Survivorship bias (distorsione da sopravvivenza):** il DB contiene solo i "
+                "ticker quotati **oggi**. I titoli/ETF **delistati** (fallimenti, chiusure "
+                "prodotti) mancano: le strategie momentum/breakout — che comprano i "
+                "vincitori — risultano sistematicamente **troppe ottimiste**. Se un "
+                "risultato sembra troppo bello, sospetta prima di tutto questo bias."
+            )
+            st.markdown(
+                "**Igiene dei dati:** le serie vengono ripulite automaticamente da errori "
+                "di livello prezzo (prezzi segnaposto, tick corrotti, errori di valuta "
+                "rilevati come tripli/dimezzamenti in una sola seduta). La pulizia avviene "
+                "al caricamento e il DB non viene mai modificato."
+            )
+            st.markdown(
+                "**Anti-overfitting:** guarda la tabella *Rendimenti per anno civile*: una "
+                "strategia solida rende in **più regimi** (bull 2021, bear 2022, rimbalzo "
+                "2023-26). Vinci solo in un anno = probabile che i parametri siano "
+                "aggiustati su quel periodo. Confronta anche il numero di operazioni: "
+                "pochi trade = poca significatività statistica."
+            )
+
         selected = st.multiselect(
             "Strategie da confrontare",
             STRATEGY_ORDER,
@@ -539,6 +585,39 @@ def render_trading_ui():
                 st.caption(
                     f"💸 Meno commissioni: **{cheapest['Strategia']}** "
                     f"(€{cheapest['Commissioni (€)']:,.0f} totali, {cheapest['Vendite']:.0f} vendite)."
+                )
+
+            # --- Rendimenti per anno civile (check robustezza / anti-overfit) ---
+            yearly_rows = {}
+            for key, r in results.items():
+                m = compute_backtest_performance_metrics(r["trades"], initial_capital)
+                curve = m['Equity_Curve'] if m and m.get('Equity_Curve') is not None else None
+                if curve is None and not r["trades"].empty:
+                    curve = r["trades"].drop_duplicates(
+                        subset=['Date'], keep='last').set_index('Date')['Total_Equity'] \
+                        if 'Total_Equity' in r["trades"].columns else None
+                if curve is not None and len(curve) > 1:
+                    yearly_rows[r["name"]] = _yearly_returns(curve)
+            bench_s_y, bench_lbl_y = _bench_curve_and_label(bh_curves)
+            if bench_s_y is not None and len(bench_s_y) > 1:
+                yearly_rows[f"🏁 {bench_lbl_y} B&H"] = _yearly_returns(bench_s_y)
+            if 'equal_weight' in bh_curves:
+                yearly_rows["Universo Eq. Weight"] = _yearly_returns(bh_curves['equal_weight'])
+
+            if yearly_rows:
+                st.markdown("### 📅 Rendimenti per anno civile (check robustezza)")
+                st.caption(
+                    "Una strategia affidabile rende in più regimi di mercato. Rendimenti "
+                    "concentrati in un solo anno suggeriscono overfitting o fortuna; "
+                    "ricorda anche il survivorship bias (nel DB ci sono solo i ticker "
+                    "quotati oggi: i delistati mancano)."
+                )
+                df_yearly = pd.DataFrame(yearly_rows).T
+                df_yearly.columns = [str(c) for c in df_yearly.columns]
+                st.dataframe(
+                    df_yearly.style.format("{:+.1f}%").background_gradient(
+                        cmap='RdYlGn', axis=None),
+                    width="stretch",
                 )
 
             # --- Grafico equity ---

@@ -31,6 +31,7 @@ from typing import Callable, Optional, Dict, List, Tuple
 
 from etf_metrics.clients.yahoo_client import get_series_bulk
 from etf_metrics.core.data_manager import MarketDataManager
+from etf_metrics.core.trading import atr_multiplier_from_vol
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +246,57 @@ def generate_fake_market_data(
 # =====================================================================
 # 2. INDICATORI BASE (invariati rispetto alla versione originale)
 # =====================================================================
+
+# --- IGIENE DEI DATI (price-level break) -------------------------------
+# Su un DB Xetra reale esistono tickers con blocchi "stub" di prezzi
+# segnaposto (es. 0.015 € costanti per 350 sedute, volume 0) seguiti da un
+# salto al prezzo vero (+880x in una seduta), oppure tick corrotti o errori
+# di scala valuta (EUR/USD). Un backtest su questi dati produce rendimenti
+# falsi di migliaia di punti percentuali. Regola di pulizia ( scelta sui
+# principi fisici del mercato, NON sulle performance delle strategie ):
+#   1) righe con Close non finito o <= 0 -> eliminate
+#   2) |log-rendimento| tra due sedute CONSECUTIVE ( <= 7 giorni di
+#      calendario ) > log(3), cioè prezzo che TRIPLICA o crolla a un terzo
+#      in UNA seduta: nessun prodotto reale lo fa (i crash storici come
+#      WireCard -66% restano sotto), quindi è un errore di livello -> la
+#      serie viene troncata all'ULTIMA rottura: vale il blocco più recente,
+#      quello coerente con i prezzi attuali. Gap > 7 giorni (sospensioni
+#      lunghe, es. 1ZB.DE) NON sono rotture: il prezzo si è semplicemente
+#      mosso mentre non quotava.
+_PRICE_BREAK_LOG = float(np.log(3.0))
+_PRICE_BREAK_MAX_GAP_DAYS = 7
+
+
+def _sanitize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    """Ripulisce una serie OHLCV da errori di livello prezzo (vedi sopra).
+
+    Il DB NON viene modificato: la pulizia avviene al caricamento, così
+    backtest, scanner e live vedono tutti gli stessi dati affidabili.
+    Idempotente: una serie già pulita passa invariata.
+    """
+    if df is None or df.empty or 'Close' not in df.columns:
+        return df
+    out = df
+    close = pd.to_numeric(out['Close'], errors='coerce')
+    ok = np.isfinite(close.to_numpy(dtype=float)) & (close.to_numpy(dtype=float) > 0)
+    if not ok.all():
+        out = out[ok]
+    if len(out) < 2:
+        return out
+    c = out['Close'].to_numpy(dtype=float)
+    idx = out.index
+    if not isinstance(idx, pd.DatetimeIndex):
+        return out
+    lr = np.log(c[1:] / c[:-1])
+    # gap in giorni di calendario (asi8 = ns dall'epoca: robusto anche con tz)
+    gaps = np.diff(idx.asi8) / (86400.0 * 1e9)
+    breaks = np.isfinite(lr) & (np.abs(lr) > _PRICE_BREAK_LOG) \
+        & (gaps <= _PRICE_BREAK_MAX_GAP_DAYS)
+    if breaks.any():
+        last_break = int(np.nonzero(breaks)[0][-1]) + 1  # riga della rottura
+        out = out.iloc[last_break:]  # la serie "inizia" dalla rottura in poi
+    return out
+
 
 def calculate_advanced_metrics_vectorized(df, spy_df=None):
     if 'Close' not in df.columns:
@@ -538,7 +590,7 @@ def load_recent_market_data(tickers, period="2y", allow_download=True, min_rows=
             logger.warning(f"Aggiornamento dati non riuscito, uso il DB locale: {e}")
 
     loaded = dm.load_data(all_tickers)
-    return {t: df for t, df in loaded.items()
+    return {t: _sanitize_ohlcv(df) for t, df in loaded.items()
             if df is not None and not df.empty and len(df) >= min_rows}
 
 
@@ -546,12 +598,29 @@ def _ensure_processed(market_data: Dict[str, pd.DataFrame], benchmark: str,
                       min_rows: int = 200) -> Tuple[Dict[str, pd.DataFrame], Optional[str]]:
     """Garantisce che i dati (es. fake) abbiano gli indicatori base calcolati.
 
-    Ritorna (dati_processati, chiave_benchmark_effettiva). Se il benchmark
-    richiesto (es. SPY) non è disponibile, viene costruita e aggiunta una proxy
-    equal-weight dell'universo (BENCH_PROXY_KEY): regimi di mercato, RS e curve
-    buy&hold restano utilizzabili anche con un DB Xetra senza titoli USA.
+    Prima di tutto sanifica le serie da errori di livello prezzo (blocchi stub,
+    tick corrotti): vedi `_sanitize_ohlcv`. Ritorna (dati_processati,
+    chiave_benchmark_effettiva). Se il benchmark richiesto (es. SPY) non è
+    disponibile, viene costruita e aggiunta una proxy equal-weight
+    dell'universo (BENCH_PROXY_KEY): regimi di mercato, RS e curve buy&hold
+    restano utilizzabili anche con un DB Xetra senza titoli USA.
     """
     market_data = dict(market_data)  # non mutare l'input del chiamante
+
+    # Igiene dati: i frame SENZA indicatori vengono sanificati (i frame già
+    # processati lo sono stati nel primo passaggio, e la sanificazione è
+    # comunque idempotente)
+    cleaned: Dict[str, pd.DataFrame] = {}
+    for t, df in market_data.items():
+        if df is None or df.empty:
+            continue
+        if 'SMA200' in df.columns:
+            cleaned[t] = df
+        else:
+            cdf = _sanitize_ohlcv(df)
+            if cdf is not None and not cdf.empty:
+                cleaned[t] = cdf
+    market_data = cleaned
 
     bench_key: Optional[str] = None
     if benchmark in market_data and market_data[benchmark] is not None \
@@ -701,227 +770,7 @@ class AIMomentumStrategy(BaseStrategy):
 
 
 # ---------------------------------------------------------------------
-# 3c. Bear Market / Regime Switcher
-# ---------------------------------------------------------------------
-class BearMarketStrategy(BaseStrategy):
-    key = "bear_market"
-    name = "🐻 Bear Market Regime Switcher"
-    description = """
-**Regime Switcher** — pensata per NON farsi massacrare (e persino guadagnare) nei bear market.
-
-- **Regime `BULL`:** compra i titoli più forti (RS vs benchmark, ADX > 20, sopra SMA50).
-- **Regime `BEAR`:** cerca i titoli che **salgono mentre il mercato scende**
-  (ETF inversi, oro, obbligazioni — archetipi FINV / FGLD / FBND nei dati fake).
-- **Regime `VOLATILE` / `DANGER`:** resta in cash (difesa attiva).
-- **Uscite:** flip di regime con posizione in perdita, rottura SMA50, trailing stop 3x ATR,
-  time stop 45gg. Max 2 posizioni, ribilanciamento ogni 10 giorni.
-"""
-    requires_bull = False
-    min_entry_score = 60
-    defaults = {
-        'MAX_POSITIONS': 2, 'REBALANCE_DAYS': 10, 'ENABLE_MONTHLY_LIMIT': True,
-        'MAX_BUYS_PER_MONTH': 4, 'STOP_LOSS_ATR_MULT': 3.0, 'TIME_STOP_DAYS': 45,
-    }
-
-    def prepare(self, df, spy_df=None, cfg=None):
-        df = df.copy()
-        df['MOM_63'] = df['Close'].pct_change(63)
-        return df
-
-    def can_buy(self, ctx):
-        return ctx.regime in ("BULL", "BEAR")
-
-    def entry(self, row, ctx):
-        c = row['Close']
-        sma50 = row.get('SMA50')
-        rs = row.get('RS_Score', 0.0)
-        adx = row.get('ADX')
-        if sma50 is None or pd.isna(sma50):
-            return 0, "Dati insufficienti"
-        if adx is not None and pd.notna(adx) and adx < 20:
-            return 0, "Trend debole (ADX)"
-
-        if ctx.regime == "BULL":
-            if c <= sma50:
-                return 0, "Sotto SMA50"
-            if pd.isna(rs) or rs <= 0:
-                return 0, "RS non positivo"
-            score = 50 + rs * 2 + ((adx if pd.notna(adx) else 20) / 2)
-            return score, f"BULL: RS {rs:+.1f} ADX {adx:.0f}"
-
-        if ctx.regime == "BEAR":
-            mom = row.get('MOM_63')
-            if c <= sma50:
-                return 0, "Sotto SMA50 (bear)"
-            if mom is None or pd.isna(mom) or mom <= 0:
-                return 0, "Momentum 63gg non positivo"
-            score = 55 + (rs if pd.notna(rs) else 0) * 2 + min(15.0, mom * 100.0)
-            return score, f"BEAR SHIELD: Mom63 {mom:+.1%} RS {rs:+.1f}"
-
-        return 0, "Regime non operativo"
-
-    def exit_signal(self, pos, row, ctx):
-        c = row['Close']
-        roi = (c / pos['entry_price']) - 1
-        sma50 = row.get('SMA50')
-
-        # Flip di regime con posizione in perdita / poco profitto
-        if ctx.regime != pos.get('regime_at_entry', ctx.regime) and roi < 0.05:
-            return (f"REGIME FLIP ({ctx.regime})", 1.0, c)
-
-        if sma50 is not None and pd.notna(sma50) and c < sma50:
-            return ("SMA50 ROTTA", 1.0, c)
-
-        days_held = (ctx.current_date - pos['entry_date']).days
-        if days_held >= ctx.cfg['TIME_STOP_DAYS'] and roi < 0.01:
-            return ("TIME STOP", 1.0, c)
-        return None
-
-    def update_position(self, pos, row, ctx):
-        c = row['Close']
-        roi = (c / pos['entry_price']) - 1
-        if roi > 0.05:
-            atr = row.get('ATR')
-            if atr is not None and pd.notna(atr):
-                new_stop = c - atr * ctx.cfg['STOP_LOSS_ATR_MULT']
-                if pos.get('stop_loss') is None or new_stop > pos['stop_loss']:
-                    pos['stop_loss'] = new_stop
-
-
-# ---------------------------------------------------------------------
-# 3d. Volume Profile
-# ---------------------------------------------------------------------
-def _rolling_volume_profile(df: pd.DataFrame, window: int = 60, bins: int = 24,
-                            va_pct: float = 0.70):
-    """Profilo del volume per prezzo rolling: ritorna (POC, VAH, VAL) come array.
-
-    Versione vettorizzata (sliding_window_view + bincount con offset di riga):
-    su un titolo da ~2500 sedute è ~10x più veloce del loop per-riga — su
-    universi grandi (tutto Xetra) è la differenza tra minuti e secondi.
-    Semantica identica alla versione originale a loop.
-    """
-    n = len(df)
-    poc = np.full(n, np.nan); vah = np.full(n, np.nan); val = np.full(n, np.nan)
-    if n <= window or window <= 0 or bins <= 0:
-        return poc, vah, val
-
-    close = df['Close'].to_numpy(float); high = df['High'].to_numpy(float)
-    low = df['Low'].to_numpy(float); vol = np.nan_to_num(df['Volume'].to_numpy(float))
-    tp = (close + high + low) / 3.0
-
-    # Finestre [i-window, i) per i in [window, n): riga j <-> i = j + window.
-    # [:-1] esclude l'ultima finestra, che conterrebbe il giorno corrente i
-    # (la finestra del profilo è strettamente passata, come nell'originale).
-    W_tp = np.lib.stride_tricks.sliding_window_view(tp, window)[:-1]
-    W_vol = np.lib.stride_tricks.sliding_window_view(vol, window)[:-1]
-    m = W_tp.shape[0]
-
-    lo = np.nanmin(W_tp, axis=1)
-    hi = np.nanmax(W_tp, axis=1)
-    span = hi - lo
-    tot = W_vol.sum(axis=1)
-    valid = np.isfinite(lo) & np.isfinite(hi) & (span > 0) & (tot > 0)
-
-    # Indice di bin per elemento: np.digitize(x, linspace(lo, hi, bins+1)) - 1
-    # equivale a ceil((x-lo)/span*bins) - 1, clampato a [0, bins-1]
-    safe_span = np.where(valid, span, 1.0)
-    rel = np.where(valid[:, None], (W_tp - lo[:, None]) / safe_span[:, None], 0.0)
-    b = np.clip(np.ceil(rel * bins).astype(np.int64) - 1, 0, bins - 1)
-
-    # Istogramma pesato per riga in un solo bincount (riga*bin + colonna)
-    rows = np.repeat(np.arange(m), window)
-    hist = np.bincount(rows * bins + b.ravel(),
-                       weights=np.where(valid[:, None], W_vol, 0.0).ravel(),
-                       minlength=m * bins).reshape(m, bins)
-
-    poc_i = hist.argmax(axis=1)
-    lo_v = np.where(valid, lo, 0.0)
-
-    # Espansione della value area attorno al POC (due punte, come l'originale)
-    for j in np.nonzero(valid)[0]:
-        h = hist[j]
-        target = h.sum() * va_pct
-        cum = h[poc_i[j]]; up = int(poc_i[j]) + 1; dn = int(poc_i[j]) - 1
-        while cum < target and (up < bins or dn >= 0):
-            up_val = h[up] if up < bins else -1.0
-            dn_val = h[dn] if dn >= 0 else -1.0
-            if up_val >= dn_val:
-                cum += max(0.0, up_val); up += 1
-            else:
-                cum += max(0.0, dn_val); dn -= 1
-        i = j + window
-        poc[i] = lo_v[j] + (poc_i[j] + 0.5) * safe_span[j] / bins
-        vah[i] = lo_v[j] + min(up, bins) * safe_span[j] / bins
-        val[i] = lo_v[j] + max(dn + 1, 0) * safe_span[j] / bins
-    return poc, vah, val
-
-
-class VolumeProfileStrategy(BaseStrategy):
-    key = "volume_profile"
-    name = "📊 Volume Profile (Value Area Breakout)"
-    description = """
-**Volume Profile** — dove "vive" il volume istituzionale.
-
-- Costruisce il **profilo del volume per prezzo** su 60 giorni:
-  `POC` (Point of Control, il prezzo più scambiato) e **Value Area al 70%**.
-- **Acquista** quando il close rompe **sopra il Value Area High** con volume > 1.5x la media
-  e prezzo sopra SMA50 (breakout da area di valore = accumulo completato).
-- **Esce** quando il prezzo rientra nel value area sotto il POC (fallimento del breakout)
-  o su trailing stop 3x ATR.
-- Ribilanciamento ogni 5 giorni, max 3 posizioni.
-"""
-    min_entry_score = 60
-    defaults = {
-        'MAX_POSITIONS': 3, 'REBALANCE_DAYS': 5, 'ENABLE_MONTHLY_LIMIT': True,
-        'MAX_BUYS_PER_MONTH': 4, 'STOP_LOSS_ATR_MULT': 3.0, 'VP_WINDOW': 60,
-    }
-
-    def prepare(self, df, spy_df=None, cfg=None):
-        df = df.copy()
-        window = int((cfg or {}).get('VP_WINDOW', 60))
-        poc, vah, val = _rolling_volume_profile(df, window=window)
-        df['POC'] = poc; df['VAH'] = vah; df['VAL'] = val
-        vol_sma = df['Volume'].rolling(20).mean()
-        df['Vol_Ratio'] = df['Volume'] / vol_sma.replace(0, np.nan)
-        return df
-
-    def entry(self, row, ctx):
-        c = row['Close']
-        vah, poc, sma50 = row.get('VAH'), row.get('POC'), row.get('SMA50')
-        vr = row.get('Vol_Ratio')
-        if any(v is None or pd.isna(v) for v in (vah, poc, sma50, vr)):
-            return 0, "Dati insufficienti"
-        if c <= sma50:
-            return 0, "Sotto SMA50"
-        if c <= vah:
-            return 0, "Dentro value area"
-        if vr < 1.5:
-            return 0, f"Volume debole (x{vr:.1f})"
-
-        rs = row.get('RS_Score', 0.0)
-        score = 50 + min(25.0, (vr - 1.5) * 25.0) + float(np.clip(rs, -15, 25)) \
-                + min(10.0, (c / vah - 1) * 200.0)
-        return score, f"Breakout VAH {vah:.2f} | Vol x{vr:.1f} | POC {poc:.2f}"
-
-    def exit_signal(self, pos, row, ctx):
-        poc = row.get('POC')
-        if poc is not None and pd.notna(poc) and row['Close'] < poc:
-            return ("RIENTRO VALUE AREA", 1.0, row['Close'])
-        return None
-
-    def update_position(self, pos, row, ctx):
-        c = row['Close']
-        roi = (c / pos['entry_price']) - 1
-        if roi > 0.05:
-            atr = row.get('ATR')
-            if atr is not None and pd.notna(atr):
-                new_stop = c - atr * ctx.cfg['STOP_LOSS_ATR_MULT']
-                if pos.get('stop_loss') is None or new_stop > pos['stop_loss']:
-                    pos['stop_loss'] = new_stop
-
-
-# ---------------------------------------------------------------------
-# 3g. Turtle / Donchian Breakout
+# 3b. Turtle / Donchian Breakout
 # ---------------------------------------------------------------------
 class TurtleBreakoutStrategy(BaseStrategy):
     key = "turtle_breakout"
@@ -989,7 +838,7 @@ class TurtleBreakoutStrategy(BaseStrategy):
 
 
 # ---------------------------------------------------------------------
-# 3b. Trend Fusion — il meglio di Turtle Breakout, AI Momentum e Volume Profile
+# 3c. Trend Fusion — il meglio di Turtle Breakout, AI Momentum e Volume Profile
 # ---------------------------------------------------------------------
 class TrendFusionStrategy(BaseStrategy):
     key = "trend_fusion"
@@ -1116,21 +965,207 @@ class TrendFusionStrategy(BaseStrategy):
 
 
 # ---------------------------------------------------------------------
+# 3d. Golden Chandelier — replica BACKTEST della logica LIVE di trading.py
+# ---------------------------------------------------------------------
+class GoldenChandelierStrategy(BaseStrategy):
+    key = "golden_chandelier"
+    name = "🛡️ Golden Chandelier (logica live satellite)"
+    description = """
+**Replica backtest della logica live del Portafoglio Tracker** (`core/trading.py`,
+segnale "V28 Golden Mean" + trailing stop Chandelier sulle posizioni satellite):
+prima d'ora questa logica NON era testabile in backtest — ora il confronto è possibile.
+
+- **Ingresso (Golden Mean):** prezzo sopra **SMA 130** e **momentum 6 mesi positivo**
+  (nessun filtro di regime, nessun ADX, nessun filtro volume: come la logica live).
+- **Uscita trend:** prezzo sotto **SMA 130** = "VENDI (Trend Break)".
+- **Uscita stop:** **Chandelier Exit** sul massimo dei Close dall'acquisto meno
+  ATR × moltiplicatore **adattivo alla volatilità** — la STESSA scala della logica
+  live (`atr_multiplier_from_vol`): vol annua del benchmark < 15% → 3.0x,
+  < 25% → 3.5x, < 35% → 4.5x, panico → 6.0x. Nel backtest il VIX è sostituito
+  dalla volatilità annualizzata del benchmark calcolata sui dati del DB
+  (offline, nessuna chiamata a Yahoo).
+- **Niente** take profit parziali, time stop o filtri macro: fedele alla logica live.
+- **Attenzione:** senza filtro macro compra anche in bear market — è il costo
+  della fedeltà al live; il backtest ora lo misura.
+"""
+    requires_bull = False   # la logica live non ha filtro di regime
+    use_stops = True        # il motore esegue il chandelier mantenuto da update_position
+    min_entry_score = 55
+    defaults = {
+        'MAX_POSITIONS': 3, 'REBALANCE_DAYS': 5, 'ENABLE_MONTHLY_LIMIT': True,
+        'MAX_BUYS_PER_MONTH': 4, 'TIME_STOP_DAYS': 3650,
+    }
+
+    def prepare(self, df, spy_df=None, cfg=None):
+        df = df.copy()
+        df['SMA_130'] = df['Close'].rolling(130).mean()
+        df['MOM_6M'] = df['Close'].pct_change(126)
+        # Volatilità annualizzata del benchmark as-of (proxy VIX, offline):
+        # Vol_20 = std 20gg dei rendimenti daily in % -> annuizzata
+        if spy_df is not None and 'Vol_20' in spy_df.columns:
+            bench_vol = (spy_df['Vol_20'] * np.sqrt(252.0)) \
+                .reindex(df.index, method='ffill')
+            df['BENCH_ANNVOL'] = bench_vol
+        else:
+            df['BENCH_ANNVOL'] = np.nan
+        return df
+
+    def can_buy(self, ctx):
+        return True  # nessun filtro di regime nella logica live
+
+    def initial_stop(self, row, ctx, cfg):
+        # chandelier dal primo giorno: entry - ATR × mult(vol benchmark)
+        # (NON lo stop ATR generico del motore: la logica live non lo prevede)
+        atr = row.get('ATR')
+        if atr is None or pd.isna(atr) or atr <= 0:
+            return None
+        mult = atr_multiplier_from_vol(row.get('BENCH_ANNVOL'))
+        return row['Close'] - (atr * mult)
+
+    def entry(self, row, ctx):
+        c, sma, mom = row['Close'], row.get('SMA_130'), row.get('MOM_6M')
+        if sma is None or pd.isna(sma) or mom is None or pd.isna(mom):
+            return 0, "Dati insufficienti"
+        if c <= sma:
+            return 0, "Sotto SMA130"
+        if mom <= 0:
+            return 0, "Momentum 6M negativo"
+        # fedele ad analyze_ticker: score = min(mom*100, 100), ENTRY per qualsiasi mom>0
+        score = 55 + min(45.0, mom * 100.0)
+        return score, f"GOLDEN MEAN: Mom6M {mom:+.1%} | SMA130 {sma:.2f}"
+
+    def exit_signal(self, pos, row, ctx):
+        c, sma = row['Close'], row.get('SMA_130')
+        # "VENDI (Trend Break)": prezzo sotto SMA130
+        if sma is not None and pd.notna(sma) and c < sma:
+            return ("TREND BREAK (SMA130)", 1.0, c)
+        return None
+
+    def update_position(self, pos, row, ctx):
+        # Chandelier Exit: max Close dall'ingresso - ATR × mult(vol benchmark).
+        # Come nella logica live NON c'è ratchet: lo stop segue il massimo e la
+        # volatilità correnti (può allargarsi se l'ATR cresce).
+        atr = row.get('ATR')
+        if atr is None or pd.isna(atr) or atr <= 0:
+            return
+        pos['max_close'] = max(pos.get('max_close', pos['entry_price']), row['Close'])
+        mult = atr_multiplier_from_vol(row.get('BENCH_ANNVOL'))
+        pos['stop_loss'] = pos['max_close'] - (atr * mult)
+
+
+# ---------------------------------------------------------------------
+# 3e. ESPERIMENTO: Golden Chandelier DIFENSIVO (logica live + filtro macro)
+# ---------------------------------------------------------------------
+# Variante a variabile singola della logica live: identica a golden_chandelier
+# (stessi ingressi, stesso chandelier, stesse uscite) ma con il pacchetto di
+# filtro macro di ai_momentum: acquisti solo in regime BULL + uscita d'emergenza
+# in regime di crisi. Ipotesi da verificare: il MaxDD -48% della logica live è
+# dovuto soprattutto agli acquisti in bear market. Se confermata, la
+# raccomandazione pratica è aggiungere il filtro macro a trading.py (live).
+class GoldenChandelierDefensiveStrategy(GoldenChandelierStrategy):
+    key = "golden_chandelier_def"
+    name = "🚦 Golden Chandelier Difensivo (filtro macro)"
+    description = """
+**ESPERIMENTO a variabile singola** — la logica live del Portafoglio Tracker
+(Golden Chandelier) con in più il **filtro macro** di AI Momentum:
+
+- **Ingresso:** come golden_chandelier (SMA130 + momentum 6M) MA **solo in regime BULL**.
+- **Uscita d'emergenza:** regime di crisi con posizione in perdita → "MACRO CRASH EXIT".
+- **Uscite identiche** a golden_chandelier: Chandelier Exit adattivo + trend break SMA130.
+
+**A cosa serve:** misurare quanto del drawdown della logica live viene dal comprare
+in bear market. Se il MaxDD cala in modo significativo a parità di rendimento,
+la raccomandazione è aggiungere il filtro macro alla logica live di `trading.py`.
+"""
+    requires_bull = False   # gestito esplicitamente in can_buy (pacchetto macro completo)
+
+    def can_buy(self, ctx):
+        return ctx.regime == "BULL"  # come AI Momentum: niente acquisti in bear/volatile
+
+    def exit_signal(self, pos, row, ctx):
+        if ctx.is_crash:
+            roi = (row['Close'] / pos['entry_price']) - 1
+            if roi < 0.05:
+                return ("MACRO CRASH EXIT", 1.0, row['Close'])
+        return super().exit_signal(pos, row, ctx)
+
+
+# ---------------------------------------------------------------------
+# 3f. ESPERIMENTO: Steady Winners (trend a bassa volatilità, anomalia low-vol)
+# ---------------------------------------------------------------------
+# Seconda variante a variabile singola: ingressi di golden_chandelier ma solo
+# su titoli PIÙ CALMI del benchmark (volatilità annualizzata ≤ 1.25x quella del
+# mercato). Uscite identiche (chandelier + SMA130). Ipotesi: l'anomalia
+# low-volatility (Baker-Haugen) su Xetra regge anche senza inseguire i pump
+class LowVolTrendStrategy(GoldenChandelierStrategy):
+    key = "low_vol_trend"
+    name = "🧘 Steady Winners (trend a bassa volatilità)"
+    description = """
+**ESPERIMENTO a variabile singola** — test dell'**anomalia low-volatility** su Xetra:
+
+- **Ingresso:** come golden_chandelier (SMA130 + momentum 6M) MA solo se la
+  **volatilità annualizzata del ticker ≤ 1.25× quella del benchmark**:
+  si comprano i vincitori *calmi* (bond, oro, dividendi, large-cap stabili),
+  non i pump ad alta volatilità.
+- **Ranking:** momentum + bonus di calma (più il titolo è tranquillo rispetto
+  al mercato, più sale in classifica).
+- **Uscite identiche** a golden_chandelier: Chandelier Exit adattivo + trend break SMA130.
+
+**A cosa serve:** capire se su questo universo conviene il profil difensivo
+(meno rendimento, molto meno drawdown) invece di inseguire i vincitori caldi.
+"""
+    requires_bull = False  # come golden_chandelier: nessun filtro di regime
+
+    def prepare(self, df, spy_df=None, cfg=None):
+        df = super().prepare(df, spy_df, cfg)  # SMA_130, MOM_6M, BENCH_ANNVOL
+        if 'Vol_20' in df.columns:
+            df['ANN_VOL'] = df['Vol_20'] * np.sqrt(252.0)   # vol annua del ticker in %
+        else:
+            df['ANN_VOL'] = df['Close'].pct_change().rolling(20).std() * np.sqrt(252.0)
+        return df
+
+    def entry(self, row, ctx):
+        c, sma, mom = row['Close'], row.get('SMA_130'), row.get('MOM_6M')
+        ann_vol, bench_vol = row.get('ANN_VOL'), row.get('BENCH_ANNVOL')
+        if any(v is None or pd.isna(v) for v in (sma, mom, ann_vol)):
+            return 0, "Dati insufficienti"
+        if c <= sma:
+            return 0, "Sotto SMA130"
+        if mom <= 0:
+            return 0, "Momentum 6M negativo"
+        # Filtro low-vol: solo se il benchmark è disponibile e il titolo è calmo
+        # (≤ 1.25x la vol del mercato). Senza benchmark niente filtro extra:
+        # la strategia degrada a golden_chandelier.
+        if bench_vol is not None and pd.notna(bench_vol) and bench_vol > 0:
+            vol_ratio = float(ann_vol) / float(bench_vol)
+            if vol_ratio > 1.25:
+                return 0, f"Troppo volatile ({vol_ratio:.1f}x benchmark)"
+            score = 55 + min(35.0, mom * 100.0) + (1.25 - vol_ratio) * 12.0
+            return score, f"STEADY: Mom6M {mom:+.1%} | Vol {vol_ratio:.2f}x benchmark"
+        # fallback senza benchmark (es. dati fake senza SPY): entry golden semplice
+        return 55 + min(45.0, mom * 100.0), f"STEADY (no bench): Mom6M {mom:+.1%}"
+
+
+# ---------------------------------------------------------------------
 # REGISTRO STRATEGIE
 # ---------------------------------------------------------------------
 STRATEGIES: Dict[str, BaseStrategy] = {
     s.key: s for s in [
         AIMomentumStrategy(),
         TrendFusionStrategy(),
-        BearMarketStrategy(),
-        VolumeProfileStrategy(),
         TurtleBreakoutStrategy(),
+        GoldenChandelierStrategy(),
+        GoldenChandelierDefensiveStrategy(),
+        LowVolTrendStrategy(),
     ]
 }
 
+# Ordine di presentazione nella UI. Le strategie ritirate vivono in
+# etf_metrics/core/retired_strategies.py (riattivabili con activate());
+# cronaca completa — criteri, numeri e motivi — in docs/STRATEGY_LEDGER.md.
 STRATEGY_ORDER: List[str] = [
-    "ai_momentum", "trend_fusion", "bear_market",
-    "volume_profile", "turtle_breakout",
+    "ai_momentum", "trend_fusion", "turtle_breakout", "golden_chandelier",
+    "golden_chandelier_def", "low_vol_trend",
 ]
 
 
@@ -1694,10 +1729,14 @@ def compute_buy_and_hold_curves(
     cols = [t for t in tickers if t in market_data and t != benchmark_ticker]
     if len(cols) >= 2:
         pm = pd.DataFrame({t: market_data[t]['Close'] for t in cols}).ffill()
-        pm = pm[pm.index >= start].dropna()
+        pm = pm[pm.index >= start]
         if len(pm) > 1:
-            rets = pm.pct_change().fillna(0).mean(axis=1)
-            out['equal_weight'] = initial_capital * (1 + rets).cumprod()
+            # FIX: media dei soli ticker quotati quel giorno (skipna). Prima si
+            # faceva dropna() su TUTTE le colonne: la curva partiva solo quando
+            # l'ultimo ticker dell'universo era quotato (anni di dati ignorati)
+            # e sovrastimava il benchmark nei periodi con listing tardivi.
+            rets = pm.pct_change().mean(axis=1)
+            out['equal_weight'] = initial_capital * (1 + rets.fillna(0)).cumprod()
 
     return out
 

@@ -16,12 +16,16 @@ Questa è un'applicazione web completa, costruita con Streamlit, che offre una s
     -   Impostazione della frequenza di ribilanciamento
     -   Confronto con portafogli modello (es. 60/40, All-Weather)
 -   **Screener Tattico PAC**: Scopri ETP (Exchange Traded Products) con potenziale di breakout quotati sulle principali borse europee, basato su un approccio multi-fattore.
--   **Trading & Backtest**: Suite di **5 strategie algoritmiche** con l'obiettivo di battere il S&P500, con scanner di segnali, backtest singolo e confronto multi-strategia:
+-   **Trading & Backtest**: Suite di **6 strategie algoritmiche** con l'obiettivo di battere il S&P500, con scanner di segnali, backtest singolo e confronto multi-strategia:
     - **🧠 AI Enhanced Momentum** (strategia originale): filtro macro, ranking AI Score, stop ATR e take profit parziale
-    - **🌊 Trend Fusion**: fusione dei tre algoritmi migliori del confronto storico — entry in confluenza (breakout Donchian 55 + Value Area High + volume ≥ 1.5x + ADX/RS), TP parziale con lock a breakeven, uscita Donchian LL20 che lascia correre il trend
-    - **🐻 Bear Market Regime Switcher**: compra i forti in bull, cerca inversi/difensivi in bear, cash nei regimi di crisi
-    - **📊 Volume Profile**: breakout dal Value Area con conferma di volume (POC/VAH/VAL rolling)
+    - **🌊 Trend Fusion**: fusione dei concetti migliori — entry in confluenza (breakout Donchian 55 + Value Area High + volume ≥ 1.5x + ADX/RS), TP parziale con lock a breakeven, uscita Donchian LL20 che lascia correre il trend
     - **🐢 Turtle Breakout**: breakout Donchian 55/20 in stile Turtle Trading
+    - **🛡️ Golden Chandelier**: replica backtest della logica live delle posizioni satellite (`core/trading.py`, Golden Mean SMA130 + Chandelier Exit con moltiplicatore ATR adattivo alla volatilità) — stessa scala `atr_multiplier_from_vol` del live, con la volatilità del benchmark come proxy del VIX (offline)
+    - **🚦 Golden Chandelier Difensivo**: esperimento promosso — la logica live col filtro macro: taglia il MaxDD da -48% a -35% e ribalta il 2022 (da -7% a +6%)
+    - **🧘 Steady Winners**: esperimento promosso — anomalia low-volatility su Xetra (vincitori “calmi”, volatilità ≤ 1.25x benchmark): 6 anni positivi su 6, MaxDD -13%
+    - **📒 Registro strategie**: `docs/STRATEGY_LEDGER.md` — cronaca completa di attive, ritirate ed esperimenti (con numeri, criteri di mantenimento e lezioni); le ritirate (`bear_market`, `volume_profile`, `dual_momentum`…) vivono in `core/retired_strategies.py` e sono riattivabili con `activate()`
+    - **Igiene dei dati**: le serie caricate dal DB vengono ripulite da errori di livello prezzo (blocchi stub, tick corrotti, tripli/dimezzamenti in una sola seduta) — il DB non viene mai modificato
+    - **Anti-bias nel Confronto Strategie**: tabella dei rendimenti per anno civile (robustezza tra regimi) e avvisi espliciti su survivorship bias (nel DB ci sono solo i ticker quotati oggi) e significatività statistica
     - **Dati fake**: 5 scenari di mercato sintetici (bull, bear, crash, laterale, misto) per simulare senza connessione a Yahoo Finance, con universo di archetipi (tech, oro, obbligazioni, ETF inverso, ...)
     - Report con KPI commissioni (totale, operazioni/anno, impatto sul capitale) e confronto con S&P500 Buy & Hold
 -   **Portafoglio Live**: Gestione operativa di un portafoglio algoritmico con stop loss / take profit trailing, sizing dinamico e regime di mercato.

@@ -14,19 +14,33 @@ def _get_latest_vix() -> Optional[float]:
         return None
 
 
+def atr_multiplier_from_vol(vol_pct: Optional[float]) -> float:
+    """Moltiplicatore ATR del trailing stop in funzione della volatilità
+    annualizzata del mercato (VIX in punti, oppure proxy = deviazione standard
+    annuizzata dei rendimenti del benchmark, in %).
+
+    Scala UNICA condivisa tra logica live (check_satellite_status) e backtest
+    (strategia GoldenChandelier in automated_backtest.py): così quello che si
+    valida in backtest è esattamente quello che il portafoglio reale esegue.
+
+    Un ETF/azione satellite ha bisogno di stop più larghi quando il mercato è
+    nervoso, per evitare uscite premature su noise (whipsaw).
+    """
+    if vol_pct is None or pd.isna(vol_pct):
+        return 3.5  # Default senza dato di volatilità
+    if vol_pct < 15: return 3.0  # Bassa volatilità: stop stretto ma non soffocante
+    if vol_pct < 25: return 3.5  # Volatilità normale: spazio di manovra
+    if vol_pct < 35: return 4.5  # Volatilità alta: serve aria
+    return 6.0  # Panico (VIX > 35): stop molto largo per evitare whipsaw
+
+
 def _get_dynamic_atr_multiplier(vix_value: Optional[float]) -> float:
     """
     Restituisce un moltiplicatore ATR più ampio per gestire la volatilità
     degli ETF settoriali (Satellite), evitando uscite premature.
+    Delega alla scala condivisa `atr_multiplier_from_vol` (vedi docstring).
     """
-    if vix_value is None or pd.isna(vix_value):
-        return 3.5  # Default aumentato (era 3.0)
-
-    # Scala aumentata di 0.5 - 1.0 punti rispetto alla versione precedente
-    if vix_value < 15: return 3.0  # Bassa volatilità: stop stretto ma non soffocante (era 2.5)
-    if vix_value < 25: return 3.5  # Volatilità normale: spazio di manovra (era 3.0)
-    if vix_value < 35: return 4.5  # Volatilità alta: serve aria (era 3.5)
-    return 6.0  # Panico (VIX > 35): stop molto largo per evitare whipsaw (era 4.0)
+    return atr_multiplier_from_vol(vix_value)
 
 
 def calculate_full_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -114,9 +128,16 @@ def analyze_ticker(ticker: str, df: pd.DataFrame) -> Dict:
     }
 
 
-def check_satellite_status(df: pd.DataFrame, purchase_date: pd.Timestamp, current_shares: float) -> Dict:
+def check_satellite_status(df: pd.DataFrame, purchase_date: pd.Timestamp, current_shares: float,
+                           market_vol_pct: Optional[float] = None) -> Dict:
     """
     Verifica lo stato di una posizione satellite usando un Trailing Stop basato su ATR e Close.
+
+    market_vol_pct: volatilità annualizzata del mercato in % (proxy del VIX, es.
+    deviazione standard annuizzata del benchmark). Se None prova a scaricare il
+    VIX da Yahoo; se anche quello non è disponibile usa il default della scala
+    (3.5x). Passando la proxy si replica ESATTAMENTE la strategia
+    GoldenChandelier del backtest (stessa scala `atr_multiplier_from_vol`).
     """
     if df is None or df.empty: return {"action": "HOLD", "reason": "Dati non disponibili"}
 
@@ -135,8 +156,10 @@ def check_satellite_status(df: pd.DataFrame, purchase_date: pd.Timestamp, curren
 
     atr_val = atr_series.iloc[-1]
 
-    # 1. Recupero Moltiplicatore Dinamico (più largo per i satelliti)
-    mult = _get_dynamic_atr_multiplier(_get_latest_vix())
+    # 1. Recupero Moltiplicatore Dinamico (più largo per i satelliti):
+    #    proxy della volatilità se fornita, altrimenti VIX da Yahoo
+    vol = market_vol_pct if market_vol_pct is not None else _get_latest_vix()
+    mult = atr_multiplier_from_vol(vol)
 
     # 2. MODIFICA CRITICA: Uso il 'Close' massimo invece del 'High' massimo.
     highest_close_since = df_since['Close'].max()

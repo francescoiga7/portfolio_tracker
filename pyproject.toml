@@ -13,11 +13,9 @@ dependencies = [
     "requests",
     "polars",
     "pyarrow",
+    "matplotlib"
 ]
 
-[dependency-groups]
-dev = [
-    "black",
-    "pytest",
-    "pandas-stubs",
-]
+[tool.setuptools.packages.find]
+include = ["etf_metrics*"]
+exclude = ["market_data_parquet*"]
