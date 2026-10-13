@@ -32,7 +32,6 @@ def get_market_regime(as_of_date: Optional[date] = None) -> Dict:
     try:
         end_date = pd.to_datetime(as_of_date) if as_of_date else pd.to_datetime(date.today())
 
-        # VIX Check
         vix_series = get_series("^VIX", period="1y")
         current_vix = None
         regime = "Favorevole al Rischio"  # Default ottimista in caso di no-data
@@ -43,7 +42,6 @@ def get_market_regime(as_of_date: Optional[date] = None) -> Dict:
                 current_vix = series_vix_as_of.iloc[-1]
                 regime = "Avverso al Rischio" if current_vix > 35 else "Favorevole al Rischio"
 
-        # SP500 Trend Check
         gspc_series = get_series("^GSPC", period="2y")
         market_trend = "Rialzista"  # Default ottimista
 
@@ -234,7 +232,6 @@ def calculate_all_metrics(fetched_data: List[Dict], as_of_date: date) -> Tuple[p
 
         res_df = metrics_lf.collect().to_pandas()
 
-        # Post-Processing
         res_df['is_above_ma200'] = res_df['current_price'] > res_df['sma200']
 
         res_df['proximity_to_high'] = res_df.apply(

@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """Confronto strategie sui dati Xetra reali del DB locale (nessuna rete).
 
-- Universo point-in-time: i ticker entrano solo quando hanno dati (listing date),
-  indicatori (SMA200 ecc.) richiedono comunque lo storico minimo.
-- Analisi per sottoperiodi: se il vantaggio di una strategia dipende solo da
+- Universo point-in-time: i ticker entrano solo quando hanno dati (listing
+  date); gli indicatori (SMA200 ecc.) richiedono comunque lo storico minimo.
+- Analisi per anno civile: se il vantaggio di una strategia dipende solo da
   un regime (es. 2022 bear), e' probabile overfitting.
-- Benchmark: proxy equal-weight dell'universo (il DB Xetra non contiene SPY).
+- Benchmark: SPY se presente nel DB, altrimenti proxy equal-weight universo.
+
+Uso: python3 scripts/run_xetra_comparison.py [keys_csv] [start] [end]
 """
 import logging
 import sys
@@ -27,6 +29,7 @@ INITIAL_CAPITAL = 10000.0
 
 
 def load_universe():
+    """Ticker del DB con storico sufficiente (>= UNIVERSE_MIN_ROWS righe)."""
     store = ParquetStore('market_data_parquet')
     stats = store.ticker_row_stats()
     # solo ticker con abbastanza storico per gli indicatori del motore
@@ -75,7 +78,8 @@ def main(strategies, start_date, label, universe_data, tickers, params=None):
         rows.append(_row("Equal weight B&H", eqw, eqw.iloc[-1], 0))
 
     for k, r in res.items():
-        m = compute_backtest_performance_metrics(r['trades'], INITIAL_CAPITAL)
+        m = compute_backtest_performance_metrics(r['trades'], INITIAL_CAPITAL,
+                                                 nav_daily=r.get('nav'))
         if m and m.get('Equity_Curve') is not None:
             curves[r['name']] = m['Equity_Curve']
         rows.append(_row(r['name'], m['Equity_Curve'] if m else None, r['final'],

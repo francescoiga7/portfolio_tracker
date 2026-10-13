@@ -185,9 +185,7 @@ def render_data_hub_ui():
 
     st.divider()
 
-    # ------------------------------------------------------------------
-    # Download / aggiornamento per lista di ticker
-    # ------------------------------------------------------------------
+# Download / aggiornamento per lista di ticker ---
     st.subheader("⬇️ Scarica / Aggiorna ticker")
 
     col_input, col_opts = st.columns([3, 2])
@@ -225,9 +223,7 @@ def render_data_hub_ui():
                 skip_updated_today=False,
             )
 
-    # ------------------------------------------------------------------
-    # Aggiornamento di tutto il DB
-    # ------------------------------------------------------------------
+# Aggiornamento di tutto il DB ---
     st.divider()
     st.subheader("🔄 Aggiorna tutto il DB")
 
@@ -254,9 +250,7 @@ def render_data_hub_ui():
                     skip_updated_today=not force_all,
                 )
 
-    # ------------------------------------------------------------------
-    # Contenuto del DB
-    # ------------------------------------------------------------------
+# Contenuto del DB ---
     st.divider()
     with st.expander(f"🗄️ Contenuto del DB ({stats['tickers']:,} ticker)", expanded=False):
         info = dm.get_all_tickers_info()
@@ -265,9 +259,7 @@ def render_data_hub_ui():
         else:
             st.dataframe(info, width="stretch", hide_index=True)
 
-    # ------------------------------------------------------------------
-    # Cache negativa
-    # ------------------------------------------------------------------
+# Cache negativa ---
     with st.expander(f"🚫 Ticker in cache negativa ({stats['failed']})", expanded=False):
         failed_info = dm.get_failed_tickers_info()
         if failed_info.empty:

@@ -81,7 +81,8 @@ BULK_BATCH_PAUSE = 1.0           # secondi di pausa tra i batch: riduce il risch
 # nessun ticker finisce in blacklist. Default: 10 minuti.
 YAHOO_RATE_LIMIT_COOLDOWN = 600
 
-# --- NUOVA STRATEGIA DI DISCOVERY A MATRICE ---
+# --- Discovery universo ETF: query generate a matrice ---
+# (asset class × geografia, temi, fattori, emittenti, commodity)
 asset_classes = ["Equity", "Government Bond", "Corporate Bond", "Aggregate Bond", "Commodity", "Real Estate"]
 geographies = ["Global", "Europe", "USA", "Eurozone", "Emerging Markets", "Japan", "Pacific", "Germany", "UK", "China"]
 themes_sectors = [
@@ -96,22 +97,18 @@ factors = ["Value", "Growth", "Momentum", "Quality", "Minimum Volatility", "Size
 providers = ["iShares", "Xtrackers", "Amundi", "Lyxor", "Invesco", "VanEck", "Vanguard", "SPDR", "HANetf", "ARK", "JPMorgan"]
 specific_commodities = ["Gold ETC", "Silver ETC", "Oil ETC", "Bitcoin ETP", "Ethereum ETP", "Crypto ETP"]
 
-# Generazione delle query a matrice
+# Query a matrice per la discovery: asset class × geografia, temi, fattori,
+# emittenti, commodity
 generated_queries = set()
-# 1. Asset Class x Geografia
 for ac in asset_classes:
     for geo in geographies:
         generated_queries.add(f'"{ac} {geo} UCITS ETF"')
-# 2. Tematici e Settoriali
 for theme in themes_sectors:
     generated_queries.add(f'"{theme} UCITS ETF"')
-# 3. Fattori
 for factor in factors:
     generated_queries.add(f'"{factor} Factor UCITS ETF"')
-# 4. Emittenti
 for provider in providers:
     generated_queries.add(f'"{provider} UCITS ETF"')
-# 5. Commodities Specifiche
 for comm in specific_commodities:
     generated_queries.add(f'"{comm}"')
 

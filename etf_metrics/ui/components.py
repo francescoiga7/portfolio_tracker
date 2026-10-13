@@ -15,9 +15,7 @@ except Exception:
 from etf_metrics.core.metrics import compute_metrics_from_series, compute_sharpe_ratio
 
 
-# =====================================================================
-# Selettore universo ticker (watchlist manuale o tutto il DB locale)
-# =====================================================================
+# Selettore universo ticker (watchlist manuale o tutto il DB locale) ---
 
 UNIVERSE_WATCHLIST = "✍️ Ticker che inserisco"
 UNIVERSE_WHOLE_DB = "📦 Tutto il DB locale"

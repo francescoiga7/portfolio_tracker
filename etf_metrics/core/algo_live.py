@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """Portafoglio algoritmico live: mette in PRATICA le strategie del backtest.
 
-Lo stato reale (cassa, posizioni, log) è persistito in JSON. `run_daily_update`
-replica esattamente la logica del motore di backtest (`run_market_aware_backtest`)
+Lo stato reale (cassa, posizioni, log) e' persistito in JSON. `run_daily_update`
+replica la logica del motore di backtest (`run_market_aware_backtest`)
 sull'ultimo giorno disponibile, applicandola allo stato REALE del portafoglio
-(es. Trade Republic) e producendo le operazioni consigliate (acquisto/vendita).
+(es. Trade Republic) e producendo le operazioni consigliate.
 
-Nessuna dipendenza da Streamlit: la UI (o lo script cron `scripts/live_daily.py`)
-si occupa solo di rendering e stato.
+Nessuna dipendenza da Streamlit: la UI si occupa solo di rendering e stato.
 """
 import json
 import os
@@ -75,8 +74,8 @@ def get_latest_market_data(tickers: List[str], allow_download: bool = True) -> D
     backtest), così le colonne RS sono disponibili alle strategie.
     """
     benchmark = CONFIG['SPY_TICKER']
-    # SPY nel DB (anche se non nell'universo): usato come benchmark REALE per
-    # regime e RS. Senza SPY si ricade sul proxy equal-weight dell'universo.
+    # SPY nel DB (anche se non nell'universo): benchmark REALE per regime e
+    # RS. Senza SPY si ricade sul proxy equal-weight dell'universo.
     load_list = [t for t in tickers if t != benchmark]
     try:
         from etf_metrics.core.data_manager import MarketDataManager
@@ -91,8 +90,8 @@ def get_latest_market_data(tickers: List[str], allow_download: bool = True) -> D
     if spy_df is not None and not spy_df.empty:
         data[benchmark] = calculate_advanced_metrics_vectorized(spy_df)
     else:
-        # Senza SPY (es. universo Xetra puro): benchmark di riserva equal-weight
-        # dell'universo, così regime e RS restano significativi
+        # Senza SPY (es. universo Xetra puro): proxy equal-weight, cosi' regime
+        # e RS restano significativi
         proxy = build_benchmark_proxy(raw)
         if proxy is not None:
             data[BENCH_PROXY_KEY] = calculate_advanced_metrics_vectorized(proxy)
@@ -149,8 +148,7 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
     """
     strat_key = strategy or state.get('strategy') or DEFAULT_STRATEGY
     if strat_key not in STRATEGIES:
-        # strategia rimossa (es. dual_momentum/mean_reversion/orderflow cancellate):
-        # ricade su quella di default senza crashare
+        # strategia ritirata o non nota: ricade sul default senza crashare
         strat_key = DEFAULT_STRATEGY
     state['strategy'] = strat_key
     strat = get_strategy(strat_key)
@@ -168,7 +166,6 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
         market_data = get_latest_market_data(
             sorted(set(tickers_list or []) | set((state.get('positions') or {}).keys())))
     # Benchmark effettivo: SPY se disponibile, altrimenti proxy equal-weight
-    # dell'universo (universi Xetra senza titoli USA)
     if benchmark not in market_data and BENCH_PROXY_KEY in market_data:
         benchmark = BENCH_PROXY_KEY
     if benchmark not in market_data:
@@ -212,9 +209,7 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
         state['buys_this_month'] = 0
     buys_this_month = int(state.get('buys_this_month', 0))
 
-    # ------------------------------------------------------------------
-    # 1. GESTIONE USCITE (vendite consigliate)
-    # ------------------------------------------------------------------
+# 1. GESTIONE USCITE (vendite consigliate) ---
     for t in list(positions.keys()):
         pos = positions.get(t)
         if pos is None:
@@ -274,9 +269,7 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
         })
         messages.append(f"🔴 VENDI **{t}**: {qty_sell:g} pz @ {price:.2f} — {reason}")
 
-    # ------------------------------------------------------------------
-    # 2. GESTIONE INGRESSI (acquisti consigliati)
-    # ------------------------------------------------------------------
+# 2. GESTIONE INGRESSI (acquisti consigliati) ---
     buy_allowed = strat.can_buy(ctx) and \
         (not cfg['ENABLE_MONTHLY_LIMIT'] or buys_this_month < cfg['MAX_BUYS_PER_MONTH'])
 
@@ -366,9 +359,7 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
                     stop_txt = f" (stop iniziale {float(stop):.2f})" if stop is not None else ""
                     messages.append(f"🟢 COMPRA **{t}**: {qty:g} pz @ {price:.2f}{stop_txt} — {cand['reason']}")
 
-    # ------------------------------------------------------------------
-    # 3. Riepilogo
-    # ------------------------------------------------------------------
+# 3. Riepilogo ---
     nav = state['cash']
     for t, p in positions.items():
         try:

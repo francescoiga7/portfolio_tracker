@@ -25,19 +25,10 @@ _CONVERT_LOCK = threading.Lock()
 class MarketDataManager:
     """Gestore del DB dei prezzi con doppio backend: Parquet (default) o SQLite (legacy).
 
-    Il backend è scelto dal percorso (estensione `.db`/`.sqlite` = SQLite,
-    directory o altro = Parquet). Un file `.duckdb` legacy viene convertito
-    automaticamente allo store Parquet al primo uso (e rinominato in
-    `.pre-parquet.bak`). L'API pubblica è identica per entrambi i backend.
-
-    Perché Parquet partizionato per mese: è un formato colonnare aperto che
-    pyarrow legge con proiezione delle colonne e pruning dei row-group (decisivo
-    con milioni di righe OHLCV, es. tutto Xetra), e gli upsert incrementali
-    riscrivono SOLO le partizioni dei mesi coinvolti: lo storico passato non
-    viene mai toccato. Il Gestore Dati (pagina 📥) scarica direttamente qui; il
-    vecchio `market_data.db` SQLite resta al suo posto, invariato, e resta
-    usabile passandone il percorso esplicitamente (o migrandolo con il
-    pulsante "🚀 Migra a Parquet" della UI).
+    Backend scelto dal percorso (`.db`/`.sqlite` = SQLite, directory = Parquet).
+    Un file `.duckdb` legacy viene convertito one-shot a Parquet al primo uso
+    (originale rinominato `.pre-parquet.bak`). API identica per entrambi i
+    backend. Layout e vantaggi dello store Parquet: vedi parquet_store.py.
     """
 
     def __init__(self, db_path: Optional[str] = None):
@@ -59,9 +50,9 @@ class MarketDataManager:
         self._init_db()
 
     def _convert_legacy_duckdb(self, db_path: str) -> str:
-        """Converte un DB DuckDB legacy nello store Parquet (one-shot) e ritorna
-        il percorso dello store. Al termine il file `.duckdb` viene rinominato
-        in `<nome>.duckdb.pre-parquet.bak` (i dati originali restano intatti)."""
+        """Converte un DB DuckDB legacy in Parquet (one-shot); ritorna il
+        percorso dello store. L'originale viene rinominato
+        `<nome>.duckdb.pre-parquet.bak` (dati intatti)."""
         if not os.path.exists(db_path):
             raise RuntimeError(
                 "Il percorso del DB dei prezzi punta a un file DuckDB legacy che "
@@ -86,13 +77,11 @@ class MarketDataManager:
                 f"righe, {report['tickers']} ticker) → {dest}")
             return dest
 
-    # ------------------------------------------------------------------
-    # Connessioni / primitive (backend SQLite legacy)
-    # ------------------------------------------------------------------
+# Connessioni / primitive (backend SQLite legacy) ---
 
     def _get_conn(self):
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        # Ottimizzazione commit: con WAL, synchronous=NORMAL è sicuro e molto più veloce
+        # Con WAL, synchronous=NORMAL e' sicuro e molto piu' veloce
         try:
             conn.execute("PRAGMA synchronous=NORMAL")
         except Exception:
@@ -115,21 +104,19 @@ class MarketDataManager:
         finally:
             conn.close()
 
-    # ------------------------------------------------------------------
-    # Inizializzazione schema
-    # ------------------------------------------------------------------
+# Inizializzazione schema ---
 
     def _init_db(self):
         """Inizializza lo storage se non esiste (schema identico per backend)."""
         if self.backend == 'sqlite':
             self._init_db_sqlite()
-        # Parquet: le directory dello store vengono create da ParquetStore.__init__
+        # Parquet: le directory vengono create da ParquetStore.__init__
 
     def _init_db_sqlite(self):
         conn = self._get_conn()
         cursor = conn.cursor()
 
-        # Modalità WAL: letture concorrenti durante le scritture + commit più rapidi
+        # Modalita' WAL: letture concorrenti durante le scritture
         try:
             cursor.execute("PRAGMA journal_mode=WAL")
         except Exception as e:
@@ -179,9 +166,7 @@ class MarketDataManager:
         conn.commit()
         conn.close()
 
-    # ------------------------------------------------------------------
-    # Registro aggiornamenti
-    # ------------------------------------------------------------------
+# Registro aggiornamenti ---
 
     def get_tickers_needing_update(self, tickers: list) -> list:
         """Ritorna la lista dei ticker che NON sono stati aggiornati oggi,
@@ -211,7 +196,7 @@ class MarketDataManager:
         input_set = set(tickers)
         candidates = list(input_set - updated_set)
 
-        # Cache negativa: salta i ticker che non hanno mai dato dati (policy di retry da config)
+        # Cache negativa: salta i ticker senza dati (policy di retry da config)
         failed = self.get_failed_tickers()
         if failed:
             candidates = [t for t in candidates if t not in failed]
@@ -219,25 +204,27 @@ class MarketDataManager:
         return candidates
 
     def _normalize_ohlcv_frame(self, ticker: str, df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        """Normalizza un frame OHLCV (output yfinance) nello schema della tabella prices:
-        colonne [date, ticker, open, high, low, close, volume], date come stringa ISO
-        'YYYY-MM-DD HH:MM:SS' (stesso formato scritto da to_sql: serve per far
-        combaciare la PRIMARY KEY (ticker, date) negli upsert incrementali SQLite;
-        il backend Parquet riconverte in datetime prima di scrivere)."""
+        """Normalizza un frame OHLCV (output yfinance) nello schema della
+        tabella prices: colonne [date, ticker, open, high, low, close, volume].
+
+        Le date diventano stringhe ISO 'YYYY-MM-DD HH:MM:SS' (formato scritto
+        da to_sql: fa combaciare la PRIMARY KEY (ticker, date) negli upsert
+        SQLite; il backend Parquet riconverte in datetime prima di scrivere).
+        """
         if df is None or df.empty:
             return None
 
         df_to_save = df.copy()
 
-        # FIX MULTIINDEX/TUPLE ERROR:
-        # Se yfinance restituisce un MultiIndex (es. ('Close', 'NVDA')), prendiamo l'ultimo livello
+        # yfinance puo' restituire un MultiIndex (es. ('Close', 'NVDA')):
+        # si tiene l'ultimo livello
         if isinstance(df_to_save.columns, pd.MultiIndex):
             df_to_save.columns = df_to_save.columns.get_level_values(-1)
 
         if 'Date' not in df_to_save.columns:
             df_to_save = df_to_save.reset_index()
 
-        # Pulisce i nomi colonne (rimuove eventuali residui di tuple e fa lowercase)
+        # Pulisce i nomi colonne (residui di tuple -> lowercase)
         new_cols = []
         for c in df_to_save.columns:
             col_str = str(c[0]) if isinstance(c, tuple) else str(c)
@@ -252,7 +239,7 @@ class MarketDataManager:
                 df_to_save[c] = 0.0
         df_to_save = df_to_save[cols]
 
-        # Formato data uniforme + dedup + ordinamento (robustezza per il merge)
+        # Data uniforme + dedup + ordinamento (robustezza per il merge)
         df_to_save['date'] = pd.to_datetime(df_to_save['date']).dt.strftime('%Y-%m-%d %H:%M:%S')
         df_to_save = df_to_save.drop_duplicates(subset=['date']).sort_values('date')
         return df_to_save
@@ -276,11 +263,9 @@ class MarketDataManager:
         """, (ticker, asset_name, today))
 
     def save_bulk_data(self, data_dict: dict, names_dict: dict = None):
-        """
-        Salva i dati scaricati nel DB (SOSTITUISCE lo storico del ticker) e aggiorna
-        la data di update e il nome.
-        data_dict: { 'TICKER': pd.DataFrame, ... }
-        names_dict: { 'TICKER': 'Nome Esteso', ... } (Opzionale)
+        """Salva i dati nel DB SOSTITUENDO lo storico dei ticker e aggiornando
+        data di update e nome.
+        data_dict: {'TICKER': DataFrame}; names_dict: {'TICKER': 'Nome'} opzionale.
         """
         if not data_dict: return
 
@@ -313,11 +298,11 @@ class MarketDataManager:
         conn = self._get_conn()
         try:
             for ticker, df in frames.items():
-                # Rimuovi vecchi prezzi per questo ticker per evitare duplicati sporchi
+                # sostituzione: si rimuove lo storico del ticker per evitare duplicati
                 conn.execute("DELETE FROM prices WHERE ticker = ?", (ticker,))
                 df.to_sql('prices', conn, if_exists='append', index=False)
 
-                # Se un ticker precedentemente fallito ora ha dati, toglierlo dalla blacklist
+                # un ticker fallito che ora ha dati esce dalla blacklist
                 conn.execute("DELETE FROM failed_tickers WHERE ticker = ?", (ticker,))
 
                 self._upsert_updates(conn, ticker, names_dict.get(ticker), today)
@@ -382,23 +367,23 @@ class MarketDataManager:
                 logger.error(f"Errore merge incrementale store Parquet: {e}")
             return stats
 
-        # --- SQLite (percorso originale) ---
+        # --- SQLite (legacy) ---
         conn = self._get_conn()
         try:
             for ticker, norm in frames.items():
-                # Ultima data presente PRIMA del merge: serve a contare le righe nuove
+                # ultima data presente PRIMA del merge: per contare le righe nuove
                 row = conn.execute(
                     "SELECT MAX(date) FROM prices WHERE ticker = ?", (ticker,)).fetchone()
                 last_before = row[0] if row and row[0] else None
 
-                # INSERT OR REPLACE: le date già presenti (es. ultima giornata parziale)
-                # vengono aggiornate con il valore definitivo, le altre aggiunte
+                # INSERT OR REPLACE: le date gia' presenti (es. ultima giornata
+                # parziale) vengono aggiornate col valore definitivo
                 conn.executemany(
                     "INSERT OR REPLACE INTO prices "
                     "(date, ticker, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     list(norm.itertuples(index=False, name=None)))
 
-                # Un ticker prima fallito che ora produce dati viene riabilitato
+                # un ticker fallito che ora produce dati viene riabilitato
                 conn.execute("DELETE FROM failed_tickers WHERE ticker = ?", (ticker,))
 
                 self._upsert_updates(conn, ticker, names_dict.get(ticker), today)
@@ -653,7 +638,6 @@ class MarketDataManager:
             return {}
 
         result = {}
-        # Ottimizzazione: raggruppamento pandas
         for ticker, group in df_all.groupby('ticker'):
             df_cleaned = group.set_index('date').sort_index()
             df_cleaned.columns = [c.capitalize() for c in df_cleaned.columns]
@@ -674,7 +658,7 @@ class MarketDataManager:
                 updates = updates[updates['ticker'].isin(set(tickers))]
                 names = {}
                 for r in updates.itertuples(index=False):
-                    # Se il nome è nullo/NaN usa il ticker
+                    # nome nullo/NaN -> ticker
                     names[r.ticker] = r.name if (pd.notna(r.name) and r.name) else r.ticker
                 return {t: names.get(t, t) for t in tickers}
             except Exception as e:
@@ -692,17 +676,15 @@ class MarketDataManager:
             logger.error(f"Errore recupero nomi: {e}")
             return {t: t for t in tickers}
 
-        # Crea dizionario, se il nome è nullo/NaN usa il ticker
+        # nome nullo/NaN -> ticker
         return {row['ticker']: (row['name'] if pd.notna(row['name']) and row['name']
                                 else row['ticker']) for row in rows}
 
-    # ------------------------------------------------------------------
-    # Cache negativa: ticker senza dati su Yahoo ("no data found")
-    # ------------------------------------------------------------------
+# Cache negativa: ticker senza dati su Yahoo ("no data found") ---
 
     def record_failed_tickers(self, tickers: list, reason: str = "no data found") -> None:
-        """Registra i ticker che non hanno prodotto dati, per non riscaricarli in futuro.
-        Se un ticker è già presente, incrementa i tentativi e aggiorna la data."""
+        """Registra i ticker senza dati, per non riscaricarli. Se gia' presenti
+        incrementa i tentativi e aggiorna la data."""
         if not tickers: return
         today = date.today().isoformat()
         if self.backend == 'parquet':
@@ -746,8 +728,8 @@ class MarketDataManager:
                     return set()
                 if retry_days is None:
                     return set(failed['ticker'])
-                # Blacklist attiva solo se il fallimento è più recente della finestra
-                # di retry: retry_days=0 -> nessun ticker è blacklistato (retry sempre)
+                # Blacklist attiva solo se il fallimento e' dentro la finestra
+                # di retry: retry_days=0 -> retry sempre
                 cutoff = (date.today() - timedelta(days=int(retry_days))).isoformat()
                 return set(failed.loc[failed['last_failed'] > cutoff, 'ticker'])
             except Exception as e:

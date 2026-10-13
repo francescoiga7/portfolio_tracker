@@ -1,32 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Store Parquet partizionato per mese per i dati di mercato OHLCV.
+"""Store Parquet dei prezzi OHLCV, partizionato per mese (layout Hive).
 
-Layout su disco (partizionamento Hive, una directory per mese):
+    <store_dir>/prices/month=YYYY-MM/data.parquet   # prezzi
+    <store_dir>/_meta/{updates,failed_tickers}.parquet  # metadati
 
-    <store_dir>/
-    ├── prices/
-    │   ├── month=2023-11/
-    │   │   └── data.parquet
-    │   ├── month=2023-12/
-    │   │   └── data.parquet
-    │   └── ...
-    └── _meta/
-        ├── updates.parquet          # registro aggiornamenti {ticker, name, last_updated}
-        └── failed_tickers.parquet   # cache negativa {ticker, reason, ...}
+Perche' Parquet partizionato: formato colonnare (proiezione colonne +
+pruning row-group + multithread), upsert che riscrive SOLO le partizioni
+dei mesi coinvolti (lo storico non viene mai toccato), layout standard
+leggibile da pandas/polars/DuckDB/Spark.
 
-Perché Parquet partizionato per mese:
-- formato colonnare aperto (pyarrow): le letture proiettano solo le colonne
-  richieste e saltano i row-group non pertinenti (statistiche + dizionari),
-  con decodifica multithread nativa
-- ogni upsert incrementale riscrive SOLO le partizioni dei mesi coinvolti
-  (tipicamente quella corrente): lo storico dei mesi passati non viene mai
-  toccato
-- il layout Hive (`month=YYYY-MM`) è standard e leggibile da qualunque tool
-  (pandas, polars, DuckDB, Spark) senza dipendenze dal progetto
-
-Concorrenza: le scritture sono serializzate da un lock di processo (RLock);
-le letture non richiedono lock perché i file Parquet sono immutabili una volta
-pubblicati (si scrive un file temporaneo nascosto e lo si rinomina atomicamente).
+Concorrenza: scritture serializzate da un lock di processo (RLock); le
+letture non richiedono lock perche' i file pubblicati sono immutabili
+(scrittura su file temporaneo nascosto + rename atomico).
 """
 import logging
 import os
@@ -42,9 +27,9 @@ import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
 
-# Lock di processo per le scritture (l'app è multithread con Streamlit).
-# RLock: le operazioni composite (prezzi + metadati) acquisiscono il lock una
-# sola volta e richiamano metodi interni che lo ri-acquisiscono.
+# Lock di processo per le scritture (l'app e' multithread con Streamlit).
+# RLock: le operazioni composite (prezzi + metadati) richiamano metodi
+# interni che ri-acquisiscono il lock.
 _WRITE_LOCK = threading.RLock()
 
 # Schema canonico della tabella prezzi (colonne e ordine fissi)
@@ -98,9 +83,7 @@ class ParquetStore:
         os.makedirs(self.meta_dir, exist_ok=True)
         self._cleanup_tmp_files()
 
-    # ------------------------------------------------------------------
-    # Primitive di basso livello
-    # ------------------------------------------------------------------
+# Primitive di basso livello ---
 
     @property
     def write_lock(self) -> threading.RLock:
@@ -183,9 +166,7 @@ class ParquetStore:
             os.remove(final_path)
         os.replace(tmp_path, final_path)
 
-    # ------------------------------------------------------------------
-    # Prezzi: upsert incrementale / replace / letture
-    # ------------------------------------------------------------------
+# Prezzi: upsert incrementale / replace / letture ---
 
     def merge_prices(self, new_df: pd.DataFrame) -> int:
         """Upsert incrementale: aggiorna/aggiunge le righe di `new_df` riscrivendo
@@ -380,9 +361,7 @@ class ParquetStore:
             'partitions': len(self.month_partitions()),
         }
 
-    # ------------------------------------------------------------------
-    # Metadati: registro aggiornamenti (updates)
-    # ------------------------------------------------------------------
+# Metadati: registro aggiornamenti (updates) ---
 
     def _meta_path(self, name: str) -> str:
         return os.path.join(self.meta_dir, f'{name}.parquet')
@@ -450,9 +429,7 @@ class ParquetStore:
             out = pd.concat([keep, block]) if len(keep) else block
             self._write_meta('updates', out.reset_index())
 
-    # ------------------------------------------------------------------
-    # Metadati: cache negativa (failed_tickers)
-    # ------------------------------------------------------------------
+# Metadati: cache negativa (failed_tickers) ---
 
     def read_failed(self) -> pd.DataFrame:
         """Tabella failed_tickers: {ticker, reason, first_failed, last_failed, attempts}."""

@@ -25,21 +25,17 @@ logger = logging.getLogger(__name__)
 UNKNOWN = "Sconosciuto"
 BASE_INFO = {"fundFamily": UNKNOWN, "category": UNKNOWN}
 
-# TTL della cache negativa in memoria (secondi): dopo N secondi viene rilettta dal DB
+# TTL della cache negativa in memoria (secondi): dopo N secondi viene riletta dal DB
 _FAILED_CACHE_TTL = 60.0
 # TTL dell'health-check di rete (secondi)
 _NETWORK_CHECK_TTL = 120.0
 
 
-# ------------------------------------------------------------------
-# Gestione rate limit Yahoo (HTTP 429 / "Too Many Requests")
-#
-# yf.download NON lancia un'eccezione in caso di 429: si limita a loggare
-# "N Failed downloads: [...]: YFRateLimitError(...)" sul logger "yfinance".
-# Un handler dedicato intercetta quei messaggi e attiva un cooldown globale:
-# finché è attivo, tutte le chiamate di rete vengono sospese (niente martellate)
-# e nessun ticker finisce in blacklist per colpa del rate limit.
-# ------------------------------------------------------------------
+# Gestione rate limit Yahoo (HTTP 429) ---
+# yf.download NON lancia un'eccezione in caso di 429: logga sul logger
+# "yfinance". Un handler dedicato intercetta quei messaggi e attiva un
+# cooldown globale: finche' attivo le chiamate di rete vengono sospese e
+# nessun ticker finisce in blacklist per colpa del rate limit.
 _rate_lock = threading.Lock()
 _RATE_LIMITED_UNTIL = 0.0  # time.monotonic() fino al quale evitare chiamate
 
@@ -81,13 +77,6 @@ def _mark_rate_limited(reason: str = "") -> None:
         f" ({reason})" if reason else "",
         max(1, round(YAHOO_RATE_LIMIT_COOLDOWN / 60)),
     )
-
-
-def _reset_rate_limit() -> None:
-    """Solo per test: azzera il cooldown del rate limit."""
-    global _RATE_LIMITED_UNTIL
-    with _rate_lock:
-        _RATE_LIMITED_UNTIL = 0.0
 
 
 class _RateLimitDetector(logging.Handler):
@@ -147,9 +136,7 @@ class YahooClient(BaseFinancialClient):
         """Accetta qualsiasi stringa non vuota (ticker, query o ISIN)."""
         return isinstance(input_data, str) and input_data.strip() != ""
 
-    # ------------------------------------------------------------------
-    # Cache negativa dei ticker "no data found"
-    # ------------------------------------------------------------------
+# Cache negativa dei ticker "no data found" ---
 
     def _load_failed_cache(self, force: bool = False) -> set:
         """Legge la blacklist dei ticker falliti dal DB (con TTL in memoria)."""
@@ -358,9 +345,7 @@ class YahooClient(BaseFinancialClient):
         except Exception:
             return {}
 
-    # ------------------------------------------------------------------
-    # Download massivo (universi grandi, es. tutto Xetra)
-    # ------------------------------------------------------------------
+# Download massivo (universi grandi, es. tutto Xetra) ---
 
     def get_series_bulk(
         self,
@@ -374,16 +359,13 @@ class YahooClient(BaseFinancialClient):
         """
         Download massivo dei prezzi con yf.download in batch paralleli.
 
-        Vantaggi rispetto al loop di get_series (o a un'unica chiamata gigante):
-        - batch isolati: un fallimento non blocca l'universo intero
-        - i ticker in cache negativa vengono saltati senza chiamate di rete
+        - batch isolati: un fallimento non blocca l'universo
+        - i ticker in cache negativa vengono saltati senza rete
         - finiscono in blacklist SOLO i ticker completamente senza dati, e solo
-          se il batch ha avuto successo almeno parziale (rete funzionante);
-          i ticker con poche righe (es. ETF appena quotati) NON vengono
-          blacklistati: verranno ritentati e cresceranno nei run successivi
-        - progress_callback(batch_done, total_batches, downloaded_count) per la UI
-        - start="YYYY-MM-DD" (opzionale): download DELTA da quella data (inclusa)
-          invece dell'intero period — usato dagli aggiornamenti incrementali
+          se il batch ha avuto successo parziale (rete OK); chi ha poche righe
+          (ETF appena quotati) NON viene blacklistato
+        - start="YYYY-MM-DD" (opzionale): download DELTA da quella data
+        - progress_callback(batch_done, total_batches, downloaded_count)
 
         Ritorna {ticker: DataFrame[Open, High, Low, Close, Volume]}.
         """
@@ -403,8 +385,7 @@ class YahooClient(BaseFinancialClient):
         if not to_download:
             return results
 
-        # Rate limit attivo: niente martellate, si riprova dopo il cooldown.
-        # I dati già nel DB restano comunque utilizzabili dal chiamante.
+        # Rate limit attivo: niente martellate (i dati gia' nel DB restano usabili)
         if is_rate_limited():
             logger.warning("Download bulk sospeso: rate limit Yahoo attivo "
                            f"(ancora {rate_limit_wait_seconds():.0f}s). Riprova più tardi.")
@@ -415,7 +396,7 @@ class YahooClient(BaseFinancialClient):
         logger.info(f"Download bulk: {len(to_download)} ticker in {len(batches)} batch "
                     f"da {batch_size} ({mode_desc}, thread={threads}).")
 
-        # Parametri di download: start (delta inclusivo) OPPURE period (storico completo)
+        # Parametri di download: start (delta inclusivo) OPPURE period (storico)
         dl_kwargs = dict(group_by='ticker', auto_adjust=False, actions=False,
                          progress=False, threads=threads)
         if start is not None:
@@ -424,22 +405,22 @@ class YahooClient(BaseFinancialClient):
             dl_kwargs['period'] = period
 
         for bi, batch in enumerate(batches):
-            # Un 429 in un batch precedente interrompe tutto: inutile peggiorare la situazione.
-            # I risultati già ottenuti vengono comunque restituiti (e salvati dal chiamante).
+            # un 429 interrompe tutto: i risultati gia' ottenuti vengono comunque
+            # restituiti (e salvati dal chiamante)
             if is_rate_limited():
                 logger.warning(f"Rate limit Yahoo rilevato: interrompo il download bulk al batch "
                                f"{bi + 1}/{len(batches)}. Restituiti {len(results)} ticker; "
                                f"riprova tra ~{rate_limit_wait_seconds() / 60:.0f} minuti.")
                 break
 
-            # Pausa tra i batch: riduce la probabilità di far scattare il rate limit
+            # Pausa tra i batch: riduce la probabilita' di far scattare il 429
             if bi > 0 and BULK_BATCH_PAUSE > 0:
                 time.sleep(BULK_BATCH_PAUSE)
 
             try:
                 raw = yf.download(batch, **dl_kwargs)
             except Exception as e:
-                # Fallimento dell'intero batch: quasi sicuramente rete/proxy, niente blacklist
+                # fallimento dell'intero batch: quasi sicuramente rete/proxy
                 if _looks_like_rate_limit(f"{type(e).__name__}: {e}"):
                     _mark_rate_limited(reason=f"batch {bi + 1}")
                 logger.warning(f"Batch {bi + 1}/{len(batches)} fallito (rete?): {e}")
@@ -452,8 +433,8 @@ class YahooClient(BaseFinancialClient):
                     break
                 continue
 
-            # Colonne piatte con batch multiplo: formato inatteso (download parzialmente
-            # fallito). Per sicurezza il batch viene saltato SENZA blacklistare nulla.
+            # Colonne piatte con batch multiplo = formato inatteso (download
+            # parzialmente fallito): il batch viene saltato SENZA blacklistare
             if not isinstance(raw.columns, pd.MultiIndex) and len(batch) > 1:
                 logger.warning(f"Batch {bi + 1}/{len(batches)}: formato colonne inatteso, batch saltato.")
                 if progress_callback:
@@ -474,7 +455,6 @@ class YahooClient(BaseFinancialClient):
                     else:
                         # yf.download con un solo ticker ritorna colonne piatte
                         df = raw.copy()
-
                     df = df.dropna(how='all')
                     if df.empty:
                         batch_empty.append(t)
@@ -492,10 +472,10 @@ class YahooClient(BaseFinancialClient):
                 except Exception:
                     batch_empty.append(t)
 
-            # Euristica anti falsi positivi: la blacklist viene aggiornata solo se
-            # il batch ha prodotto almeno un risultato (rete OK -> fallimenti reali).
-            # Solo i ticker COMPLETAMENTE vuoti: chi ha poche righe potrà crescere.
-            # Con il rate limit attivo (429) il vuoto NON è colpa del ticker: mai blacklistare.
+            # Anti falsi positivi: blacklist solo se il batch ha prodotto almeno
+            # un risultato (rete OK -> fallimenti reali) e solo per i ticker
+            # COMPLETAMENTE vuoti. Con il 429 attivo il vuoto non e' colpa del
+            # ticker: mai blacklistare.
             if is_rate_limited():
                 if batch_empty:
                     logger.warning(f"Batch {bi + 1}/{len(batches)}: {len(batch_empty)} ticker senza dati, "

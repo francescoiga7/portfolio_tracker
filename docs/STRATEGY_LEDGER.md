@@ -4,7 +4,7 @@
 > ed esperimenti.** Ogni volta che una strategia viene aggiunta, promossa o
 > pensionata, questo registro va aggiornato con numeri e motivi.
 >
-> Ultimo aggiornamento: **2026-10-12**
+> Ultimo aggiornamento: **2026-10-13**
 
 ---
 
@@ -29,7 +29,11 @@ activate("bear_market")      # da qui in poi ricompare in Confronto Strategie
 
 - **Dati:** DB Xetra reale caricato da `market_data_parquet/` (nessuna chiamata a
   Yahoo), igienizzato da errori di livello prezzo (`_sanitize_ohlcv`: blocchi stub,
-  tick corrotti, tripli/dimezzamenti in una seduta). **Il DB non viene mai modificato.**
+  tick corrotti, tripli/dimezzamenti in un passaggio **a qualsiasi distanza di
+  calendario** — vedi la sezione 🔧 Hardening 2026-10-13). **Il DB non viene mai
+  modificato.** Inoltre ogni ingresso supera un gate di liquidità (prezzo minimo,
+  volume del giorno, posizione ≤ 20% del turnover medio 20gg in euro) e il NAV è
+  prezzato a mercato ogni seduta (DD/Sharpe onesti).
 - **Universo:** tutti i ticker con ≥ 200 righe (3.845 ticker, come il selettore
   "Tutto il DB" della UI).
 - **Finestra intera:** 2021-01-04 → 2026-10-09, capitale 10.000 €, commissione 2 €,
@@ -71,6 +75,74 @@ MaxDD è la sua diagnosi, non un motivo di ritiro.
 > dichiarato **prima** di eseguire il backtest (pre-registrazione), per evitare di
 > razionalizzare a posteriori.
 
+## 🔧 Hardening del motore (2026-10-13)
+
+Audit della run "Confronto Strategie" dal 2018: i numeri headline (Golden
+Chandelier +2.786%, CAGR 46%) erano riproducibili al centesimo, ma trainati da
+tre problemi **diversi** dal survivorship bias già dichiarato. Corretti nello
+stesso giorno, tutti verificabili offline sul DB locale:
+
+| # | Problema misurato | Fix |
+|---|---|---|
+| 1 | **Salti fantasma attraverso buchi di dati**: l'esenzione "gap > 7 giorni = sospensione, non rottura" del sanitizer lasciava passare i reverse split non aggiustati dei prodotti a leva (3TSE.DE **+3.605%** attraverso 493 giorni di buco; 1ZB.DE **+704%** dopo 836 giorni). Perfino gli indicatori erano inquinati (segnale "Mom6M +1.392%" calcolato attraverso il buco) | `_sanitize_ohlcv`: la regola del triplo/dimezzamento in un passaggio vale ora per **qualsiasi** distanza di calendario tra le righe |
+| 2 | **Compere non eseguibili**: il 50% degli ingressi della logica live avveniva con volume < 1.000 pezzi/giorno (35% sotto 100), per ~€173k di PnL su incommerciabili (2MUE.DE, 0GZE.DE, ESOM.DE: volume mediano **0**) | Gate di liquidità nel motore: prezzo ≥ 1 €, volume del giorno ≥ 500 pezzi, **posizione ≤ 20% del turnover medio 20gg in €** (ADV causale, `shift(1)`). Ogni BUY nel log ora riporta `ADV_EUR` e `ADV_Pct` |
+| 3 | **DD e Sharpe ottimisti**: la curva equity era ffilled dai soli giorni di trade | Il motore emette il NAV mark-to-market di **ogni seduta** (close ffilled, robusto a calendari USA/Xetra misti e sospensioni); `compute_backtest_performance_metrics` la usa per CAGR/MaxDD/Sharpe/Sortino |
+| 4 | **Fragilità invisibile**: top-5 vendite = 40% del profitto lordo; a fine 2026 metà del NAV in una sola posizione (0QF.DE) | Nuove colonne in Confronto Strategie (*Top-5 % utili*, *Peso max pos.*, *Max ADV*), opzione **🔁 multi-start** (CAGR min/mediano su 4 date di inizio) e riga B&H completa di CAGR/MaxDD/Sharpe |
+
+**Effetto misurato** (stessa configurazione della run esaminata: start 2018-01-01,
+capitale 10.000 €, commissione 1 €, 3 posizioni, tutto il DB):
+
+- Golden Chandelier: €278.640 → **€510.196** (CAGR 46,1% → 56,6%). I numeri non
+  scendono, cambia percorso: tolte le serie fantasma e le compere impossibili, la
+  strategia trova altre pompe **con dati reali**. L'hardening non promette numeri
+  più bassi, promette numeri onesti e fragilità **misurata**.
+- Multi-start GC (motore hardened): CAGR 56,6 / 59,5 / 43,4 / 60,0 / 49,8% (start
+  2018→2022). Minimo 43,4% contro il **9,8%** del motore vecchio: senza artefatti
+  il risultato è molto più stabile al variare della data di inizio.
+- Fragilità residua ora visibile: top-5 vendite = 37% del profitto lordo, peso max
+  posizione 58-68% del NAV, MaxDD -31% con Sharpe 1,47.
+- **Il survivorship bias resta** (non era oggetto dell'hardening): l'universo
+  contiene solo i ticker quotati oggi e i prodotti a leva estremi (0QF.DE, +121%
+  in un giorno, ADV ~€1-2M) restano commerciabili e attrattivi per il momentum.
+
+### Numeri — finestra intera 2021-01-04 → 2026-10-09 (motore hardened)
+
+| Strategia | Rend.% | CAGR% | MaxDD% | Sharpe | Trades | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| *S&P500 B&H* | *111.1* | — | — | — | 0 | *28.8* | *-19.5* | *24.3* | *23.3* | *16.4* | *14.2* |
+| *Equal weight B&H* | *55.4* | — | — | — | 0 | *21.4* | *-13.2* | *10.4* | *9.4* | *11.0* | *10.0* |
+| 🧠 AI Momentum | 415.3 | 32.9 | -30.2 | 0.9 | 486 | 102.8 | -6.2 | 27.6 | 2.6 | 31.2 | 57.8 |
+| 🌊 Trend Fusion | 541.4 | 38.1 | -23.8 | 1.2 | 384 | 25.8 | 18.7 | 31.8 | 45.2 | 55.6 | 44.4 |
+| 🐢 Turtle Breakout | 208.7 | 21.6 | -26.5 | 0.7 | 270 | 3.0 | 1.2 | 21.6 | 89.5 | 27.2 | 1.0 |
+| 🛡️ Golden Chandelier *(strumento di misura)* | 1382.2 | 59.7 | -30.8 | 1.3 | 370 | 100.4 | 12.1 | 51.7 | 22.9 | 47.1 | 140.7 |
+| 🚦 Golden Chandelier Difensivo | 1213.2 | 56.4 | -29.8 | 1.4 | 320 | 109.2 | 4.7 | 48.7 | 55.2 | 26.1 | 106.2 |
+| 🧘 Steady Winners (low-vol) | 148.3 | 17.1 | -11.0 | 1.2 | 320 | 9.4 | 7.4 | 27.2 | 16.1 | 30.8 | 9.4 |
+
+### Numeri — split di robustezza (motore hardened)
+
+| Strategia | Split A 21-23 (bear incluso) | MaxDD A | Sharpe A | Split B 24-26 (bull estremo) | MaxDD B | Sharpe B |
+|---|---:|---:|---:|---:|---:|---:|
+| *S&P500 B&H* | *+28.9%* | — | — | *+64.7%* | — | — |
+| *Equal weight B&H* | *+16.3%* | — | — | *+33.9%* | — | — |
+| 🧠 AI Momentum | +142.7% | -23.6 | 1.2 | +239.1% | -25.0 | 1.3 |
+| 🌊 Trend Fusion | +96.6% | -17.7 | 0.9 | +722.4% | -39.5 | 1.7 |
+| 🐢 Turtle Breakout | +26.8% | -26.5 | 0.3 | +371.9% | -24.9 | 1.9 |
+| 🛡️ Golden Chandelier | +240.6% | -19.9 | 1.4 | +478.5% | -40.8 | 1.7 |
+| 🚦 Golden Chandelier Difensivo | +225.6% | -22.9 | 1.6 | +228.4% | -33.7 | 1.1 |
+| 🧘 Steady Winners | +49.4% | -11.0 | 0.9 | +68.4% | -10.3 | 1.4 |
+
+**Letture notevoli dopo l'hardening** (tutte le strategie restano sopra il bar
+C1-C4, nessuna promozione/ritiro):
+
+- **Golden Chandelier**: MaxDD da -47.9% a **-30.8%** — non compra più serie
+  fantasma in bear. Rende ancora tanto (path luck su pompe con dati reali), ma
+  ora lo si *vede* dalle colonne di fragilità.
+- **AI Momentum**: +855.9% → **+415.3%** — il suo edge era il più esposto ai
+  titoli tossici/illiquidi (aveva il filtro macro, non quello di liquidità).
+- **Steady Winners**: +149.7% → **+148.3%**, MaxDD -11.0% — quasi immutata: il
+  profilo low-vol è il più robusto ai fix, conferma indiretta che l'anomalia è
+  reale e non un artefatto dei dati.
+
 ### Come rieseguire i numeri (offline, solo DB locale)
 
 ```bash
@@ -84,7 +156,13 @@ PYTHONPATH=. python3 scripts/run_xetra_comparison.py <keys> 2024-01-02          
 
 ## ✅ Strategie ATTIVE (6)
 
-### Numeri — finestra intera 2021-01-04 → 2026-10-09
+> ⚠️ I numeri e i dossier seguenti si riferiscono alla valutazione del
+> **2026-10-12 con il motore pre-hardening** e sono conservati come cronaca.
+> I numeri correnti (motore hardened 2026-10-13) sono nella sezione 🔧 sopra;
+> le strategie attive restano le stesse (tutte sopra il bar anche con il nuovo
+> motore).
+
+### Numeri — finestra intera 2021-01-04 → 2026-10-09 (motore pre-hardening)
 
 | Strategia | Rend.% | CAGR% | MaxDD% | Sharpe | Trades | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -97,7 +175,7 @@ PYTHONPATH=. python3 scripts/run_xetra_comparison.py <keys> 2024-01-02          
 | 🚦 Golden Chandelier Difensivo | 441.7 | 34.1 | -34.7 | 1.0 | 358 | 57.0 | 6.2 | 51.0 | 55.6 | -17.0 | 66.8 |
 | 🧘 Steady Winners (low-vol) | 149.7 | 17.2 | -12.7 | 0.7 | 176 | 49.9 | 5.8 | 13.4 | 2.8 | 22.6 | 10.3 |
 
-### Numeri — split di robustezza
+### Numeri — split di robustezza (motore pre-hardening)
 
 | Strategia | Split A 21-23 (bear incluso) | MaxDD A | Sharpe A | Split B 24-26 (bull estremo) | MaxDD B | Sharpe B |
 |---|---:|---:|---:|---:|---:|---:|
@@ -246,6 +324,7 @@ il 2026-10-12 e di nuovo ritirata lo stesso giorno: vedi sopra.*
 | 2026-10-12 | Esperimento letteratura | + `dual_momentum` v2 (12-1 Antonacci, parametri di letteratura) |
 | 2026-10-12 | Esperimenti a variabile singola | + `golden_chandelier_def` (filtro macro sulla logica live) e + `low_vol_trend` (anomalia low-vol): **entrambi promossi** |
 | 2026-10-12 | PENSIONAMENTI | − `bear_market` (MaxDD -69.2%), − `volume_profile` (split A sotto pari), − `dual_momentum` v2 (fragile, 78 trade); nasce questo registro e `retired_strategies.py` |
+| 2026-10-13 | **Hardening qualità dati e motore** | Sanitizer: rotture di prezzo a qualsiasi gap (reverse split attraverso buchi); gate di liquidità sugli ingressi (prezzo/volume/ADV ≤ 20%); NAV mark-to-market giornaliero; metriche di fragilità e multi-start nella UI. Numeri rigenerati: AI Momentum +855.9% → +415.3%, GC MaxDD -47.9% → -30.8%, Steady Winners quasi invariata (vedi sezione 🔧) |
 
 ---
 
@@ -297,3 +376,9 @@ il 2026-10-12 e di nuovo ritirata lo stesso giorno: vedi sopra.*
 7. **Confronta sempre con l'equal-weight dell'universo**, non solo col S&P500: è
    il riferimento onesto per capire quanto del rendimento è *selezione* e quanto è
    *bias dell'universo*.
+8. **I reverse split non aggiustati passano dai buchi di dati** (hardening
+   2026-10-13): 3TSE.DE +3.605% attraverso 493 giorni di buco, 1ZB.DE +704% dopo
+   836 giorni, e il 50% delle compere della logica live avveniva con volume
+   < 1.000 pezzi/giorno (~€173k di PnL su incommerciabili). Ogni numero prodotto
+   dal motore pre-2026-10-13 va letto con questa lente: la grandezza dei numeri
+   non era (solo) survivorship bias, era anche qualità dei dati ed eseguibilità.

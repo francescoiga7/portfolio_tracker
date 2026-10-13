@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 @lru_cache(maxsize=32768)
 def _get_info_for_ticker(ticker: str) -> Dict:
-    """Cached function to get info for a ticker."""
+    """Info (ISIN, nome) di un ticker, cached LRU."""
     if not ticker:
         return {}
     try:
@@ -47,7 +47,8 @@ def prefetch_ticker_infos(tickers: List[str], max_workers: int = None) -> None:
 
 
 def _normalize_name(name: str) -> str:
-    """Normalizes an ETF name for better matching."""
+    """Normalizza un nome ETF per il confronto (minuscolo, senza suffissi
+    condivisi tipo 'UCITS ETF', valute, classi)."""
     if not name:
         return ""
     name = name.lower()
@@ -60,7 +61,7 @@ def _normalize_name(name: str) -> str:
 
 @lru_cache(maxsize=32768)
 def _get_isin_for_ticker(ticker: str) -> Optional[str]:
-    """Wrapper to get ISIN from the new cached info function."""
+    """ISIN del ticker (dalle info cached), None se non noto."""
     info = _get_info_for_ticker(ticker)
     v = info.get("isin")
     if isinstance(v, str) and len(v) == 12:
@@ -72,10 +73,8 @@ def _get_isin_for_ticker(ticker: str) -> Optional[str]:
 
 
 def get_unique_preferred_tickers(tickers: List[str]) -> List[str]:
-    """
-    Deduplicates a list of tickers based on ISIN and then by normalized ETF name,
-    picking the preferred ticker for each unique ETF.
-    """
+    """Deduplica i ticker per ISIN e poi per nome ETF normalizzato, tenendo
+    il ticker preferito (suffissi in config.PREFERRED_SUFFIXES) per ogni ETF."""
     if not tickers:
         return []
 
@@ -127,9 +126,7 @@ def get_unique_preferred_tickers(tickers: List[str]) -> List[str]:
 
 
 def discover_universe(queries: Iterable[str], quotes_per_query: int, instrument_types: List[str] = None) -> List[str]:
-    """
-    Discovers a universe of instruments based on a list of queries and instrument types.
-    """
+    """Universo di strumenti (ETF/ETP/ETN) da ricerche Yahoo, deduplicato."""
     if instrument_types is None:
         instrument_types = ["ETF", "ETP", "ETN"]
     tickers_seen, ticker_list = set(), []

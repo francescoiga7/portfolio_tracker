@@ -18,9 +18,7 @@ from etf_metrics.shared.config import PORTFOLIO_FILE
 logger = logging.getLogger(__name__)
 
 
-# ----------------------------------------------------------------------------
-# Calcolo posizioni aperte / realizzato
-# ----------------------------------------------------------------------------
+# Calcolo posizioni aperte / realizzato ---
 def _calculate_open_positions(transactions: List[Dict[str, Any]]) -> DefaultDict[str, Dict[str, Any]]:
     """Calcola le quantità e i costi totali. Tiene traccia della data del primo acquisto attivo."""
     positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0, 'satellite': False, 'first_buy_date': None})
@@ -198,9 +196,7 @@ def _aggregate_portfolio_summary(open_positions_details, realized_pnl_net, trans
     }
 
 
-# ----------------------------------------------------------------------------
-# API di calcolo pubblica (pura)
-# ----------------------------------------------------------------------------
+# API di calcolo pubblica (pura) ---
 def calculate_portfolio_pnl(transactions: List[Dict[str, Any]], commission: float = 1.0, tax_rate: float = 26.0) -> Dict[str, Any]:
     """Calcola P&L realizzato/non realizzato, posizioni aperte e aggregati."""
     if not transactions:
@@ -243,9 +239,7 @@ def calculate_aggregated_positions(transactions, open_positions_details):
     return aggregated
 
 
-# ----------------------------------------------------------------------------
-# Persistenza portafogli (pura, senza Streamlit)
-# ----------------------------------------------------------------------------
+# Persistenza portafogli (pura, senza Streamlit) ---
 class PortfolioStore:
     """Gestione in-memory dei portafogli con persistenza su file JSON."""
 

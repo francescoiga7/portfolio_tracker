@@ -248,14 +248,5 @@ def migrate_duckdb_to_parquet(source: str = "market_data.duckdb",
     return report
 
 
-def migrate_to_parquet(source: str, dest: Optional[str] = None,
-                       progress_callback: Optional[Callable] = None) -> dict:
-    """Rileva il tipo di fonte dall'estensione e delega alla migrazione giusta."""
-    source = str(source)
-    if source.lower().endswith('.duckdb'):
-        return migrate_duckdb_to_parquet(source, dest, progress_callback)
-    return migrate_sqlite_to_parquet(source, dest, progress_callback)
-
-
 __all__ = ['PRICES_COLUMNS', 'migrate_sqlite_to_parquet',
-           'migrate_duckdb_to_parquet', 'migrate_to_parquet']
+           'migrate_duckdb_to_parquet']

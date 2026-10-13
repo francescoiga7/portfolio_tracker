@@ -1,23 +1,20 @@
 # -*- coding: utf-8 -*-
-"""
-Backtest algoritmico multi-strategia (Xetra / ETF / Azioni).
+"""Backtest algoritmico multi-strategia (Xetra / ETF / azioni).
 
-Ogni strategia implementa l'interfaccia `BaseStrategy`:
-  - prepare(df, spy_df, cfg): aggiunge colonne / indicatori specifici
-  - can_buy(ctx):            dice se il regime di mercato ammette acquisti
-  - entry(row, ctx):         punteggia i candidati all'ingresso (score, reason)
-  - exit_signal(pos, row):   regole di uscita specifiche -> (reason, portion, price)
-  - update_position(pos):    manutenzione posizione (trailing stop, flag, ecc.)
+Interfaccia strategia (`BaseStrategy`):
+  - prepare(df, spy_df, cfg): aggiunge colonne/indicatori specifici
+  - can_buy(ctx):   il regime di mercato ammette acquisti?
+  - entry(row, ctx): punteggia i candidati -> (score, reason)
+  - exit_signal(pos, row, ctx): regole di uscita -> None | (reason, portion, price)
+  - update_position(pos, row, ctx): manutenzione (trailing stop, flag)
 
-Il motore (`run_market_aware_backtest`) gestisce portafoglio, commissioni,
-tasse, limiti mensili di acquisto e filtro di correlazione in modo identico
-per tutte le strategie: il confronto tra algoritmi e' quindi "fair".
-
-Inoltre:
-  - `generate_fake_market_data`: crea dati OHLCV sintetici (scenari bull /
-    bear / crash / laterali) per simulare SENZA connessione a Yahoo Finance.
-  - `run_strategy_comparison`: esegue piu' strategie sugli stessi dati.
-  - `compute_buy_and_hold_curves`: benchmark buy & hold per battere S&P500.
+Il motore `run_market_aware_backtest` gestisce portafoglio, commissioni,
+tasse, limiti mensili e filtro correlazione in modo identico per tutte le
+strategie (confronto fair). Ogni ingresso passa un gate di liquidita'
+(prezzo/volume/ADV) e il NAV e' mark-to-market a ogni seduta: drawdown e
+Sharpe restano onesti anche nei giorni senza trade.
+Altri entrypoint: `run_strategy_comparison` (piu' strategie sugli stessi
+dati), `compute_buy_and_hold_curves` (benchmark buy & hold).
 """
 import pandas as pd
 import numpy as np
@@ -48,231 +45,38 @@ CONFIG = {
     'MIN_RS_SCORE': 80,
     'MIN_ADX': 25,
     'MIN_PROX_HIGH': 0.85,
-    'STOP_LOSS_ATR_MULT': 2.5,  # aumentare a 3 aumenta volatilità e rendimento
+    'STOP_LOSS_ATR_MULT': 2.5,
     'TIME_STOP_DAYS': 21,
-    'TP1_PCT': 0.12,  # 0.08, migliore 0.12
-    'MAX_CORRELATION': 0.65
+    'TP1_PCT': 0.12,
+    'MAX_CORRELATION': 0.65,
+    # Gate di liquidita' degli ingressi: un ordine su un titolo che nessuno
+    # scambia non e' eseguibile e gonfia i risultati in modo irripetibile.
+    'ENABLE_LIQUIDITY_GATE': True,
+    'MIN_ENTRY_PRICE': 1.0,          # EUR minimi di prezzo per l'ingresso
+    'MIN_ENTRY_VOLUME': 500,         # pezzi scambiati il giorno dell'ordine
+    'MAX_POSITION_VS_ADV': 0.20,     # posizione <= 20% del turnover 20gg in EUR
 }
 
+# 2. INDICATORI E IGIENE DEI DATI ---
 
-# =====================================================================
-# 1. GENERATORE DATI FAKE (nessuna connessione a Yahoo Finance richiesta)
-# =====================================================================
-
-FAKE_SCENARIOS: Dict[str, str] = {
-    "mixed_regimes": "Mercato realistico: bull → correzione → bear → rimbalzo → nuovo bull (consigliato)",
-    "bull_market": "Mercato rialzista prolungato con pullback moderati",
-    "bear_market": "Mercato ribassista prolungato con rally ribassisti",
-    "crash_recovery": "Bull lento → crollo rapido -35% → ripresa a V",
-    "sideways_chop": "Mercato laterale e volatile (lo scenario più difficile)",
-}
-
-# Segmenti: (giorni indicativi, rendimento totale del segmento, volatilità annua)
-_SCENARIO_SEGMENTS = {
-    "mixed_regimes": [
-        (320, 0.35, 0.15), (60, -0.12, 0.22), (170, -0.28, 0.30),
-        (200, 0.32, 0.24), (330, 0.45, 0.14), (60, -0.10, 0.20), (240, 0.28, 0.15),
-    ],
-    "bull_market": [
-        (500, 0.65, 0.13), (70, -0.12, 0.18), (400, 0.50, 0.12),
-        (100, -0.08, 0.16), (300, 0.40, 0.13),
-    ],
-    "bear_market": [
-        (120, 0.08, 0.14), (380, -0.45, 0.32), (150, 0.15, 0.22),
-        (300, -0.35, 0.28), (150, 0.10, 0.18),
-    ],
-    "crash_recovery": [
-        (400, 0.40, 0.12), (35, -0.35, 0.55), (180, 0.50, 0.38), (400, 0.45, 0.13),
-    ],
-    "sideways_chop": [
-        (600, 0.02, 0.20), (100, -0.15, 0.26), (200, 0.12, 0.18),
-        (100, -0.12, 0.24), (300, 0.05, 0.21),
-    ],
-}
-
-# Roster fisso: ruoli "archetipo" per rendere interpretabili i risultati.
-#   (ticker, descrizione, beta vs benchmark, vol idiosincratica annua, alpha annuo, prezzo iniziale, volume base)
-_FAKE_ROSTER = [
-    ("FTEC",  "Tech Growth",        1.70, 0.20,  0.055, 120.0, 800_000),
-    ("FAI",   "AI & Semicond.",     1.90, 0.26,  0.070,  90.0, 900_000),
-    ("FBIO",  "Biotech",            1.35, 0.32,  0.010,  60.0, 300_000),
-    ("FFIN",  "Financials",         1.10, 0.13,  0.004,  80.0, 500_000),
-    ("FENE",  "Energy",             0.95, 0.24, -0.015,  70.0, 400_000),
-    ("FCONS", "Consumer Def.",      0.75, 0.10,  0.005, 100.0, 350_000),
-    ("FGLD",  "Oro (difensivo)",   -0.15, 0.14,  0.018,  85.0, 250_000),
-    ("FBND",  "Obbligazioni",        0.05, 0.05,  0.020,  95.0, 200_000),
-    ("FINV",  "Inverse Market",    -1.00, 0.15, -0.025,  50.0, 600_000),
-]
-
-
-def _scale_segments(segs: List[Tuple[int, float, float]], total_days: int) -> List[Tuple[int, float, float]]:
-    """Scala proporzionalmente i segmenti dello scenario per riempire esattamente total_days."""
-    tot = sum(s[0] for s in segs) or 1
-    scaled, acc = [], 0
-    for i, (d, r, v) in enumerate(segs):
-        nd = max(1, int(round(d * total_days / tot)))
-        if i == len(segs) - 1:
-            nd = max(1, total_days - acc)
-        nd = min(nd, max(1, total_days - acc))
-        scaled.append((nd, r, v))
-        acc += nd
-    if acc < total_days:
-        d0, r0, v0 = scaled[-1]
-        scaled[-1] = (d0 + (total_days - acc), r0, v0)
-    return scaled
-
-
-def _build_benchmark_returns(rng: np.random.Generator, segs, n_days: int) -> np.ndarray:
-    """Costruisce i rendimenti daily del benchmark seguendo i segmenti di scenario."""
-    rets = np.zeros(n_days)
-    pos = 0
-    for days, tot_ret, ann_vol in segs:
-        d = min(days, n_days - pos)
-        if d <= 0:
-            break
-        drift = tot_ret / d
-        vol_d = ann_vol / np.sqrt(252.0)
-        z = rng.standard_normal(d)
-        # Code grasse nei regimi stressati (bear / crash): rari salti di 2-4 sigma
-        if ann_vol >= 0.25:
-            mask = rng.random(d) < 0.025
-            signs = np.where(rng.random(d) < 0.75, -1.0, 1.0)
-            z = z + mask * signs * rng.uniform(2.0, 4.0, size=d)
-        rets[pos:pos + d] = drift + vol_d * z
-        pos += d
-    return rets
-
-
-def _ohlc_from_path(idx, close: np.ndarray, rets: np.ndarray, rng: np.random.Generator,
-                    base_volume: float) -> pd.DataFrame:
-    """Costruisce OHLC + Volume realistici a partire dalla serie dei close."""
-    n = len(close)
-    open_ = np.empty(n)
-    open_[0] = close[0]
-    open_[1:] = close[:-1] * (1 + rng.normal(0, 0.004, n - 1))
-
-    spread = np.abs(rng.normal(0.004, 0.002, n)) + np.abs(rets) * 0.5 + 0.002
-    high = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, 1.0, n)) * spread)
-    low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, 1.0, n)) * spread)
-
-    # Volume: rumore lognormale + espansione sui giorni di grosso movimento (orderflow realistico)
-    volume = base_volume * np.exp(rng.normal(0, 0.30, n)) * (1 + 8.0 * np.abs(rets))
-
-    o = np.round(open_, 2); h = np.round(high, 2); l = np.round(low, 2); c = np.round(close, 2)
-    h = np.maximum(np.maximum(h, o), c)
-    l = np.minimum(np.minimum(l, o), c)
-
-    return pd.DataFrame(
-        {"Open": o, "High": h, "Low": l, "Close": c, "Volume": volume.astype(np.int64)},
-        index=idx,
-    )
-
-
-def generate_fake_market_data(
-    n_random_tickers: int = 4,
-    years: float = 4.0,
-    seed: int = 42,
-    scenario: str = "mixed_regimes",
-    benchmark_ticker: str = "SPY",
-    end_date=None,
-    warmup_days: int = 320,
-) -> Tuple[Dict[str, pd.DataFrame], Dict]:
-    """
-    Genera un universo di dati OHLCV sintetici per i backtest.
-
-    Ritorna (data_dict, meta):
-      data_dict: {ticker: DataFrame[Open, High, Low, Close, Volume]}, benchmark incluso
-      meta:      {'sim_start': data di inizio simulazione (dopo il warmup), ...}
-
-    Gli archetipi fissi (tech, biotech, oro, obbligazioni, inverse, ...)
-    rendono interpretabile il comportamento delle strategie in ogni regime.
-    """
-    scenario = scenario if scenario in _SCENARIO_SEGMENTS else "mixed_regimes"
-    rng = np.random.default_rng(seed)
-
-    sim_days = max(int(years * 252), 126)
-    total_days = warmup_days + sim_days
-    end = pd.to_datetime(end_date) if end_date is not None else pd.Timestamp.today().normalize()
-    idx = pd.bdate_range(end=end, periods=total_days)
-
-    # --- Benchmark (proxy S&P500) ---
-    segs = _scale_segments(_SCENARIO_SEGMENTS[scenario], total_days)
-    bench_ret = _build_benchmark_returns(rng, segs, total_days)
-    bench_close = 500.0 * np.cumprod(1.0 + bench_ret)
-
-    data: Dict[str, pd.DataFrame] = {}
-    data[benchmark_ticker] = _ohlc_from_path(idx, bench_close, bench_ret, rng, base_volume=50_000_000)
-
-    # --- Universo titoli ---
-    roster = list(_FAKE_ROSTER)
-    for i in range(1, int(n_random_tickers) + 1):
-        roster.append((
-            f"FK{i:02d}", f"Random {i}",
-            rng.uniform(0.6, 1.6), rng.uniform(0.08, 0.30), rng.uniform(-0.02, 0.05),
-            rng.uniform(40.0, 150.0), rng.uniform(2e5, 8e5),
-        ))
-
-    # Stress days: nei giorni molto negativi del benchmark (flight to quality)
-    stress = np.clip(-bench_ret / 0.02, 0.0, 2.0)
-
-    for (tk, _desc, beta, idio, alpha, p0, base_vol) in roster:
-        idio_d = idio / np.sqrt(252.0)
-        alpha_d = alpha / 252.0
-        ret = alpha_d + beta * bench_ret + idio_d * rng.standard_normal(total_days)
-
-        if beta <= 0.10:      # difensivi (oro/bond) guadagnano nei giorni neri
-            ret = ret + stress * 0.004
-        elif beta >= 1.5:     # high beta soffre un filo di più
-            ret = ret - stress * 0.002
-
-        close = p0 * np.cumprod(1.0 + ret)
-        data[tk] = _ohlc_from_path(idx, close, ret, rng, base_volume=float(base_vol))
-
-    meta = {
-        "scenario": scenario,
-        "scenario_desc": FAKE_SCENARIOS[scenario],
-        "seed": seed,
-        "years": years,
-        "warmup_days": warmup_days,
-        "sim_start": idx[warmup_days],
-        "end": idx[-1],
-        "benchmark": benchmark_ticker,
-        "tickers": [r[0] for r in roster],
-        "descriptions": {r[0]: r[1] for r in roster},
-    }
-    return data, meta
-
-
-# =====================================================================
-# 2. INDICATORI BASE (invariati rispetto alla versione originale)
-# =====================================================================
-
-# --- IGIENE DEI DATI (price-level break) -------------------------------
-# Su un DB Xetra reale esistono tickers con blocchi "stub" di prezzi
-# segnaposto (es. 0.015 € costanti per 350 sedute, volume 0) seguiti da un
-# salto al prezzo vero (+880x in una seduta), oppure tick corrotti o errori
-# di scala valuta (EUR/USD). Un backtest su questi dati produce rendimenti
-# falsi di migliaia di punti percentuali. Regola di pulizia ( scelta sui
-# principi fisici del mercato, NON sulle performance delle strategie ):
+# IGIENE DEI DATI: le serie con stub a prezzo segnaposto, tick corrotti o
+# reverse split non aggiustati generano rendimenti falsi di migliaia di punti.
+# Regole (su principi di mercato, NON sulle performance):
 #   1) righe con Close non finito o <= 0 -> eliminate
-#   2) |log-rendimento| tra due sedute CONSECUTIVE ( <= 7 giorni di
-#      calendario ) > log(3), cioè prezzo che TRIPLICA o crolla a un terzo
-#      in UNA seduta: nessun prodotto reale lo fa (i crash storici come
-#      WireCard -66% restano sotto), quindi è un errore di livello -> la
-#      serie viene troncata all'ULTIMA rottura: vale il blocco più recente,
-#      quello coerente con i prezzi attuali. Gap > 7 giorni (sospensioni
-#      lunghe, es. 1ZB.DE) NON sono rotture: il prezzo si è semplicemente
-#      mosso mentre non quotava.
+#   2) |log-rend| tra due righe > log(3) (prezzo che triplica/crolla a un terzo
+#      in un passaggio): errore di livello -> la serie viene troncata
+#      all'ULTIMA rottura (vale il blocco piu' recente). Vale per QUALUNQUE
+#      gap di calendario: i salti attraverso sospensioni lunghe sono reverse
+#      split non aggiustati, non riaperture genuine (3TSE.DE +3.605%/493gg).
+# Cronaca: docs/STRATEGY_LEDGER.md, hardening 2026-10-13.
 _PRICE_BREAK_LOG = float(np.log(3.0))
-_PRICE_BREAK_MAX_GAP_DAYS = 7
 
 
 def _sanitize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
-    """Ripulisce una serie OHLCV da errori di livello prezzo (vedi sopra).
+    """Ripulisce una serie OHLCV da errori di livello prezzo (regole sopra).
 
-    Il DB NON viene modificato: la pulizia avviene al caricamento, così
-    backtest, scanner e live vedono tutti gli stessi dati affidabili.
-    Idempotente: una serie già pulita passa invariata.
+    Il DB NON viene modificato (la pulizia avviene al caricamento: backtest,
+    scanner e live vedono gli stessi dati). Idempotente.
     """
     if df is None or df.empty or 'Close' not in df.columns:
         return df
@@ -288,13 +92,9 @@ def _sanitize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(idx, pd.DatetimeIndex):
         return out
     lr = np.log(c[1:] / c[:-1])
-    # gap in giorni di calendario (asi8 = ns dall'epoca: robusto anche con tz)
-    gaps = np.diff(idx.asi8) / (86400.0 * 1e9)
-    breaks = np.isfinite(lr) & (np.abs(lr) > _PRICE_BREAK_LOG) \
-        & (gaps <= _PRICE_BREAK_MAX_GAP_DAYS)
+    breaks = np.isfinite(lr) & (np.abs(lr) > _PRICE_BREAK_LOG)
     if breaks.any():
-        last_break = int(np.nonzero(breaks)[0][-1]) + 1  # riga della rottura
-        out = out.iloc[last_break:]  # la serie "inizia" dalla rottura in poi
+        out = out.iloc[int(np.nonzero(breaks)[0][-1]) + 1:]
     return out
 
 
@@ -310,6 +110,14 @@ def calculate_advanced_metrics_vectorized(df, spy_df=None):
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
     df['ATR'] = ranges.max(axis=1).rolling(14).mean()
     df['Vol_20'] = df['Close'].pct_change().rolling(20).std() * 100
+    # Turnover medio in EUR (mediana 20gg, CAUSALE: shift(1) — a fine
+    # giornata si conosce la storia fino a ieri). Alimenta il gate di
+    # liquidita': posizione <= MAX_POSITION_VS_ADV * ADV.
+    if 'Volume' in df.columns:
+        _dv = df['Close'] * pd.to_numeric(df['Volume'], errors='coerce')
+        df['ADV_EUR_20'] = _dv.rolling(20).median().shift(1)
+    else:
+        df['ADV_EUR_20'] = np.nan
 
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
@@ -343,17 +151,13 @@ def calculate_advanced_metrics_vectorized(df, spy_df=None):
 
 
 def _assess_market_regime(price_matrix, current_date, market_data, benchmark=None):
-    """Regime di mercato nella data indicata (BULL / BEAR / VOLATILE / DANGER / NEUTRAL).
+    """Regime di mercato alla data (BULL / BEAR / VOLATILE / DANGER / NEUTRAL).
 
-    - Con benchmark disponibile (es. SPY): Close vs SMA200, volatilità ATR, RSI.
-      Se la data non è nell'indice del benchmark (calendari USA != Xetra, ad es.
-      il 1° maggio o il 3 ottobre) viene usata l'ultima seduta disponibile
-      precedente (lookup as-of) invece di degradare al proxy.
-    - Senza benchmark: proxy equal-weight dell'universo sugli ultimi 200 giorni
-      di TRADING. (FIX BUG STORICO: prima si usavano 200 giorni SOLARI ≈ 142
-      sedute, quindi la soglia `len >= 200` non era mai raggiungibile e il
-      regime restava per sempre NEUTRAL: nessuna strategia comprava mai e il
-      backtest riportava tutte le metriche a 0 con i soli dati del DB locale.)
+    Con benchmark: Close vs SMA200, ATR%, RSI; lookup as-of sull'ultima
+    seduta disponibile (calendari USA != Xetra). Senza benchmark: proxy
+    equal-weight dell'universo sugli ultimi 200 giorni di TRADING (non
+    solari: 200 solari ≈ 142 sedute, la soglia len >= 200 non sarebbe mai
+    raggiungibile e il regime resterebbe per sempre NEUTRAL).
     """
     spy = benchmark or CONFIG['SPY_TICKER']
     spy_df = market_data.get(spy)
@@ -382,13 +186,12 @@ def _assess_market_regime(price_matrix, current_date, market_data, benchmark=Non
 
 def _precompute_regimes(bench_df: pd.DataFrame,
                         sim_dates: pd.DatetimeIndex) -> Optional[pd.Series]:
-    """Regime di mercato per ogni data di simulazione, in un'unica passata vettoriale.
+    """Regime per ogni data di simulazione in un'unica passata vettoriale.
 
-    Replica esattamente `_assess_market_regime` (ramo benchmark) evitando il
-    costo per-giorno: con universi grandi (es. tutto Xetra) la valutazione del
-    regime giorno per giorno domina il tempo di simulazione.
-    Ritorna una Series allineata a sim_dates, oppure None se il benchmark non
-    ha gli indicatori necessari (il chiamante ricade nel calcolo per-giorno).
+    Replica il ramo benchmark di `_assess_market_regime` (il calcolo
+    per-giorno domina il tempo con universi grandi). Ritorna una Series
+    allineata a sim_dates, oppure None se il benchmark non ha gli
+    indicatori (il chiamante ricade nel calcolo per-giorno).
     """
     needed = {'Close', 'SMA200', 'ATR', 'RSI'}
     if bench_df is None or bench_df.empty or not needed.issubset(bench_df.columns):
@@ -397,9 +200,9 @@ def _precompute_regimes(bench_df: pd.DataFrame,
         close, sma = bench_df['Close'], bench_df['SMA200']
         atr_pct = bench_df['ATR'] / close * 100.0
         rsi = bench_df['RSI']
-        # Stessa precedenza dell'if-chain originale (il primo match vince):
-        # BEAR > VOLATILE > DANGER > BULL. Con le maschere vettoriali si aplica
-        # in ordine INVERSO: l'ultima scrittura ha la precedenza più alta.
+        # Stessa precedenza dell'if-chain originale: BEAR > VOLATILE > DANGER
+        # > BULL. Con le maschere vettoriali si applica in ordine INVERSO
+        # (l'ultima scrittura vince).
         regime = pd.Series("BULL", index=bench_df.index, dtype=object)
         regime[rsi < 35] = "DANGER"
         regime[atr_pct > CONFIG['BEAR_VOLATILITY_THRESHOLD']] = "VOLATILE"
@@ -411,28 +214,20 @@ def _precompute_regimes(bench_df: pd.DataFrame,
         return None
 
 
-# Chiave riservata (non può collidere con un ticker reale) del benchmark di
-# riserva equal-weight dell'universo, usato quando il benchmark ufficiale
-# (SPY) non è disponibile nel DB — es. universi Xetra puri.
+# Chiave riservata (non collide con ticker reali) del benchmark di riserva
+# equal-weight dell'universo, usato quando SPY non e' nel DB (es. Xetra puro).
 BENCH_PROXY_KEY = '__UNIVERSE_BENCH__'
 
 
 def build_benchmark_proxy(market_data: Dict[str, pd.DataFrame],
                           key: str = BENCH_PROXY_KEY) -> Optional[pd.DataFrame]:
-    """Costruisce un benchmark equal-weight dell'universo (fallback senza SPY).
+    """Benchmark equal-weight dell'universo (fallback senza SPY).
 
-    Indice a ribilanciamento giornaliero: ogni giorno la variazione % di ogni
-    titolo (calcolata sulla propria serie di sedute) viene mediata in parti
-    uguali tra i titoli quotati quel giorno e composta in un livello. Così il
-    peso di ogni titolo resta 1/N ogni giorno, indipendentemente da quando è
-    stato quotato e da quanto è salito in passato.
-
-    NOTA: non normalizzare i livelli e mediarli — un indice fatto così pesa
-    ogni titolo in proporzione alla sua performance cumulata storica (paniere
-    sovrappesato sui vincitori) e non è un benchmark equal-weight.
-
-    OHLCV sintetici (per regime ATR/RSI e RS), utilizzabile come riferimento
-    del benchmark quando nel DB non c'è SPY (es. universi Xetra puri).
+    Indice a ribilanciamento giornaliero: media dei rendimenti % giornalieri
+    dei titoli quotati quel giorno, composta in un livello. NON normalizzare
+    i livelli e mediarli: peserebbe ogni titolo per la sua performance
+    cumulata (paniere sovrappesato sui vincitori). Ritorna OHLCV sintetici
+    validi per indicatori di regime e RS; None con meno di 2 titoli.
     """
     frames = [df for t, df in market_data.items()
               if df is not None and not df.empty and t != key]
@@ -484,8 +279,7 @@ def build_benchmark_proxy(market_data: Dict[str, pd.DataFrame],
         'Open': open_, 'High': high, 'Low': low, 'Close': close,
         'Volume': vol,
     })
-    # belt & braces: ordine OHLC garantito anche con set di titoli diversi
-    # tra i campi (NaN indipendenti)
+    # belt & braces: ordine OHLC garantito anche con NaN indipendenti
     proxy['High'] = proxy[['High', 'Open', 'Close']].max(axis=1)
     proxy['Low'] = proxy[['Low', 'Open', 'Close']].min(axis=1)
     proxy.index.name = 'date'
@@ -531,14 +325,13 @@ def calculate_ai_smart_score(row):
 
 
 def prepare_market_data(tickers, period="5y", allow_download=True, progress_callback=None):
-    """Prepara i dati per il backtest.
+    """Carica i dati per il backtest dal DB locale (+ benchmark SPY).
 
-    - Carica dal DB locale tutti i ticker richiesti (incluso il benchmark SPY)
-    - Se allow_download=True, li aggiorna con logica DELTA (update_tickers):
-      download completo SOLO per i ticker nuovi, aggiornamento incrementale per
-      gli altri — la prima volta con DB vuoto il download avviene qui, nei giri
-      successivi si scarica solo ciò che manca
-    - progress_callback(done, total, label) opzionale per la UI
+    Con allow_download=True aggiorna con logica DELTA (download completo
+    solo per i ticker nuovi, incrementale per gli altri; la prima volta con
+    DB vuoto il download avviene qui). progress_callback(done, total, label)
+    opzionale per la UI. Ritorna {ticker: DataFrame} con indicatori base e
+    benchmark di riserva gia' pronti (vedi _ensure_processed).
     """
     db_manager = MarketDataManager()
     all_tickers = list(set(tickers + [CONFIG['SPY_TICKER']]))
@@ -549,7 +342,7 @@ def prepare_market_data(tickers, period="5y", allow_download=True, progress_call
                            progress_callback=progress_callback)
         except Exception as e:
             logger.warning(f"Aggiornamento delta non riuscito ({e}): fallback bulk")
-            # Fallback: comportamento storico (bulk completo per i non aggiornati oggi)
+            # Fallback storico: bulk completo per i non aggiornati oggi
             missing = db_manager.get_tickers_needing_update(all_tickers)
             if missing:
                 new_data = get_series_bulk(missing, period=period,
@@ -558,9 +351,8 @@ def prepare_market_data(tickers, period="5y", allow_download=True, progress_call
                     db_manager.save_bulk_data(new_data)
 
     loaded = db_manager.load_data(all_tickers)
-    # Indicatori base + benchmark di riserva: se SPY non è nel DB (es. universo
-    # Xetra puro) viene costruita la proxy equal-weight dell'universo, così il
-    # regime di mercato e l'RS restano significativi anche offline
+    # Se SPY non e' nel DB (es. universo Xetra puro) viene costruita la proxy
+    # equal-weight: regime e RS restano significativi anche offline
     processed, _bench_key = _ensure_processed(loaded, CONFIG['SPY_TICKER'])
     return processed
 
@@ -568,13 +360,9 @@ def prepare_market_data(tickers, period="5y", allow_download=True, progress_call
 def load_recent_market_data(tickers, period="2y", allow_download=True, min_rows=135):
     """Dati recenti per Scanner e Portafoglio Live, letti PRIMA dal DB locale.
 
-    - Ticker già aggiornati oggi: letti dal DB, zero richieste di rete
-    - Ticker mancanti o non aggiornati oggi: aggiornati via delta (update_tickers)
-      e salvati nel DB, così i giri successivi sono completamente offline
-    - Rate limit Yahoo (429) attivo: i download vengono sospesi e si usa comunque
-      il DB locale per chi ha dati
-
-    Ritorna {ticker: DataFrame OHLCV} SENZA indicatori (li calcola il chiamante).
+    Aggiorna via delta solo i ticker mancanti o non aggiornati oggi; con
+    rate limit Yahoo (429) attivo usa comunque il DB locale. Ritorna
+    {ticker: DataFrame OHLCV} SENZA indicatori (li calcola il chiamante).
     """
     dm = MarketDataManager()
     requested = [str(t).strip().upper() for t in (tickers or []) if t and str(t).strip()]
@@ -596,20 +384,17 @@ def load_recent_market_data(tickers, period="2y", allow_download=True, min_rows=
 
 def _ensure_processed(market_data: Dict[str, pd.DataFrame], benchmark: str,
                       min_rows: int = 200) -> Tuple[Dict[str, pd.DataFrame], Optional[str]]:
-    """Garantisce che i dati (es. fake) abbiano gli indicatori base calcolati.
+    """Sanifica le serie e garantisce gli indicatori base (SMA200 ecc.).
 
-    Prima di tutto sanifica le serie da errori di livello prezzo (blocchi stub,
-    tick corrotti): vedi `_sanitize_ohlcv`. Ritorna (dati_processati,
-    chiave_benchmark_effettiva). Se il benchmark richiesto (es. SPY) non è
-    disponibile, viene costruita e aggiunta una proxy equal-weight
-    dell'universo (BENCH_PROXY_KEY): regimi di mercato, RS e curve buy&hold
-    restano utilizzabili anche con un DB Xetra senza titoli USA.
+    Ritorna (dati_processati, chiave_benchmark_effettiva): se il benchmark
+    richiesto non e' disponibile viene costruita e aggiunta la proxy
+    equal-weight (BENCH_PROXY_KEY), cosi' regimi, RS e curve buy&hold
+    restano utilizzabili anche con un DB senza il benchmark ufficiale.
     """
     market_data = dict(market_data)  # non mutare l'input del chiamante
 
-    # Igiene dati: i frame SENZA indicatori vengono sanificati (i frame già
-    # processati lo sono stati nel primo passaggio, e la sanificazione è
-    # comunque idempotente)
+    # Igiene: sanifica i frame SENZA indicatori (gia' processati lo sono;
+    # la sanificazione e' comunque idempotente)
     cleaned: Dict[str, pd.DataFrame] = {}
     for t, df in market_data.items():
         if df is None or df.empty:
@@ -652,10 +437,7 @@ def _ensure_processed(market_data: Dict[str, pd.DataFrame], benchmark: str,
     return out, bench_key
 
 
-# =====================================================================
-# 3. FRAMEWORK STRATEGIE
-# =====================================================================
-
+# 3. FRAMEWORK STRATEGIE ---
 class _MarketCtx:
     """Contesto di mercato passato alle strategie ad ogni giorno di simulazione."""
     __slots__ = ("regime", "is_crash", "current_date", "market_data", "price_matrix", "cfg", "benchmark")
@@ -711,9 +493,7 @@ class BaseStrategy:
         return row['Close'] - (atr * cfg['STOP_LOSS_ATR_MULT'])
 
 
-# ---------------------------------------------------------------------
-# 3a. AI Enhanced Momentum (strategia ORIGINALE, portata 1:1)
-# ---------------------------------------------------------------------
+# 3a. AI Enhanced Momentum (strategia ORIGINALE, portata 1:1) ---
 class AIMomentumStrategy(BaseStrategy):
     key = "ai_momentum"
     name = "🧠 AI Enhanced Momentum (originale)"
@@ -769,9 +549,7 @@ class AIMomentumStrategy(BaseStrategy):
                     pos['stop_loss'] = new_stop
 
 
-# ---------------------------------------------------------------------
-# 3b. Turtle / Donchian Breakout
-# ---------------------------------------------------------------------
+# 3b. Turtle / Donchian Breakout ---
 class TurtleBreakoutStrategy(BaseStrategy):
     key = "turtle_breakout"
     name = "🐢 Turtle Breakout (Donchian 55/20)"
@@ -837,9 +615,7 @@ class TurtleBreakoutStrategy(BaseStrategy):
                     pos['stop_loss'] = new_stop
 
 
-# ---------------------------------------------------------------------
-# 3c. Trend Fusion — il meglio di Turtle Breakout, AI Momentum e Volume Profile
-# ---------------------------------------------------------------------
+# 3c. Trend Fusion — Turtle in BULL, gestione difensiva in BEAR ---
 class TrendFusionStrategy(BaseStrategy):
     key = "trend_fusion"
     name = "🌊 Trend Fusion (Turtle + Bear Switch)"
@@ -870,7 +646,6 @@ class TrendFusionStrategy(BaseStrategy):
     def can_buy(self, ctx):
         # acquisti solo nei due regimi operativi: BULL (turtle) e BEAR (scudo)
         return ctx.regime in ("BULL", "BEAR")
-
     def prepare(self, df, spy_df=None, cfg=None):
         df = df.copy()
         df['HH_55'] = df['High'].rolling(55).max().shift(1)
@@ -880,7 +655,6 @@ class TrendFusionStrategy(BaseStrategy):
         df['MOM_63'] = df['Close'].pct_change(63)
         return df
 
-    # ------------------------------------------------------------- ENTRY
     def entry(self, row, ctx):
         if ctx.regime == "BULL":
             return self._entry_turtle(row)
@@ -921,17 +695,15 @@ class TrendFusionStrategy(BaseStrategy):
         score = 55 + (rs if pd.notna(rs) else 0) * 2 + min(15.0, mom * 100.0)
         return max(0, score), f"BEAR SHIELD: Mom63 {mom:+.1%} | RS {rs:+.1f}"
 
-    # ------------------------------------------------------------- EXIT
     def exit_signal(self, pos, row, ctx):
         c = row['Close']
         roi = (c / pos['entry_price']) - 1
         born_in_bear = pos.get('regime_at_entry') == "BEAR"
 
         if ctx.regime in ("BEAR", "VOLATILE", "DANGER"):
-            # crisi: difesa attiva (Bear Market). Esce subito ciò che NON è
-            # difensivo (aperto in BULL e mai partito); le posizioni scudo
-            # aperte in BEAR restano in posizione anche se il regime sfarfalla
-            # tra BEAR/VOLATILE/DANGER — è il loro terreno.
+            # crisi: esce subito cio' che NON e' difensivo (aperto in BULL e
+            # mai partito); le posizioni scudo aperte in BEAR restano in
+            # posizione anche se il regime sfarfalla — e' il loro terreno
             if not born_in_bear and roi < 0.05:
                 return (f"REGIME FLIP ({ctx.regime})", 1.0, c)
             sma50 = row.get('SMA50')
@@ -953,7 +725,6 @@ class TrendFusionStrategy(BaseStrategy):
         return None
 
     def update_position(self, pos, row, ctx):
-        # trailing stop 3x ATR dopo il +5% (comune a Turtle e Bear)
         c = row['Close']
         roi = (c / pos['entry_price']) - 1
         if roi > 0.05:
@@ -964,9 +735,7 @@ class TrendFusionStrategy(BaseStrategy):
                     pos['stop_loss'] = new_stop
 
 
-# ---------------------------------------------------------------------
-# 3d. Golden Chandelier — replica BACKTEST della logica LIVE di trading.py
-# ---------------------------------------------------------------------
+# 3d. Golden Chandelier — replica BACKTEST della logica LIVE di trading.py ---
 class GoldenChandelierStrategy(BaseStrategy):
     key = "golden_chandelier"
     name = "🛡️ Golden Chandelier (logica live satellite)"
@@ -1000,8 +769,7 @@ prima d'ora questa logica NON era testabile in backtest — ora il confronto è 
         df = df.copy()
         df['SMA_130'] = df['Close'].rolling(130).mean()
         df['MOM_6M'] = df['Close'].pct_change(126)
-        # Volatilità annualizzata del benchmark as-of (proxy VIX, offline):
-        # Vol_20 = std 20gg dei rendimenti daily in % -> annuizzata
+        # Volatilita' annualizzata del benchmark as-of (proxy VIX, offline)
         if spy_df is not None and 'Vol_20' in spy_df.columns:
             bench_vol = (spy_df['Vol_20'] * np.sqrt(252.0)) \
                 .reindex(df.index, method='ffill')
@@ -1014,8 +782,8 @@ prima d'ora questa logica NON era testabile in backtest — ora il confronto è 
         return True  # nessun filtro di regime nella logica live
 
     def initial_stop(self, row, ctx, cfg):
-        # chandelier dal primo giorno: entry - ATR × mult(vol benchmark)
-        # (NON lo stop ATR generico del motore: la logica live non lo prevede)
+        # chandelier dal primo giorno: entry - ATR × mult(vol benchmark),
+        # NON lo stop ATR generico del motore (la logica live non lo prevede)
         atr = row.get('ATR')
         if atr is None or pd.isna(atr) or atr <= 0:
             return None
@@ -1030,7 +798,7 @@ prima d'ora questa logica NON era testabile in backtest — ora il confronto è 
             return 0, "Sotto SMA130"
         if mom <= 0:
             return 0, "Momentum 6M negativo"
-        # fedele ad analyze_ticker: score = min(mom*100, 100), ENTRY per qualsiasi mom>0
+        # fedele alla logica live: score = 55 + min(mom*100, 45), ENTRY per qualsiasi mom>0
         score = 55 + min(45.0, mom * 100.0)
         return score, f"GOLDEN MEAN: Mom6M {mom:+.1%} | SMA130 {sma:.2f}"
 
@@ -1043,8 +811,8 @@ prima d'ora questa logica NON era testabile in backtest — ora il confronto è 
 
     def update_position(self, pos, row, ctx):
         # Chandelier Exit: max Close dall'ingresso - ATR × mult(vol benchmark).
-        # Come nella logica live NON c'è ratchet: lo stop segue il massimo e la
-        # volatilità correnti (può allargarsi se l'ATR cresce).
+        # Come nella logica live NON c'e' ratchet: lo stop segue il massimo e
+        # la volatilita' correnti (puo' allargarsi se l'ATR cresce).
         atr = row.get('ATR')
         if atr is None or pd.isna(atr) or atr <= 0:
             return
@@ -1053,15 +821,12 @@ prima d'ora questa logica NON era testabile in backtest — ora il confronto è 
         pos['stop_loss'] = pos['max_close'] - (atr * mult)
 
 
-# ---------------------------------------------------------------------
-# 3e. ESPERIMENTO: Golden Chandelier DIFENSIVO (logica live + filtro macro)
-# ---------------------------------------------------------------------
-# Variante a variabile singola della logica live: identica a golden_chandelier
-# (stessi ingressi, stesso chandelier, stesse uscite) ma con il pacchetto di
-# filtro macro di ai_momentum: acquisti solo in regime BULL + uscita d'emergenza
-# in regime di crisi. Ipotesi da verificare: il MaxDD -48% della logica live è
-# dovuto soprattutto agli acquisti in bear market. Se confermata, la
-# raccomandazione pratica è aggiungere il filtro macro a trading.py (live).
+# 3e. ESPERIMENTO: Golden Chandelier DIFENSIVO (logica live + filtro macro) ---
+# Variante a variabile singola di golden_chandelier: stessi ingressi, stesso
+# chandelier, stesse uscite, ma acquisti solo in BULL + uscita d'emergenza in
+# crisi (pacchetto macro di ai_momentum). Ipotesi: il MaxDD della logica live
+# viene soprattutto dagli acquisti in bear market; se confermata, la
+# raccomandazione e' aggiungere il filtro macro anche al live.
 class GoldenChandelierDefensiveStrategy(GoldenChandelierStrategy):
     key = "golden_chandelier_def"
     name = "🚦 Golden Chandelier Difensivo (filtro macro)"
@@ -1081,7 +846,6 @@ la raccomandazione è aggiungere il filtro macro alla logica live di `trading.py
 
     def can_buy(self, ctx):
         return ctx.regime == "BULL"  # come AI Momentum: niente acquisti in bear/volatile
-
     def exit_signal(self, pos, row, ctx):
         if ctx.is_crash:
             roi = (row['Close'] / pos['entry_price']) - 1
@@ -1090,13 +854,11 @@ la raccomandazione è aggiungere il filtro macro alla logica live di `trading.py
         return super().exit_signal(pos, row, ctx)
 
 
-# ---------------------------------------------------------------------
-# 3f. ESPERIMENTO: Steady Winners (trend a bassa volatilità, anomalia low-vol)
-# ---------------------------------------------------------------------
+# 3f. ESPERIMENTO: Steady Winners (trend a bassa volatilita', anomalia low-vol) ---
 # Seconda variante a variabile singola: ingressi di golden_chandelier ma solo
-# su titoli PIÙ CALMI del benchmark (volatilità annualizzata ≤ 1.25x quella del
-# mercato). Uscite identiche (chandelier + SMA130). Ipotesi: l'anomalia
-# low-volatility (Baker-Haugen) su Xetra regge anche senza inseguire i pump
+# su titoli piu' CALMI del benchmark (vol annua <= 1.25x quella del mercato),
+# uscite identiche. Ipotesi: l'anomalia low-volatility (Baker-Haugen) su Xetra
+# regge anche senza inseguire i pump.
 class LowVolTrendStrategy(GoldenChandelierStrategy):
     key = "low_vol_trend"
     name = "🧘 Steady Winners (trend a bassa volatilità)"
@@ -1133,22 +895,19 @@ class LowVolTrendStrategy(GoldenChandelierStrategy):
             return 0, "Sotto SMA130"
         if mom <= 0:
             return 0, "Momentum 6M negativo"
-        # Filtro low-vol: solo se il benchmark è disponibile e il titolo è calmo
-        # (≤ 1.25x la vol del mercato). Senza benchmark niente filtro extra:
-        # la strategia degrada a golden_chandelier.
+        # Filtro low-vol: titolo calmo (<= 1.25x la vol del benchmark). Senza
+        # benchmark la strategia degrada a golden_chandelier.
         if bench_vol is not None and pd.notna(bench_vol) and bench_vol > 0:
             vol_ratio = float(ann_vol) / float(bench_vol)
             if vol_ratio > 1.25:
                 return 0, f"Troppo volatile ({vol_ratio:.1f}x benchmark)"
             score = 55 + min(35.0, mom * 100.0) + (1.25 - vol_ratio) * 12.0
             return score, f"STEADY: Mom6M {mom:+.1%} | Vol {vol_ratio:.2f}x benchmark"
-        # fallback senza benchmark (es. dati fake senza SPY): entry golden semplice
+        # fallback senza benchmark: entry golden semplice
         return 55 + min(45.0, mom * 100.0), f"STEADY (no bench): Mom6M {mom:+.1%}"
 
 
-# ---------------------------------------------------------------------
-# REGISTRO STRATEGIE
-# ---------------------------------------------------------------------
+# REGISTRO STRATEGIE ---
 STRATEGIES: Dict[str, BaseStrategy] = {
     s.key: s for s in [
         AIMomentumStrategy(),
@@ -1161,8 +920,8 @@ STRATEGIES: Dict[str, BaseStrategy] = {
 }
 
 # Ordine di presentazione nella UI. Le strategie ritirate vivono in
-# etf_metrics/core/retired_strategies.py (riattivabili con activate());
-# cronaca completa — criteri, numeri e motivi — in docs/STRATEGY_LEDGER.md.
+# retired_strategies.py (riattivabili con activate()); cronaca completa in
+# docs/STRATEGY_LEDGER.md.
 STRATEGY_ORDER: List[str] = [
     "ai_momentum", "trend_fusion", "turtle_breakout", "golden_chandelier",
     "golden_chandelier_def", "low_vol_trend",
@@ -1176,24 +935,22 @@ def get_strategy(key: str) -> BaseStrategy:
     return strat
 
 
-# =====================================================================
-# 4. MOTORE DI BACKTEST (gestisce portafoglio/commissioni/tasse per tutte)
-# =====================================================================
-
+# 4. MOTORE DI BACKTEST (gestisce portafoglio/commissioni/tasse per tutte) ---
 class _FastRowPanel:
     """Accesso rapido alle righe per data di simulazione.
 
-    Nel loop giorno-per-giorno, `df.loc[data]` costa ~60-100µs per chiamata:
-    con universi grandi (tutto Xetra) e ribilanciamenti ogni 5 giorni sono
-    centinaia di migliaia di accessi che dominano il tempo di simulazione.
-    Questo pannello preindicizza le date una sola volta (get_indexer) e
-    costruisce le righe da array numpy (~5x più veloce), mantenendo la stessa
-    API delle strategie (pd.Series indicizzata per nome colonna).
+    `df.loc[data]` costa ~60-100µs per chiamata: con universi grandi e
+    ribilanciamenti frequenti e' il collo di bottiglia del loop. Questo
+    pannello preindicizza le date una sola volta e costruisce le righe da
+    array numpy (~5x piu' veloce), con la stessa API delle strategie
+    (pd.Series indicizzata per nome colonna).
     """
-    __slots__ = ('_entries',)
+    __slots__ = ('_entries', '_closes_ff')
 
     def __init__(self, market_data: Dict[str, pd.DataFrame], sim_dates: pd.DatetimeIndex):
         self._entries = {}
+        self._closes_ff = {}
+        n_sim = len(sim_dates)
         for t, df in market_data.items():
             if df is None or df.empty:
                 continue
@@ -1201,6 +958,18 @@ class _FastRowPanel:
             arr = df.to_numpy()
             close_col = df.columns.get_loc('Close') if 'Close' in df.columns else None
             self._entries[t] = (df.columns, arr, pos, close_col)
+            # Close ffilled sulle date di simulazione: per il NAV giornaliero
+            # mark-to-market quando il ticker non ha seduta in quella data
+            # (calendari USA/Xetra diversi, sospensioni) vale l'ultimo prezzo
+            # noto, non il prezzo di ingresso
+            if close_col is not None and n_sim:
+                cf = np.full(n_sim, np.nan)
+                valid = pos >= 0
+                if valid.any():
+                    vals = pd.to_numeric(pd.Series(arr[pos[valid], close_col]),
+                                         errors='coerce').to_numpy(dtype=float)
+                    cf[valid] = vals
+                self._closes_ff[t] = pd.Series(cf).ffill().to_numpy()
 
     def row(self, ticker: str, i: int):
         """La riga del ticker alla i-esima data di simulazione, None se assente."""
@@ -1225,17 +994,29 @@ class _FastRowPanel:
         v = arr[p, cc]
         return float(v) if np.isfinite(v) else None
 
+    def close_ff(self, ticker: str, i: int):
+        """Ultimo Close noto alla i-esima data di simulazione (ffill).
+
+        A differenza di `close`, non restituisce None se il ticker non ha
+        seduta quel giorno (None solo se non ha mai quotato). Usato dal NAV
+        giornaliero mark-to-market e dalla chiusura finale."""
+        arr = self._closes_ff.get(ticker)
+        if arr is None or i < 0 or i >= len(arr):
+            return None
+        v = arr[i]
+        return float(v) if np.isfinite(v) else None
+
 
 # Cache in-processo dei frame preparati dalle strategie: i re-run (es. cambio
 # commissioni in UI) non ricalcolano gli indicatori. Budget in righe per
-# limitare la memoria (configurabile via env).
+# limitare la memoria (env: ETF_METRICS_PREPARED_CACHE_ROWS).
 _PREPARED_CACHE: Dict[Tuple[str, str], Tuple[str, pd.DataFrame]] = {}
 _PREPARED_CACHE_ROWS = 0
 _PREPARED_CACHE_MAX_ROWS = int(os.environ.get('ETF_METRICS_PREPARED_CACHE_ROWS', 6_000_000))
 
 
 def _frame_fingerprint(df: pd.DataFrame) -> str:
-    """Identificativo economico del contenuto di un frame (per invalidare la cache)."""
+    """Identificativo economico del contenuto di un frame (invalida la cache)."""
     try:
         return (f"{len(df)}|{df.index[0]}|{df.index[-1]}|"
                 f"{df['Close'].iloc[0]:.6f}|{df['Close'].iloc[-1]:.6f}")
@@ -1247,8 +1028,7 @@ def _prepare_strategy_frames(strat, market_data: Dict[str, pd.DataFrame],
                              spy_df, cfg: Dict) -> Dict[str, pd.DataFrame]:
     """Applica `strat.prepare` a ogni frame con cache in-processo.
 
-    Le strategie aggiungono colonne a copie dei frame base (mai mutate): la
-    cache restituisce lo stesso oggetto preparato finché dati e parametri non
+    La cache restituisce lo stesso oggetto finche' dati e parametri non
     cambiano (fingerprint su lunghezza, estremi dell'indice e prezzi).
     """
     global _PREPARED_CACHE_ROWS
@@ -1280,6 +1060,41 @@ def _prepare_strategy_frames(strat, market_data: Dict[str, pd.DataFrame],
     return out
 
 
+def _liquidity_gate(row, alloc_value: float, cfg: Dict) -> Tuple[bool, Optional[float]]:
+    """Gate di commerciabilita' dell'ingresso.
+
+    Un ordine di `alloc_value` euro passa solo se: prezzo >= MIN_ENTRY_PRICE,
+    Volume del giorno >= MIN_ENTRY_VOLUME, allocazione <= MAX_POSITION_VS_ADV
+    del turnover medio (ADV_EUR_20: mediana 20gg, causale con shift(1)).
+    Ritorna (esito, quota ADV usata o None). Dati senza Volume/ADV =
+    ingresso rifiutato (comportamento conservativo).
+    """
+    try:
+        price = float(row['Close'])
+    except (TypeError, ValueError):
+        return False, None
+    if not np.isfinite(price) or price < cfg.get('MIN_ENTRY_PRICE', 1.0):
+        return False, None
+    vol = row.get('Volume')
+    try:
+        vol = float(vol) if (vol is not None and not pd.isna(vol)) else None
+    except (TypeError, ValueError):
+        vol = None
+    if vol is None or vol < cfg.get('MIN_ENTRY_VOLUME', 500):
+        return False, None
+    adv = row.get('ADV_EUR_20')
+    try:
+        adv = float(adv) if (adv is not None and not pd.isna(adv)) else None
+    except (TypeError, ValueError):
+        adv = None
+    if adv is None or adv <= 0:
+        return False, None
+    frac = float(alloc_value) / adv
+    if frac > cfg.get('MAX_POSITION_VS_ADV', 0.20):
+        return False, None
+    return True, frac
+
+
 def run_market_aware_backtest(
     tickers: list,
     start_date="2015-01-01",
@@ -1293,8 +1108,17 @@ def run_market_aware_backtest(
 ):
     """
     Esegue il backtest della strategia selezionata.
-    `progress_callback` (opzionale) riceve la frazione di avanzamento [0,1];
-    è onere del chiamante (UI) gestire il ciclo di vita della barra di progresso.
+
+    Ritorna (df_trades, finale, diag):
+      - df_trades: log BUY/SELL/HOLD; sulle righe di acquisto anche ADV_EUR
+        (turnover medio 20gg) e ADV_Pct (quota usata: <= MAX_POSITION_VS_ADV)
+      - finale:    NAV mark-to-market all'ultima seduta di simulazione
+      - diag:      {'nav_daily': NAV di OGNI seduta (DD/Sharpe onesti),
+                    'max_position_weight': peso max di una posizione sul NAV,
+                    'liquidity_blocked': ingressi scartati dal gate}
+
+    progress_callback (opzionale): frazione di avanzamento [0,1]; il ciclo di
+    vita della barra di progresso e' a carico del chiamante (UI).
     """
     strat = get_strategy(strategy)
     cfg = dict(CONFIG)
@@ -1316,8 +1140,8 @@ def run_market_aware_backtest(
     if not market_data:
         return pd.DataFrame(), initial_capital
 
-    # Benchmark effettivo: SPY se disponibile, altrimenti la proxy equal-weight
-    # dell'universo aggiunta da _ensure_processed (universi Xetra senza USA)
+    # Benchmark effettivo: SPY se disponibile, altrimenti la proxy
+    # equal-weight aggiunta da _ensure_processed
     if benchmark not in market_data and BENCH_PROXY_KEY in market_data:
         benchmark = BENCH_PROXY_KEY
 
@@ -1329,13 +1153,21 @@ def run_market_aware_backtest(
     sim_dates = market_data[ref].index[market_data[ref].index >= pd.to_datetime(start_date)]
     price_matrix = pd.DataFrame({t: d['Close'] for t, d in market_data.items()}).ffill()
 
-    # Regime di mercato precalcolato in una passata vettoriale (con universi
-    # grandi il calcolo per-giorno dominava il tempo di simulazione)
+    # Regime precalcolato in una passata vettoriale (il calcolo per-giorno e'
+    # il collo di bottiglia con universi grandi)
     regime_series = _precompute_regimes(market_data.get(benchmark), sim_dates) \
         if benchmark in market_data else None
 
     # Accesso rapido alle righe per data (evita df.loc[data] nel loop)
     panel = _FastRowPanel(market_data, sim_dates)
+
+    n_sim = len(sim_dates)
+    if n_sim == 0:
+        return pd.DataFrame(), float(initial_capital), {
+            'nav_daily': pd.Series(dtype=float),
+            'max_position_weight': 0.0,
+            'liquidity_blocked': 0,
+        }
 
     cash = float(initial_capital)
     positions = {}
@@ -1345,17 +1177,24 @@ def run_market_aware_backtest(
     buys_this_month = 0
     commission = float(cfg['COMMISSION'])
 
+    # Diagnostica del run: NAV giornaliero mark-to-market, peso massimo di
+    # una posizione sul NAV, ingressi scartati per liquidita'
+    nav_values = np.full(n_sim, np.nan)
+    max_position_weight = 0.0
+    liquidity_blocked = 0
+
     ctx = _MarketCtx()
     ctx.cfg = cfg
     ctx.benchmark = benchmark
     ctx.market_data = market_data
     ctx.price_matrix = price_matrix
 
-    # --- HELPER PER CALCOLO NAV (FIX DRAWDOWN) ---
+    # NAV con close ffilled: se il ticker non ha seduta quel giorno
+    # (calendari diversi, sospensioni) vale l'ultimo prezzo noto
     def _get_current_nav(curr_cash, curr_positions, i):
         equity = curr_cash
         for p_ticker, p_data in curr_positions.items():
-            curr_p = panel.close(p_ticker, i)
+            curr_p = panel.close_ff(p_ticker, i)
             if curr_p is None:
                 curr_p = p_data['entry_price']
             equity += p_data['qty'] * curr_p
@@ -1380,14 +1219,13 @@ def run_market_aware_backtest(
 
         tokens_to_sell = []
 
-        # 1. GESTIONE USCITE
         for t, pos in positions.items():
             row = panel.row(t, i)
             if row is None:
                 continue
 
             action = None
-            # 1a. Stop loss "fisico" (gestito dal motore se la strategia usa gli stop)
+            # 1a. Stop loss "fisico" (gestito dal motore se la strategia usa stop)
             if strat.use_stops and pos.get('stop_loss') is not None \
                     and pd.notna(pos['stop_loss']) and row['Low'] < pos['stop_loss']:
                 exit_price = max(row['Open'], pos['stop_loss'])
@@ -1403,7 +1241,7 @@ def run_market_aware_backtest(
                     price = sig[2] if len(sig) > 2 and sig[2] is not None else row['Close']
                     action = (reason, portion, price)
                 else:
-                    # 1c. Manutenzione posizione (trailing stop, flag TP, ecc.)
+                    # 1c. Manutenzione posizione (trailing stop, flag TP)
                     try:
                         strat.update_position(pos, row, ctx)
                     except Exception:
@@ -1412,7 +1250,6 @@ def run_market_aware_backtest(
             if action is not None:
                 tokens_to_sell.append((t, action[2], action[0], action[1]))
 
-        # ESECUZIONE VENDITE
         for t, price, reason, portion in tokens_to_sell:
             pos = positions[t]
             qty_sell = pos['qty'] * portion
@@ -1438,7 +1275,6 @@ def run_market_aware_backtest(
 
             cash += (net - tax)
 
-            # Aggiorna posizione
             if portion >= 0.99 or (pos['qty'] - qty_sell) < (0.001 if allow_fractional else 1):
                 del positions[t]
             else:
@@ -1458,7 +1294,6 @@ def run_market_aware_backtest(
                 "Strategy": strat.key,
             })
 
-        # 2. GESTIONE INGRESSI
         buy_allowed = strat.can_buy(ctx) and \
             (not cfg['ENABLE_MONTHLY_LIMIT'] or buys_this_month < cfg['MAX_BUYS_PER_MONTH'])
 
@@ -1502,6 +1337,16 @@ def run_market_aware_backtest(
                         risk_factor = 1.0
                     alloc_per_slot = (cash / free_slots) * risk_factor * 0.98
 
+                    adv_val = row.get('ADV_EUR_20')
+                    adv_val = float(adv_val) \
+                        if (adv_val is not None and not pd.isna(adv_val)) else np.nan
+                    adv_frac = np.nan
+                    if cfg.get('ENABLE_LIQUIDITY_GATE', True):
+                        ok_liq, adv_frac = _liquidity_gate(row, alloc_per_slot, cfg)
+                        if not ok_liq:
+                            liquidity_blocked += 1
+                            continue
+
                     if allow_fractional:
                         qty = alloc_per_slot / row['Close']
                     else:
@@ -1529,19 +1374,34 @@ def run_market_aware_backtest(
                             "Qty": qty,
                             "Commission": commission,
                             "Strategy": strat.key,
+                            "ADV_EUR": adv_val,
+                            "ADV_Pct": (adv_frac * 100.0) if np.isfinite(adv_frac) else np.nan,
                         })
                         free_slots -= 1
                         buys_this_month += 1
 
-    # Chiusura Finale (Mark to Market)
-    final_nav = cash
+        # --- NAV giornaliero mark-to-market ---
+        # Il portafoglio viene prezzato a OGNI seduta (close ffilled), non
+        # solo nei giorni di trade: DD e volatilita' onesti. Traccia anche il
+        # peso massimo mai raggiunto da una posizione.
+        nav_i = _get_current_nav(cash, positions, i)
+        nav_values[i] = nav_i
+        if positions and nav_i > 0:
+            for pt, pdata in positions.items():
+                pc = panel.close_ff(pt, i)
+                if pc is not None:
+                    w = (pdata['qty'] * pc) / nav_i
+                    if w > max_position_weight:
+                        max_position_weight = float(w)
+
+    # Chiusura finale: mark-to-market all'ultima seduta, stesso prezzo del
+    # NAV giornaliero (finale e curva equity coincidono)
+    final_nav = float(nav_values[-1]) if np.isfinite(nav_values[-1]) else cash
     for t, pos in positions.items():
-        try:
-            p = market_data[t].iloc[-1]['Close']
-        except Exception:
+        p = panel.close_ff(t, n_sim - 1)
+        if p is None:
             p = pos['entry_price']
         val = pos['qty'] * p
-        final_nav += val
 
         trade_log.append({
             "Date": sim_dates[-1].date(), "Ticker": t, "Action": "HOLD (End)",
@@ -1554,20 +1414,22 @@ def run_market_aware_backtest(
             "Strategy": strat.key,
         })
 
-    return pd.DataFrame(trade_log), final_nav
+    nav_series = pd.Series(nav_values, index=sim_dates, name='NAV')
+    diag = {
+        'nav_daily': nav_series,
+        'max_position_weight': float(max_position_weight),
+        'liquidity_blocked': int(liquidity_blocked),
+    }
+    return pd.DataFrame(trade_log), final_nav, diag
 
 
-# =====================================================================
-# 5. CONFRONTO STRATEGIE + BENCHMARK BUY & HOLD
-# =====================================================================
-
+# 5. CONFRONTO STRATEGIE + BENCHMARK BUY & HOLD ---
 def _default_comparison_workers() -> int:
-    """Worker massimi per il confronto strategie in parallelo.
+    """Worker massimi per il confronto parallelo.
 
-    Default: min(strategie, cpu, 4) su Linux/macOS (fork); 1 altrove.
-    Configurabile con la variabile d'ambiente ETF_METRICS_BACKTEST_WORKERS.
-    Il tetto di default limita anche la memoria (ogni worker prepara in locale
-    le proprie copie degli indicatori della strategia).
+    Default: min(strategie, cpu, 4) su Linux/macOS (fork), 1 altrove.
+    Configurabile via env ETF_METRICS_BACKTEST_WORKERS. Il tetto limita
+    anche la memoria (ogni worker prepara le proprie copie degli indicatori).
     """
     raw = (os.environ.get('ETF_METRICS_BACKTEST_WORKERS') or '').strip()
     if raw:
@@ -1580,16 +1442,16 @@ def _default_comparison_workers() -> int:
     return max(1, min(len(STRATEGIES), os.cpu_count() or 1, 4))
 
 
-# Dati condivisi con i worker del confronto parallelo: con il contesto "fork"
-# i processi figli ereditano la memoria del genitore (copy-on-write), senza
-# pickle di gigabyte di DataFrame.
+# Dati condivisi con i worker del confronto parallelo: con il contesto fork
+# i figli ereditano la memoria del genitore (copy-on-write), senza pickle
+# di gigabyte di DataFrame.
 _FORK_COMPARISON_DATA = None
 
 
 def _comparison_worker(strategy_key, tickers, start_date, initial_capital,
                        tax_rate, allow_fractional, strategy_params):
-    """Esegue una strategia nel processo worker (usa i dati ereditati via fork)."""
-    df_trades, final = run_market_aware_backtest(
+    """Esegue una strategia nel processo worker (dati ereditati via fork)."""
+    df_trades, final, diag = run_market_aware_backtest(
         tickers,
         start_date=start_date,
         initial_capital=initial_capital,
@@ -1599,7 +1461,7 @@ def _comparison_worker(strategy_key, tickers, start_date, initial_capital,
         strategy=strategy_key,
         strategy_params=strategy_params,
     )
-    return strategy_key, df_trades, final
+    return strategy_key, df_trades, final, diag
 
 
 def run_strategy_comparison(
@@ -1614,26 +1476,28 @@ def run_strategy_comparison(
     strategy_params: Optional[Dict] = None,
 ) -> Dict[str, Dict]:
     """
-    Esegue più strategie sugli stessi dati (confronto fair).
-    Ritorna {strategy_key: {'trades': DataFrame, 'final': float, 'name': str}}.
+    Esegue piu' strategie sugli stessi dati (confronto fair).
 
-    Su Linux/macOS le strategie girano in processi separati (fork): su una CPU
-    moderna con 8+ core il confronto completo è ~3-4x più veloce. Ogni worker
-    fallito viene automaticamente rieseguito in seriale nel processo padre.
+    Ritorna {strategy_key: {'trades', 'final', 'name', 'nav' (Serie NAV
+    giornaliera), 'diag'}}. Su Linux/macOS le strategie girano in processi
+    separati (fork, ~3-4x piu' veloce); i worker falliti vengono rieseguiti
+    in seriale nel processo padre.
     """
     keys = [k for k in (strategies or STRATEGY_ORDER) if k in STRATEGIES]
     results: Dict[str, Dict] = {}
     n = len(keys)
 
-    def _store(key, df_trades, final):
+    def _store(key, df_trades, final, diag=None):
         results[key] = {
             "trades": df_trades,
             "final": final,
             "name": STRATEGIES[key].name,
+            "nav": (diag or {}).get('nav_daily'),
+            "diag": diag or {},
         }
 
     def _run_serial(key):
-        df_trades, final = run_market_aware_backtest(
+        df_trades, final, diag = run_market_aware_backtest(
             tickers,
             start_date=start_date,
             initial_capital=initial_capital,
@@ -1643,10 +1507,10 @@ def run_strategy_comparison(
             strategy=key,
             strategy_params=strategy_params,
         )
-        _store(key, df_trades, final)
+        _store(key, df_trades, final, diag)
 
-    # I dati vengono caricati/preparati UNA sola volta per tutte le strategie
-    # (fair comparison + un solo accesso al DB invece di uno per strategia)
+    # Dati caricati/preparati UNA sola volta per tutte le strategie
+    # (fair comparison + un solo accesso al DB)
     shared = preloaded_data
     if shared is None and keys:
         loaded = prepare_market_data(tickers)
@@ -1669,8 +1533,8 @@ def run_strategy_comparison(
                 for fut in as_completed(futures):
                     key = futures[fut]
                     try:
-                        _, df_trades, final = fut.result()
-                        _store(key, df_trades, final)
+                        _, df_trades, final, diag = fut.result()
+                        _store(key, df_trades, final, diag)
                     except Exception as e:
                         # Worker morto (es. OOM): la strategia viene rieseguita qui
                         logger.warning(f"Worker della strategia {key} fallito ({e}): "
@@ -1690,8 +1554,7 @@ def run_strategy_comparison(
                 progress_callback(j / max(1, n))
             _run_serial(key)
 
-    # preserva l'ordine richiesto (in parallelo le strategie completano in
-    # ordine sparso)
+    # preserva l'ordine richiesto (in parallelo le strategie completano in ordine sparso)
     results = {k: results[k] for k in keys if k in results}
     if progress_callback:
         progress_callback(1.0)
@@ -1707,7 +1570,9 @@ def compute_buy_and_hold_curves(
 ) -> Dict[str, pd.Series]:
     """
     Curve equity buy & hold di riferimento:
-      - 'benchmark': tutto il capitale sul benchmark (S&P500 proxy)
+      - 'benchmark': tutto il capitale sul benchmark (o 'benchmark_proxy':
+        proxy equal-weight dell'universo se SPY non c'e', chiave separata per
+        l'etichetta corretta in UI)
       - 'equal_weight': capitale suddiviso in parti uguali sull'universo
     """
     start = pd.to_datetime(start_date)
@@ -1719,8 +1584,6 @@ def compute_buy_and_hold_curves(
         if len(s) > 1:
             out['benchmark'] = initial_capital * (s / s.iloc[0])
     elif BENCH_PROXY_KEY in market_data:
-        # senza SPY il benchmark è la proxy equal-weight dell'universo: chiave
-        # separata, così la UI può etichettarla correttamente
         s = market_data[BENCH_PROXY_KEY]['Close']
         s = s[s.index >= start].dropna()
         if len(s) > 1:
@@ -1731,18 +1594,10 @@ def compute_buy_and_hold_curves(
         pm = pd.DataFrame({t: market_data[t]['Close'] for t in cols}).ffill()
         pm = pm[pm.index >= start]
         if len(pm) > 1:
-            # FIX: media dei soli ticker quotati quel giorno (skipna). Prima si
-            # faceva dropna() su TUTTE le colonne: la curva partiva solo quando
-            # l'ultimo ticker dell'universo era quotato (anni di dati ignorati)
-            # e sovrastimava il benchmark nei periodi con listing tardivi.
+            # media dei soli ticker quotati quel giorno (skipna). Con dropna()
+            # su TUTTE le colonne la curva partirebbe solo quando l'ultimo
+            # ticker dell'universo e' quotato (anni di dati ignorati)
             rets = pm.pct_change().mean(axis=1)
             out['equal_weight'] = initial_capital * (1 + rets.fillna(0)).cumprod()
 
     return out
-
-
-def align_equity_curves(curves: Dict[str, pd.Series]) -> pd.DataFrame:
-    """Allinea curve equity con indici diversi in un unico DataFrame (ffill + bfill)."""
-    df = pd.DataFrame(curves).sort_index()
-    df = df.ffill().bfill()
-    return df
