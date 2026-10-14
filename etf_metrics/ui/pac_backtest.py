@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 """Pagina UI: 🧭 Confronto Strategie PAC (backtest del consiglio mensile).
 
-Replay storico del consiglio mensile di 🧭 Satelliti PAC: ogni mese versa
-l'importo scelto e compra il miglior ETF dell'universo secondo la strategia
-(top-1 per punteggio, filtro correlazione, regime). Uscite giornaliere con le
-regole della strategia; i mesi senza segnale destinano l'importo al core.
+Replay storico del consiglio mensile: ogni mese versa l'importo scelto e
+compra il miglior ETF dell'universo secondo la strategia. Due famiglie:
+
+- **🧭 PAC-native** (default): decidono SOLO al ribilanciamento mensile,
+  niente stop giornalieri, e reinvestiscono subito i proventi delle vendite
+  nel core (momentum, buy-the-dip, value averaging, Faber);
+- **strategie di trading giornaliero** (in coda, per confronto): replay
+  con stop ATR, filtro di regime e proventi delle vendite in cassa.
 
 Il motore è `core/pac_backtest.py` (`run_pac_comparison`): questa UI ne è il
 rendering, e specchia la struttura core/automated_backtest.py + pac_backtest.py.
@@ -24,7 +28,16 @@ except Exception:
 
 from etf_metrics.core.automated_backtest import (
     prepare_market_data, STRATEGIES, STRATEGY_ORDER)
-from etf_metrics.core.pac_backtest import run_pac_comparison, etf_universe_in_db
+from etf_metrics.core.pac_backtest import (
+    run_pac_comparison, etf_universe_in_db, PAC_STRATEGIES, PAC_STRATEGY_ORDER)
+
+# strategie selezionabili nel confronto: prima le PAC-native, poi quelle di
+# trading giornaliero (mantenute per confronto)
+_ALL_PAC_KEYS = PAC_STRATEGY_ORDER + [k for k in STRATEGY_ORDER if k in STRATEGIES]
+
+
+def _pac_strategy_name(k: str) -> str:
+    return PAC_STRATEGIES[k].name if k in PAC_STRATEGIES else STRATEGIES[k].name
 
 
 def _render_pac_comparison_results(run):
@@ -133,10 +146,20 @@ def render_pac_backtest_ui():
     (backtest del consiglio mensile dei Satelliti PAC)."""
     st.subheader("🏁 Confronto Strategie PAC (satelliti)")
     st.caption(
-        "Replay storico del consiglio mensile di 🧭 Satelliti PAC: ogni mese versa "
-        "l'importo scelto e compra il miglior ETF dell'universo secondo la strategia "
-        "(top-1 per punteggio, filtro correlazione, regime). Uscite giornaliere con le "
-        "regole della strategia; i mesi senza segnale destinano l'importo al core.")
+        "Replay storico del consiglio mensile: ogni mese versa l'importo scelto e "
+        "compra il miglior ETF secondo la strategia. Le strategie 🧭 PAC-native "
+        "(in cima) decidono al ribilanciamento mensile e reinvestiscono i proventi "
+        "delle vendite nel core; le strategie di trading giornaliero (in coda) "
+        "mantengono stop e filtri giornalieri, con i proventi in cassa.")
+
+    with st.expander("📖 Strategie PAC-native (come funzionano)"):
+        for k in PAC_STRATEGY_ORDER:
+            st.markdown(f"**{PAC_STRATEGIES[k].name}**")
+            st.markdown(PAC_STRATEGIES[k].description)
+        st.caption(
+            "Le strategie di trading giornaliero (in coda nella lista) restano "
+            "selezionabili per confronto: decidono ogni giorno con stop ATR e "
+            "filtro di regime, e i proventi delle vendite restano in cassa.")
 
     with st.expander("⚠️ Come leggere i risultati senza farsi ingannare"):
         st.markdown(
@@ -164,16 +187,20 @@ def render_pac_backtest_ui():
     default_start = (pd.Timestamp.now() - pd.DateOffset(years=5)).date()
     start_date = st.sidebar.date_input("📅 Data inizio", value=default_start)
     selected = st.sidebar.multiselect(
-        "🧬 Strategie", STRATEGY_ORDER, default=STRATEGY_ORDER,
-        format_func=lambda k: STRATEGIES[k].name)
+        "🧬 Strategie", _ALL_PAC_KEYS, default=PAC_STRATEGY_ORDER,
+        format_func=_pac_strategy_name,
+        help="In cima le strategie PAC-native (decisione mensile, proventi "
+             "reinvestiti nel core); in coda le strategie di trading "
+             "giornaliero, mantenute per confronto.")
     core_ticker = st.sidebar.text_input(
         "🛡️ Core (buy & hold)", value="VWCE.MI",
         help="Il benchmark: stesso PAC, tutto sul core, nessuna vendita. Deve essere "
              "nel DB.").strip().upper()
     core_fallback = st.sidebar.checkbox(
         "Mesi senza segnale → PAC al core", value=True,
-        help="Come il consiglio live: quando la strategia non compra (regime o "
-             "candidati), l'importo del mese finisce nel core invece che in cassa.")
+        help="Quando la strategia non compra un satellite (base della strategia, "
+             "regime o nessun candidato), l'importo del mese finisce nel core "
+             "invece che in cassa.")
     commission = st.sidebar.number_input(
         "💸 Commissione per operazione (€)", 0.0, 20.0, 1.0, 0.5)
 
