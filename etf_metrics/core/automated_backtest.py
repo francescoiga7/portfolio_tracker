@@ -38,7 +38,7 @@ CONFIG = {
     'REBALANCE_DAYS': 5,
     'ENABLE_MONTHLY_LIMIT': True,
     'MAX_BUYS_PER_MONTH': 4,
-    'COMMISSION': 2.0,
+    'COMMISSION': 1.0,
     'SPY_TICKER': 'SPY',
     'MACRO_TREND_FILTER': True,
     'BEAR_VOLATILITY_THRESHOLD': 3.0,
@@ -492,6 +492,18 @@ class BaseStrategy:
             return None
         return row['Close'] - (atr * cfg['STOP_LOSS_ATR_MULT'])
 
+    def exit_outlook(self, pos: Dict, row, ctx: _MarketCtx) -> str:
+        """Riepilogo leggibile delle condizioni di uscita ATTUALI di una
+        posizione. Informativo e non decisionale: serve solo al Portafoglio
+        Live, mai al motore. Righe '•' separate da newline; '' se niente da dire.
+        """
+        stop = pos.get('stop_loss')
+        c = row['Close']
+        if stop is not None and pd.notna(stop):
+            return (f"• Stop: €{stop:.2f} ({stop / c - 1:+.1%} dal prezzo attuale) "
+                    "— vende se il prezzo scende sotto")
+        return ""
+
 
 # 3a. AI Enhanced Momentum (strategia ORIGINALE, portata 1:1) ---
 class AIMomentumStrategy(BaseStrategy):
@@ -547,6 +559,22 @@ class AIMomentumStrategy(BaseStrategy):
                 new_stop = curr_price - (atr * ctx.cfg['STOP_LOSS_ATR_MULT'])
                 if pos.get('stop_loss') is None or new_stop > pos['stop_loss']:
                     pos['stop_loss'] = new_stop
+
+    def exit_outlook(self, pos, row, ctx):
+        c = row['Close']
+        lines = []
+        stop = pos.get('stop_loss')
+        if stop is not None and pd.notna(stop):
+            tag = "breakeven (post-TP1)" if pos.get('tp1_taken') else "trailing 2.5×ATR"
+            lines.append(f"• Stop {tag}: €{stop:.2f} ({stop / c - 1:+.1%}) — vende se il prezzo scende sotto")
+        if not pos.get('tp1_taken', False):
+            tp1 = pos['entry_price'] * (1 + ctx.cfg['TP1_PCT'])
+            lines.append(f"• Take profit parziale: a €{tp1:.2f} (+{ctx.cfg['TP1_PCT']:.0%}) vende il 25% e porta lo stop a breakeven")
+        lines.append("• Uscita macro: se il regime entra in crisi con P/L < +5% → vende tutto")
+        left = ctx.cfg['TIME_STOP_DAYS'] - (ctx.current_date - pos['entry_date']).days
+        quando = f"tra {left} gg " if left > 0 else ""
+        lines.append(f"• Time stop ({ctx.cfg['TIME_STOP_DAYS']} gg dall'ingresso): {quando}vende tutto se il P/L resta < +1%")
+        return "\n".join(lines)
 
 
 # 3b. Turtle / Donchian Breakout ---
@@ -613,6 +641,22 @@ class TurtleBreakoutStrategy(BaseStrategy):
                 new_stop = c - atr * ctx.cfg['STOP_LOSS_ATR_MULT']
                 if pos.get('stop_loss') is None or new_stop > pos['stop_loss']:
                     pos['stop_loss'] = new_stop
+
+    def exit_outlook(self, pos, row, ctx):
+        c = row['Close']
+        roi = (c / pos['entry_price']) - 1
+        lines = []
+        ll = row.get('LL_20')
+        if ll is not None and pd.notna(ll):
+            lines.append(f"• Uscita Donchian: vende se il Close scende sotto il minimo 20gg (€{ll:.2f}, {ll / c - 1:+.1%})")
+        stop = pos.get('stop_loss')
+        if stop is not None and pd.notna(stop):
+            tag = "trailing 3×ATR" if roi > 0.05 else "iniziale"
+            lines.append(f"• Stop {tag}: €{stop:.2f} ({stop / c - 1:+.1%}) — vende se il prezzo scende sotto")
+        left = ctx.cfg['TIME_STOP_DAYS'] - (ctx.current_date - pos['entry_date']).days
+        quando = f"tra {left} gg " if left > 0 else ""
+        lines.append(f"• Time stop ({ctx.cfg['TIME_STOP_DAYS']} gg dall'ingresso): {quando}vende tutto se il P/L resta < +2%")
+        return "\n".join(lines)
 
 
 # 3c. Trend Fusion — Turtle in BULL, gestione difensiva in BEAR ---
@@ -734,6 +778,27 @@ class TrendFusionStrategy(BaseStrategy):
                 if pos.get('stop_loss') is None or new_stop > pos['stop_loss']:
                     pos['stop_loss'] = new_stop
 
+    def exit_outlook(self, pos, row, ctx):
+        c = row['Close']
+        roi = (c / pos['entry_price']) - 1
+        lines = []
+        if pos.get('regime_at_entry') == "BEAR":
+            lines.append("• Posizione scudo (aperta in BEAR): esce quando il regime torna normale se il P/L resta < +5%")
+        else:
+            lines.append("• Uscita regime: se passa a BEAR/VOLATILE/DANGER con P/L < +5% → vende tutto")
+        ll = row.get('LL_20')
+        if ll is not None and pd.notna(ll):
+            lines.append(f"• Uscita Donchian: vende se il Close scende sotto il minimo 20gg (€{ll:.2f}, {ll / c - 1:+.1%})")
+        stop = pos.get('stop_loss')
+        if stop is not None and pd.notna(stop):
+            lines.append(f"• Trailing stop 3×ATR: €{stop:.2f} ({stop / c - 1:+.1%}) — vende se il prezzo scende sotto")
+        else:
+            lines.append(f"• Trailing stop 3×ATR: si attiva al +5% di P/L (ora {roi:+.1%})")
+        left = ctx.cfg['TIME_STOP_DAYS'] - (ctx.current_date - pos['entry_date']).days
+        quando = f"tra {left} gg " if left > 0 else ""
+        lines.append(f"• Time stop ({ctx.cfg['TIME_STOP_DAYS']} gg dall'ingresso): {quando}vende tutto se il P/L resta < +2%")
+        return "\n".join(lines)
+
 
 # 3d. Golden Chandelier — replica BACKTEST della logica LIVE di trading.py ---
 class GoldenChandelierStrategy(BaseStrategy):
@@ -820,6 +885,23 @@ prima d'ora questa logica NON era testabile in backtest — ora il confronto è 
         mult = atr_multiplier_from_vol(row.get('BENCH_ANNVOL'))
         pos['stop_loss'] = pos['max_close'] - (atr * mult)
 
+    def exit_outlook(self, pos, row, ctx):
+        c = row['Close']
+        lines = []
+        stop = pos.get('stop_loss')
+        if stop is not None and pd.notna(stop):
+            atr = row.get('ATR')
+            detail = ""
+            if atr is not None and pd.notna(atr) and atr > 0:
+                mult = atr_multiplier_from_vol(row.get('BENCH_ANNVOL'))
+                detail = f" (max Close €{pos.get('max_close', pos['entry_price']):.2f} − {mult:.1f}×ATR)"
+            lines.append(f"• Chandelier Exit{detail}: €{stop:.2f} ({stop / c - 1:+.1%}) — vende se il prezzo scende sotto")
+            lines.append("  Lo stop segue il massimo Close raggiunto: sale quando il prezzo sale")
+        sma = row.get('SMA_130')
+        if sma is not None and pd.notna(sma):
+            lines.append(f"• Trend break: vende se il Close scende sotto la SMA130 (€{sma:.2f}, {sma / c - 1:+.1%})")
+        return "\n".join(lines)
+
 
 # 3e. ESPERIMENTO: Golden Chandelier DIFENSIVO (logica live + filtro macro) ---
 # Variante a variabile singola di golden_chandelier: stessi ingressi, stesso
@@ -852,6 +934,11 @@ la raccomandazione è aggiungere il filtro macro alla logica live di `trading.py
             if roi < 0.05:
                 return ("MACRO CRASH EXIT", 1.0, row['Close'])
         return super().exit_signal(pos, row, ctx)
+
+    def exit_outlook(self, pos, row, ctx):
+        base = super().exit_outlook(pos, row, ctx)
+        macro = "• Macro crash: se il regime entra in crisi con P/L < +5% → vende tutto"
+        return "\n".join(x for x in (macro, base) if x)
 
 
 # 3f. ESPERIMENTO: Steady Winners (trend a bassa volatilita', anomalia low-vol) ---

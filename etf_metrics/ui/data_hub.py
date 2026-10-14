@@ -11,10 +11,13 @@ import streamlit as st
 
 from etf_metrics.core.data_manager import MarketDataManager
 from etf_metrics.core.data_updater import update_tickers
+from etf_metrics.core.etf_search_engine import (
+    load_universe_to_db, etf_universe_info)
 from etf_metrics.clients.yahoo_client import (
     is_rate_limited,
     rate_limit_wait_seconds,
 )
+from etf_metrics.ui.components import render_page_help
 
 
 def _parse_tickers(text: str) -> list:
@@ -129,65 +132,8 @@ def _render_migrate_to_parquet(dm):
                 st.error(f"Migrazione non riuscita: {e}")
 
 
-def render_data_hub_ui():
-    st.title("📥 Gestione Dati di Mercato")
-    st.markdown(
-        "Scarica **una sola volta** lo storico dei tuoi ticker nel database locale "
-        "e ai giri successivi aggiorna **solo il delta** — le righe successive "
-        "all'ultima data già salvata."
-    )
-
-    with st.expander("ℹ️ Come funziona", expanded=False):
-        st.markdown(
-            """
-- **Prima volta** (ticker non nel DB): download completo dello storico scelto,
-  in batch paralleli, poi salvataggio nel DB.
-- **Giri successivi**: per ogni ticker viene scaricata solo la parte mancante
-  (dall'ultima data salvata a oggi, ultima giornata inclusa per correggere
-  eventuali prezzi parziali) e fusa nel DB con un upsert.
-- **Ticker senza dati** ("no data found"): memorizzati in cache negativa e non
-  riscaricati; puoi ispezionarli e resettarli in fondo alla pagina.
-- **Rate limit Yahoo (429)**: il download si sospende per ~10 minuti invece di
-  martellare il server; i dati già scaricati vengono comunque salvati.
-- Il DB è una directory di file **Parquet partizionati per mese**
-  (`market_data_parquet/`, default; percorso configurabile con la variabile
-  d'ambiente `ETF_METRICS_DB`). Parquet è un formato **colonnare aperto**:
-  letture veloci con proiezione delle colonne e pruning dei row-group, e
-  aggiornamenti incrementali economici — ogni upsert riscrive solo le
-  partizioni dei mesi coinvolti, senza mai toccare lo storico. Un eventuale
-  vecchio `market_data.db` SQLite resta dove sta, invariato (ed è migrabile
-  con il pulsante qui sotto); un vecchio `market_data.duckdb` viene convertito
-  automaticamente al primo uso.
-            """
-        )
-
-    _render_rate_limit_banner()
-
-    dm = MarketDataManager()
-    stats = dm.get_db_stats()
-
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Ticker nel DB", f"{stats['tickers']:,}")
-    c2.metric("Righe di prezzi", f"{stats['rows']:,}")
-    c3.metric("Ultima sincronizzazione", str(stats['last_sync'] or "—"))
-    c4.metric("Dimensione DB", f"{stats['db_mb']:.1f} MB")
-    c5.metric("Cache negativa", stats['failed'])
-    c6.metric("Backend", "🧊 Parquet" if stats.get('backend') == 'parquet' else "SQLite")
-
-    if stats.get('backend') == 'parquet':
-        st.caption(
-            f"🧊 Store Parquet in `{stats['path']}` — "
-            f"{stats.get('partitions') or 0} partizioni mensili "
-            "(`prices/month=YYYY-MM/`)"
-        )
-    else:
-        _render_migrate_to_parquet(dm)
-
-    st.divider()
-
-# Download / aggiornamento per lista di ticker ---
-    st.subheader("⬇️ Scarica / Aggiorna ticker")
-
+def _render_download_tab(dm, stats):
+    """Tab ⬇️: download per lista di ticker + aggiornamento di tutto il DB."""
     col_input, col_opts = st.columns([3, 2])
     with col_input:
         tickers_text = st.text_area(
@@ -223,11 +169,9 @@ def render_data_hub_ui():
                 skip_updated_today=False,
             )
 
-# Aggiornamento di tutto il DB ---
     st.divider()
-    st.subheader("🔄 Aggiorna tutto il DB")
 
-    with st.expander("Aggiornamento dell'intero database (solo delta)", expanded=False):
+    with st.expander(f"🔄 Aggiorna tutto il DB (solo delta) — {stats['tickers']:,} ticker"):
         force_all = st.checkbox(
             "Forza anche i ticker già aggiornati oggi",
             value=False,
@@ -250,17 +194,72 @@ def render_data_hub_ui():
                     skip_updated_today=not force_all,
                 )
 
-# Contenuto del DB ---
-    st.divider()
-    with st.expander(f"🗄️ Contenuto del DB ({stats['tickers']:,} ticker)", expanded=False):
-        info = dm.get_all_tickers_info()
-        if info.empty:
-            st.caption("Il DB è ancora vuoto: scarica i primi ticker qui sopra.")
-        else:
-            st.dataframe(info, width="stretch", hide_index=True)
 
-# Cache negativa ---
-    with st.expander(f"🚫 Ticker in cache negativa ({stats['failed']})", expanded=False):
+def _render_universe_tab():
+    """Tab 🌍: discovery dell'universo ETF e download centralizzato nel DB."""
+    uni_info = etf_universe_info()
+    if uni_info['last_discovery']:
+        st.caption(
+            f"Ultima discovery: **{uni_info['last_discovery']}** — "
+            f"**{uni_info['count']:,}** strumenti ETF/ETP/ETN "
+            f"(listato preferito: Xetra `.DE`) salvati in `{uni_info['file']}`. "
+            "Questo universo alimenta i consigli di acquisto della pagina "
+            "🧭 Satelliti PAC.")
+    else:
+        st.caption(
+            "Universo non ancora scoperto. La discovery cerca gli ETF/ETP/ETN europei "
+            "con le query seed dell'app, deduplica per ISIN tenendo il listato "
+            "tedesco (`.DE`) e salva tutto nel DB: è l'universo usato dalla sezione "
+            "🧭 Satelliti PAC per i consigli di acquisto.")
+
+    if st.button("🌍 Scopri / Aggiorna universo ETF", disabled=is_rate_limited()):
+        with st.status("🌍 Discovery universo ETF...", expanded=True) as status:
+            last = [0.0]
+
+            def _prog(done, total, msg=""):
+                try:
+                    frac = (done / total) if total else 1.0
+                    if frac - last[0] >= 0.1 or frac >= 1.0:
+                        last[0] = frac
+                        st.write(msg if msg else f"{done}/{total}")
+                except Exception:
+                    pass
+
+            rep = load_universe_to_db(progress=_prog)
+            status.update(label="Discovery completata", state="complete")
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Strumenti trovati", f"{rep['found']:,}")
+        m2.metric("Unici (dedup ISIN)", f"{rep['unique']:,}")
+        m3.metric("Nuovi scaricati", f"{rep['downloaded']:,}")
+        m4.metric("Già a punto", f"{rep['cached_today']:,}")
+        m5.metric("Senza dati", f"{rep['failed']:,}")
+        st.caption(f"Universo totale persistito: **{rep['universe_count']:,}** strumenti "
+                   f"(ultima discovery: {rep['last_discovery'] or '—'}).")
+        if rep.get('rate_limited'):
+            st.warning("Rate limit Yahoo: il download è stato interrotto. Rilancia la "
+                       "discovery più tardi per completare i ticker mancanti.")
+
+
+def _render_db_content_tab(dm, stats):
+    """Tab 🗄️: contenuto del DB, cache negativa e migrazione dello storage."""
+    info = dm.get_all_tickers_info()
+    if info.empty:
+        st.caption("Il DB è ancora vuoto: scarica i primi ticker dalla tab "
+                   "⬇️ Scarica / Aggiorna.")
+    else:
+        display = info.rename(columns={
+            'ticker': 'Ticker', 'name': 'Nome',
+            'first_added': 'Aggiunto il', 'last_updated': 'Ultimo agg.',
+            'rows': 'Righe', 'first_date': 'Dal', 'last_date': 'Al',
+            'last_price': 'Ultimo prezzo',
+        }).fillna("—")
+        st.dataframe(display, width="stretch", hide_index=True)
+        st.caption("🆕 **Aggiunto il** = prima volta che il ticker è entrato nel DB "
+                   "(i ticker precedenti all'introduzione di questa colonna "
+                   "mostrano — perché la data è sconosciuta).")
+
+    with st.expander(f"🚫 Ticker in cache negativa ({stats['failed']})"):
         failed_info = dm.get_failed_tickers_info()
         if failed_info.empty:
             st.caption("Nessun ticker in cache negativa.")
@@ -270,3 +269,55 @@ def render_data_hub_ui():
                 removed = dm.clear_failed_tickers()
                 st.success(f"Rimossi {removed} ticker dalla cache negativa.")
                 st.rerun()
+
+    if stats.get('backend') != 'parquet':
+        _render_migrate_to_parquet(dm)
+
+
+def render_data_hub_ui():
+    st.title("📥 Gestione Dati di Mercato")
+    st.caption("Scarica una sola volta lo storico dei ticker nel DB locale; ai giri "
+               "successivi aggiorna solo il delta. Nessun'altra pagina scarica dati.")
+
+    render_page_help(
+        "**Cosa fa**: scarica lo storico dei prezzi nel DB locale (Parquet, partizionato per mese in `market_data_parquet/`).",
+        "**A cosa serve**: rendere autonome tutte le altre pagine (indicatori e backtest senza download).",
+        "Prima volta = storico completo; poi solo il **delta** fino a oggi, ultima candela inclusa.",
+        "🌍 **Universo ETF**: scopre gli ETF/ETP/ETN europei (listato preferito Xetra `.DE`) e li scarica nel DB.",
+        "Rate limit Yahoo (429) = pausa ~10 min; i ticker senza dati finiscono in cache negativa (resettabile in Contenuto del DB).",
+    )
+
+    _render_rate_limit_banner()
+
+    dm = MarketDataManager()
+    stats = dm.get_db_stats()
+
+    # --- Panoramica del DB ---
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Ticker nel DB", f"{stats['tickers']:,}")
+    c2.metric("Righe di prezzi", f"{stats['rows']:,}")
+    c3.metric("Ultima sincronizzazione", str(stats['last_sync'] or "—"))
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Dimensione DB", f"{stats['db_mb']:.1f} MB")
+    c5.metric("Cache negativa", stats['failed'])
+    c6.metric("Backend", "🧊 Parquet" if stats.get('backend') == 'parquet' else "SQLite")
+
+    if stats.get('backend') == 'parquet':
+        st.caption(
+            f"🧊 Store Parquet in `{stats['path']}` — "
+            f"{stats.get('partitions') or 0} partizioni mensili "
+            "(`prices/month=YYYY-MM/`)"
+        )
+
+    # --- Tre aree: download, universo ETF, ispezione del DB ---
+    tab_download, tab_universe, tab_db = st.tabs(
+        ["⬇️ Scarica / Aggiorna", "🌍 Universo ETF", "🗄️ Contenuto del DB"])
+
+    with tab_download:
+        _render_download_tab(dm, stats)
+
+    with tab_universe:
+        _render_universe_tab()
+
+    with tab_db:
+        _render_db_content_tab(dm, stats)

@@ -8,15 +8,16 @@ Questa è un'applicazione web completa, costruita con Streamlit, che offre una s
     -   Creazione e gestione di portafogli multipli
     -   Registrazione di transazioni di acquisto e vendita
     -   Visualizzazione di un riepilogo con le metriche chiave
-    -   Analisi delle posizioni aperte con P&L non realizzato e segnali di trend
+    -   Analisi delle posizioni aperte con P&L non realizzato
     -   Consultazione dello storico delle transazioni e del cassetto fiscale con P&L realizzato
 -   **Portfolio Backtester**: Simula e confronta le performance di portafogli personalizzati nel tempo, con:
     -   Scelta tra strategie di investimento "Lump Sum (PIC)" e "PAC"
     -   Definizione manuale o caricamento da portafogli esistenti
     -   Impostazione della frequenza di ribilanciamento
     -   Confronto con portafogli modello (es. 60/40, All-Weather)
--   **Screener Tattico PAC**: Scopri ETP (Exchange Traded Products) con potenziale di breakout quotati sulle principali borse europee, basato su un approccio multi-fattore.
--   **Trading & Backtest**: Suite di **6 strategie algoritmiche** con l'obiettivo di battere il S&P500, con scanner di segnali, backtest singolo e confronto multi-strategia:
+-   **Satelliti PAC**: Analisi core &amp; satellite sul portafoglio reale (`saved_portfolio.json`): consiglio mensile su quale ETF satellite comprare (universo ETF scoperto via discovery) e quando vendere le posizioni satellite, con le regole di uscita delle strategie backtestate.
+-   **Trading**: due modalità — 🤖 **Algoritmo giornaliero** (gestione operativa del portafoglio reale: stop loss / take profit trailing, sizing dinamico, regime di mercato) e 🏁 **Confronto Strategie PAC** (backtest del consiglio mensile dei Satelliti PAC: ogni mese l'importo scelto sul miglior ETF dell'universo ETF/ETC/ETP secondo la strategia, uscite giornaliere con le regole della strategia, mesi senza segnale destinati al core; confronto con il PAC puro sul core e classifica multi-strategia).
+-   **Backtest**: Suite di **6 strategie algoritmiche** con l'obiettivo di battere il S&P500, con scanner di segnali, backtest singolo e confronto multi-strategia:
     - **🧠 AI Enhanced Momentum** (strategia originale): filtro macro, ranking AI Score, stop ATR e take profit parziale
     - **🌊 Trend Fusion**: fusione dei concetti migliori — entry in confluenza (breakout Donchian 55 + Value Area High + volume ≥ 1.5x + ADX/RS), TP parziale con lock a breakeven, uscita Donchian LL20 che lascia correre il trend
     - **🐢 Turtle Breakout**: breakout Donchian 55/20 in stile Turtle Trading
@@ -28,7 +29,6 @@ Questa è un'applicazione web completa, costruita con Streamlit, che offre una s
     - **Anti-bias nel Confronto Strategie**: tabella dei rendimenti per anno civile (robustezza tra regimi) e avvisi espliciti su survivorship bias (nel DB ci sono solo i ticker quotati oggi) e significatività statistica
     - **Dati fake**: 5 scenari di mercato sintetici (bull, bear, crash, laterale, misto) per simulare senza connessione a Yahoo Finance, con universo di archetipi (tech, oro, obbligazioni, ETF inverso, ...)
     - Report con KPI commissioni (totale, operazioni/anno, impatto sul capitale) e confronto con S&P500 Buy & Hold
--   **Portafoglio Live**: Gestione operativa di un portafoglio algoritmico con stop loss / take profit trailing, sizing dinamico e regime di mercato.
 
 ## Struttura del Progetto
 
@@ -42,16 +42,22 @@ portfolio_tracker/
     │   ├── main.py                 # Navigazione principale e stato della sessione
     │   ├── portfolio_tracker.py    # UI per il tracciamento di portafogli
     │   ├── portfolio_backtester.py # UI per il backtesting di portafogli
-    │   ├── pac_screener.py         # UI per lo screener tattico PAC
-    │   ├── trading.py              # UI per scanner e backtest di trading
-    │   └── algo_live.py            # UI per il portafoglio algoritmico live
+    │   ├── data_hub.py            # UI per la gestione dati: download delta, universo ETF
+    │   ├── automated_backtest.py   # UI 💹 Backtest (backtest strategia singola e
+    │   │                           # confronto strategie)
+    │   ├── pac_backtest.py         # UI 🧭 Confronto Strategie PAC (modalità di
+    │   │                           # 💹 Backtest, specchia core/pac_backtest.py)
+    │   └── trading.py              # UI 🧭 Satelliti PAC + ⚡ Trading (pagine separate)
     ├── core/
     │   ├── portfolio_tracker.py    # Logica per il tracciamento di portafogli
     │   ├── portfolio_backtester.py # Logica per il backtesting di portafogli
-    │   ├── pac_screener.py         # Logica per lo screener tattico PAC
-    │   ├── trading.py              # Logica per i segnali di trading
+    │   ├── trading.py              # Trading live: algoritmo giornaliero, analisi
+    │   │                           # Satelliti PAC e stop Chandelier satellite
     │   ├── automated_backtest.py   # Logica per il backtest algoritmico
-    │   ├── etf_search_engine.py    # Logica di ricerca e filtraggio degli ETF
+    │   ├── pac_backtest.py         # Backtest mensile PAC satelliti (replay del consiglio)
+    │   ├── etf_search_engine.py    # Discovery universo ETF (query seed, dedup ISIN
+    │   │                           # con listato .DE preferito) + persistenza e
+    │   │                           # caricamento nel DB (load_universe_to_db)
     │   ├── data_manager.py         # Cache locale (DuckDB/SQLite) delle serie
     │   │                           # storiche + blacklist persistente dei ticker
     │   │                           # senza dati (stessa API per entrambi i backend)
@@ -118,7 +124,7 @@ python3 scripts/simulate_strategies.py --scenario bear_market --seeds 1 7 42
 python3 scripts/simulate_strategies.py --strategies turtle_breakout trend_fusion --commission 5
 ```
 
-Stessa cosa dall'interfaccia: **Trading → Automated Backtest / Confronto Strategie → Fonte Dati: Dati simulati (Fake)**.
+Stessa cosa dall'interfaccia: **Backtest → Automated Backtest / Confronto Strategie → Fonte Dati: Dati simulati (Fake)**.
 
 > ⚠️ Nota sui dati fake: servono a validare la *logica* delle strategie nei vari regimi di mercato
 > (bull, bear, crash, laterali), non a prevedere i rendimenti reali. Un algoritmo che vince solo
@@ -175,13 +181,14 @@ Il client Yahoo è ottimizzato per scaricare migliaia di ticker:
   usano un thread pool (16 worker) invece di migliaia di chiamate sequenziali.
 - **Query SQL a chunk**: `load_data` / `get_tickers_needing_update` gestiscono
   5000+ ticker senza problemi di limite parametri SQLite.
-- **Primo download automatico**: nella modalità "Dati reali" del Trading UI il
+- **Primo download automatico**: nella modalità "Dati reali" del Backtest il
   checkbox "📥 Scarica da Yahoo i ticker mancanti" (attivo di default) popola il DB
   al primo avvio; i giri successivi usano solo la cache locale. I caricamenti
   falliti non vengono memorizzati in cache: il retry funziona sempre.
 
-Dalla UI dello Screener ETF (sidebar) è possibile ispezionare e resettare la blacklist
-dei ticker senza dati. Benchmark con latenza simulata: **~20x più veloce** del
+Dalla UI della Gestione Dati è possibile ispezionare e resettare la blacklist
+dei ticker senza dati.
+Benchmark con latenza simulata: **~20x più veloce** del
 download sequenziale, a cui si aggiunge l'azzeramento dei re-download dei ticker morti.
 
 > 💡 **Suggerimento (test / multi-istanza):** il percorso del DB dei prezzi è
@@ -190,7 +197,7 @@ download sequenziale, a cui si aggiunge l'azzeramento dei re-download dei ticker
 
 ## 🏁 Benchmark di confronto: S&P500
 
-Il benchmark di riferimento del Trading (curva Buy & Hold, filtro macro di
+Il benchmark di riferimento del Backtest (curva Buy & Hold, filtro macro di
 regime, RS dei titoli) è **SPY**, l'ETF sull'S&P500. `prepare_market_data` lo
 **aggiunge automaticamente** all'universo scaricato: la prima volta che esegui
 un backtest con l'aggiornamento da Yahoo attivo, SPY viene scaricato e salvato
@@ -198,7 +205,7 @@ nel DB — da lì in poi resta disponibile anche offline.
 
 Se SPY non è nel DB (es. run offline con DB appena creato) l'app usa come
 riparo un **indice equal-weight dell'universo** (etichetta "Universo (proxy)"
-nelle curve) e la pagina Trading lo segnala con un pulsante per scaricare SPY
+nelle curve) e la pagina Backtest lo segnala con un pulsante per scaricare SPY
 subito. Il proxy è un ripiego: per confrontare le performance con l'S&P500
 tienilo nel DB.
 

@@ -6,13 +6,14 @@ session_state, mentre il calcolo è puro e testabile.
 """
 import json
 import logging
+import re
 from pathlib import Path
-from typing import Dict, List, Any, DefaultDict
+from typing import Dict, List, Any, DefaultDict, Optional
 from collections import defaultdict
 import pandas as pd
 
-from etf_metrics.clients.yahoo_client import resolve_isin_one, get_series
-from etf_metrics.core.trading import check_satellite_status
+from etf_metrics.clients.yahoo_client import (resolve_isin_details,
+                                              get_series, get_ticker_display_name)
 from etf_metrics.shared.config import PORTFOLIO_FILE
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,8 @@ def _calculate_open_positions(transactions: List[Dict[str, Any]]) -> DefaultDict
     sorted_trans = sorted(transactions, key=lambda x: x['date'])
 
     for t in sorted_trans:
+        if t.get('type') not in ('buy', 'sell'):
+            continue  # versamenti/prelievi: movimenti di liquidità, non posizioni
         isin = t['isin']
         qty = float(t['quantity'])
         price = float(t['price'])
@@ -58,6 +61,43 @@ def _calculate_open_positions(transactions: List[Dict[str, Any]]) -> DefaultDict
     return positions
 
 
+def calculate_cash_from_transactions(transactions: List[Dict[str, Any]],
+                                     commission: float = 1.0,
+                                     tax_rate: float = 26.0) -> float:
+    """Liquidità derivata dai movimenti: versamenti - prelievi - acquisti
+    (commissioni incluse) + vendite nette (commissioni e ritenuta fiscale sulle
+    plusvalenze detratte, come fa Trade Republic alla fonte).
+
+    Le vendite senza basa acquisti tracciata (storico importato a metà)
+    sommano l'incasso lordo: nessuna plusvalenza è calcolabile.
+    """
+    cash = 0.0
+    basis = defaultdict(lambda: {'quantity': 0.0, 'total_cost': 0.0})
+    for t in sorted(transactions, key=lambda x: x.get('date', '')):
+        tt = t.get('type')
+        if tt == 'deposit':
+            cash += float(t.get('amount', 0) or 0)
+        elif tt == 'withdrawal':
+            cash -= float(t.get('amount', 0) or 0)
+        elif tt == 'buy':
+            qty, price = float(t['quantity']), float(t['price'])
+            cash -= qty * price + commission
+            b = basis[t['isin']]
+            b['quantity'] += qty
+            b['total_cost'] += qty * price
+        elif tt == 'sell':
+            qty, price = float(t['quantity']), float(t['price'])
+            b = basis[t['isin']]
+            cash += qty * price - commission
+            if b['quantity'] >= qty - 1e-9 and b['quantity'] > 0:
+                avg = b['total_cost'] / b['quantity']
+                gain = qty * (price - avg)
+                cash -= max(0.0, gain) * (tax_rate / 100.0)
+                b['quantity'] -= qty
+                b['total_cost'] -= qty * avg
+    return cash
+
+
 def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: float, tax_rate: float) -> List[Dict[str, Any]]:
     """Calcola plusvalenze e minusvalenze per ogni operazione di vendita."""
     sales_gains = []
@@ -65,6 +105,8 @@ def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: floa
     sorted_trans = sorted(transactions, key=lambda x: x['date'])
 
     for t in sorted_trans:
+        if t.get('type') not in ('buy', 'sell'):
+            continue  # versamenti/prelievi: movimenti di liquidità, non posizioni
         isin = t['isin']
         qty = float(t['quantity'])
         price = float(t['price'])
@@ -101,73 +143,122 @@ def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: floa
     return sales_gains
 
 
-def _fetch_current_prices_and_series(isins: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Recupera dati OHLCV a 10 anni per calcolare correttamente ATR e massimi."""
-    data = {}
-    fetch_period = "10y"
+# Chiave ISIN: 2 lettere (paese) + 9 alfanumerici (NSIN) + 1 cifra di controllo
+_ISIN_RE = re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
 
-    for isin in isins:
-        ticker = resolve_isin_one(isin)
-        series_df = get_series(ticker, fetch_period, as_dataframe=True) if ticker else None
+
+def resolve_transaction_ticker(key: str) -> Optional[str]:
+    """Risolve una chiave di transazione (ISIN o ticker Yahoo diretto) nel ticker Yahoo.
+
+    Gli ISIN vengono risolti via ricerca Yahoo (o mappa manuale); le chiavi che
+    non sono ISIN validi vengono usate direttamente come ticker (es. "VWCE.MI").
+    """
+    key = (key or "").strip().upper()
+    if not key:
+        return None
+    if _ISIN_RE.match(key):
+        ticker, _ = resolve_isin_details(key)
+        return ticker
+    return key
+
+
+def resolve_portfolio_tickers(transactions: List[Dict[str, Any]]) -> List[str]:
+    """Ticker Yahoo di tutte le chiavi (buy/sell) presenti nelle transazioni."""
+    keys = list(dict.fromkeys(
+        t.get('isin', '') for t in (transactions or [])
+        if t.get('type') in ('buy', 'sell') and t.get('isin')
+    ))
+    tickers = []
+    for key in keys:
+        ticker = resolve_transaction_ticker(key)
+        if ticker:
+            tickers.append(ticker)
+    return tickers
+
+
+def _fetch_current_prices_and_series(keys: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Recupera il prezzo attuale (ultima chiusura) + ticker + nome per ogni
+    chiave di posizione.
+
+    Le chiavi possono essere ISIN (risolti in ticker via ricerca Yahoo) oppure
+    ticker Yahoo diretti (es. "VWCE.MI"), usati così come sono.
+    Nome: dalla ricerca ISIN, poi dal DB locale, infine da get_info.
+    """
+    data = {}
+    fetch_period = "1y"
+
+    tickers, names = {}, {}
+    for key in keys:
+        if _ISIN_RE.match(key):
+            t, n = resolve_isin_details(key)
+        else:
+            t, n = key, None
+        if t:
+            tickers[key] = t
+            if n:
+                names[key] = n
+
+    # Nomi dal DB locale (nessuna rete) per le chiavi ancora senza nome
+    if tickers:
+        try:
+            from etf_metrics.core.data_manager import MarketDataManager
+            db_names = MarketDataManager().get_ticker_names(list(set(tickers.values())))
+        except Exception:
+            db_names = {}
+        for key, t in tickers.items():
+            if key not in names:
+                n = db_names.get(t)
+                if n and n != t:
+                    names[key] = n
+
+    for key, t in tickers.items():
+        series_df = get_series(t, fetch_period, as_dataframe=True)
 
         if series_df is not None and not series_df.empty and 'Close' in series_df.columns:
             current_price = series_df['Close'].iloc[-1]
-            data[isin] = {
-                "price": current_price,
-                "series_df": series_df,
-            }
         else:
-            data[isin] = {"price": 0, "series_df": None}
-            logger.warning(f"Dati incompleti per {isin}")
+            current_price = 0
+            series_df = None
+            logger.warning(f"Dati incompleti per {key} ({t})")
+
+        # Ultimo tentativo nome: get_info (solo se ricerca e DB non hanno dato nulla)
+        if key not in names:
+            n = get_ticker_display_name(t)
+            if n:
+                names[key] = n
+
+        data[key] = {
+            "price": current_price,
+            "series_df": series_df,
+            "ticker": t,
+            "name": names.get(key, ""),
+        }
     return data
 
 
 def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, Any]],
                                     market_data: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Arricchisce posizioni con P&L e logica Satellite/Core.
-    Mostra SEMPRE il livello di Stop Loss dinamico per i satelliti.
+    Arricchisce le posizioni aperte con P&L non realizzato e flag satellite.
     """
     enriched = []
     for isin, data in open_positions.items():
         if data['quantity'] > 1e-9:
             mkt = market_data.get(isin, {})
             curr_price = mkt.get("price", 0)
-            df_hist = mkt.get("series_df", None)
 
             invested = data['total_cost']
             curr_val = data['quantity'] * curr_price
             unrealized = curr_val - invested
             unrealized_pct = (unrealized / invested * 100) if invested > 0 else 0
 
-            signal_text = "N/D"
-            is_sat = data.get('satellite', False)
-
-            if df_hist is not None:
-                if is_sat:
-                    # LOGICA SATELLITE (ATR Trailing Stop)
-                    purchase_date = data.get('first_buy_date')
-                    if purchase_date:
-                        res = check_satellite_status(df_hist, purchase_date, data['quantity'])
-                        stop_val = res.get('stop_price', 0)
-                        action_eng = res.get('action', 'HOLD')
-
-                        if action_eng == "SELL":
-                            signal_text = f"VENDI (Stop Rotto: {stop_val:.2f})"
-                        else:
-                            signal_text = f"MANTIENI (Stop: {stop_val:.2f})"
-                    else:
-                        signal_text = "MANTIENI (Data acq. ignota)"
-                else:
-                    # LOGICA CORE (SMA 200)
-                    sma200 = df_hist['Close'].rolling(200).mean().iloc[-1]
-                    if curr_price > sma200:
-                        signal_text = "MANTIENI (Trend Core)"
-                    else:
-                        signal_text = "MONITORA (Sotto SMA200)"
-
+            # Il flag satellite e' un'ETICHETTA di segmentazione: le posizioni
+            # satellite sono gestite dall'Algoritmo Live (pagina 💲), che decide
+            # ingressi, uscite e stop. Nessuna logica di decisione qui.
             enriched.append({
                 'isin': isin,
+                'ticker': mkt.get('ticker', ''),
+                'name': mkt.get('name', ''),
                 'quantity': data['quantity'],
                 'avg_buy_price': invested / data['quantity'],
                 'current_price': curr_price,
@@ -175,8 +266,7 @@ def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, A
                 'current_amount': curr_val,
                 'unrealized_pnl': unrealized,
                 'unrealized_pnl_pct': unrealized_pct,
-                'trend_signal': signal_text,
-                'satellite': is_sat
+                'satellite': data.get('satellite', False)
             })
     return enriched
 
@@ -218,9 +308,9 @@ def calculate_portfolio_pnl(transactions: List[Dict[str, Any]], commission: floa
 
 def calculate_aggregated_positions(transactions, open_positions_details):
     aggregated = []
-    all_isins = set(t['isin'] for t in transactions)
+    all_isins = set(t['isin'] for t in transactions if t.get('type') in ('buy', 'sell'))
     for isin in all_isins:
-        trans_isin = [t for t in transactions if t['isin'] == isin]
+        trans_isin = [t for t in transactions if t.get('type') in ('buy', 'sell') and t['isin'] == isin]
         total_bought_qty = sum(t['quantity'] for t in trans_isin if t['type'] == 'buy')
         total_bought_value = sum(t['quantity'] * t['price'] for t in trans_isin if t['type'] == 'buy')
         total_sold_qty = sum(t['quantity'] for t in trans_isin if t['type'] == 'sell')
@@ -230,7 +320,10 @@ def calculate_aggregated_positions(transactions, open_positions_details):
         current_pos = next((p for p in open_positions_details if p['isin'] == isin), None)
         unrealized_pnl = current_pos['unrealized_pnl'] if current_pos else 0
         aggregated.append({
-            'isin': isin, 'total_bought_qty': total_bought_qty, 'total_sold_qty': total_sold_qty,
+            'isin': isin,
+            'ticker': current_pos['ticker'] if current_pos else '',
+            'name': current_pos['name'] if current_pos else '',
+            'total_bought_qty': total_bought_qty, 'total_sold_qty': total_sold_qty,
             'current_qty': current_pos['quantity'] if current_pos else 0, 'avg_buy_price': avg_buy_price,
             'realized_pnl': realized_pnl_gross, 'unrealized_pnl': unrealized_pnl,
             'total_pnl': realized_pnl_gross + unrealized_pnl,

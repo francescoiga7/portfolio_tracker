@@ -12,6 +12,13 @@ try:
 except Exception:
     HAS_PLOTLY = False
 
+try:
+    import matplotlib  # noqa: F401 — richiesto da Styler.background_gradient
+
+    HAS_MATPLOTLIB = True
+except Exception:
+    HAS_MATPLOTLIB = False
+
 from etf_metrics.core.metrics import compute_metrics_from_series, compute_sharpe_ratio
 
 
@@ -19,6 +26,16 @@ from etf_metrics.core.metrics import compute_metrics_from_series, compute_sharpe
 
 UNIVERSE_WATCHLIST = "✍️ Ticker che inserisco"
 UNIVERSE_WHOLE_DB = "📦 Tutto il DB locale"
+
+
+def render_page_help(*lines: str, title: str = "❓ Come funziona") -> None:
+    """Espander "Come funziona" uniforme su tutte le pagine.
+
+    Ogni argomento è un bullet markdown: frasi corte (**Cosa fa** / **A cosa serve**
+    + note operative). Formato compatto = leggibile anche da un'AI che rilegge il codice.
+    """
+    with st.expander(title, expanded=False):
+        st.markdown("\n".join(f"- {line}" for line in lines))
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -47,10 +64,9 @@ def list_db_tickers(min_rows: int = 200) -> List[str]:
 def render_universe_selector(
     default_watchlist: str = "",
     textarea_height: int = 180,
-    show_download: bool = False,
-    allow_download_default: bool = True,
     min_rows: int = 200,
-) -> Tuple[List[str], str, bool]:
+    default_mode: str = UNIVERSE_WATCHLIST,
+) -> Tuple[List[str], str]:
     """Selettore condiviso dell'universo ticker (sidebar).
 
     Due modalità:
@@ -58,16 +74,17 @@ def render_universe_selector(
       il DB locale (✅ già scaricati / ⚠️ mancanti)
     - "📦 Tutto il DB locale": tutti i ticker già scaricati con storico sufficiente
 
-    Con show_download=True mostra anche la checkbox di download/aggiornamento
-    delta da Yahoo (applicabile a entrambe le modalità).
+    Nessun download: i dati si aggiornano solo dalla pagina 📥 Gestione Dati.
 
-    Ritorna (tickers, universe_mode, allow_download).
+    Ritorna (tickers, universe_mode).
     """
     db_tickers = list_db_tickers(min_rows=min_rows)
 
+    _universe_modes = [UNIVERSE_WATCHLIST, UNIVERSE_WHOLE_DB]
     mode = st.radio(
         "Quali ticker usare",
-        [UNIVERSE_WATCHLIST, UNIVERSE_WHOLE_DB],
+        _universe_modes,
+        index=_universe_modes.index(default_mode),
         help=("Watchlist: solo i ticker scritti qui sotto. Tutto il DB: l'intero "
               "universo già scaricato nel database locale."),
     )
@@ -106,19 +123,9 @@ def render_universe_selector(
                 parts.append(f"⚠️ Non nel DB: {shown}")
             st.caption(" ".join(parts))
         elif tickers and not db_tickers:
-            st.caption("ℹ️ Il DB locale è vuoto: i ticker verranno scaricati da Yahoo.")
+            st.caption("ℹ️ Il DB locale è vuoto: popolalo dalla pagina 📥 Gestione Dati.")
 
-    if show_download:
-        allow_download = st.checkbox(
-            "📥 Aggiorna da Yahoo i dati mancanti o vecchi",
-            value=allow_download_default,
-            help=("Download con logica delta: completo solo per i ticker nuovi, "
-                  "aggiornamento incrementale per gli altri. I ticker in cache negativa "
-                  "non vengono ritentati; con rate limit (429) si usa il DB locale. "
-                  "Disattivalo per lavorare solo offline."),
-        )
-
-    return tickers, mode, allow_download
+    return tickers, mode
 
 
 def get_portfolio_store():
@@ -137,24 +144,11 @@ def style_pnl_columns(val):
     return ''
 
 
-def style_trend_signal(val: str) -> str:
-    """Applica uno stile colorato alla colonna dei segnali di trend."""
-    val_lower = val.lower()
-    if "mantieni" in val_lower:
-        return 'background-color: #28a745; color: white; font-weight: bold;'
-    elif "monitora" in val_lower:
-        return 'background-color: #ffc107; color: black; font-weight: bold;'
-    elif val_lower.startswith("vendi"):
-        return 'background-color: #dc3545; color: white; font-weight: bold;'
-    return ''
-
-
 def format_dataframe(
     df: pd.DataFrame,
     column_config: Dict,
     pnl_cols: List[str] = [],
     bar_cols: List[str] = [],
-    trend_cols: List[str] = [],
 ):
     """Applica formattazione completa a un DataFrame per la visualizzazione."""
     df_display = df.rename(columns=column_config)
@@ -163,7 +157,6 @@ def format_dataframe(
 
     renamed_pnl_cols = [column_config.get(col) for col in pnl_cols if column_config.get(col) in df_display.columns]
     renamed_bar_cols = [column_config.get(col) for col in bar_cols if column_config.get(col) in df_display.columns]
-    renamed_trend_cols = [column_config.get(col) for col in trend_cols if column_config.get(col) in df_display.columns]
 
     format_dict = {
         name: '€{:,.2f}' for col, name in column_config.items() if '€' in name
@@ -179,11 +172,7 @@ def format_dataframe(
     if renamed_pnl_cols:
         styler = styler.apply(lambda x: x.map(style_pnl_columns), subset=renamed_pnl_cols)
 
-    if renamed_trend_cols:
-        for col_name in renamed_trend_cols:
-            styler = styler.map(style_trend_signal, subset=[col_name])
-
-    if renamed_bar_cols:
+    if renamed_bar_cols and HAS_MATPLOTLIB:
         for col_name in renamed_bar_cols:
             styler = styler.background_gradient(cmap='viridis_r', subset=[col_name])
 

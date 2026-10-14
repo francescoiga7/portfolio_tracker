@@ -1,14 +1,21 @@
 # -*- coding: utf-8 -*-
+import json
 import logging
-from typing import Dict, List, Iterable, Optional
+import os
+from datetime import date
+from typing import Callable, Dict, List, Iterable, Optional
 from functools import lru_cache
 from collections import defaultdict
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-from etf_metrics.clients.yahoo_client import yahoo_search, get_info
+from etf_metrics.clients.yahoo_client import (
+    yahoo_search, get_info, get_series_bulk, get_names_bulk)
+from etf_metrics.core.data_manager import MarketDataManager
 from etf_metrics.shared.utils import pick_preferred_symbol
-from etf_metrics.shared.config import PREFERRED_SUFFIXES, BULK_INFO_WORKERS
+from etf_metrics.shared.config import (
+    PREFERRED_SUFFIXES, BULK_INFO_WORKERS, DEFAULT_SEED_QUERIES,
+    ETF_UNIVERSE_FILE)
 
 logger = logging.getLogger(__name__)
 
@@ -125,12 +132,23 @@ def get_unique_preferred_tickers(tickers: List[str]) -> List[str]:
     return list(dict.fromkeys(final_tickers))
 
 
-def discover_universe(queries: Iterable[str], quotes_per_query: int, instrument_types: List[str] = None) -> List[str]:
-    """Universo di strumenti (ETF/ETP/ETN) da ricerche Yahoo, deduplicato."""
+def discover_universe(queries: Iterable[str], quotes_per_query: int,
+                      instrument_types: List[str] = None,
+                      progress: Optional[Callable] = None) -> List[str]:
+    """Universo di strumenti (ETF/ETP/ETN) da ricerche Yahoo, deduplicato.
+
+    progress(done, total, msg) opzionale per la UI.
+    """
     if instrument_types is None:
         instrument_types = ["ETF", "ETP", "ETN"]
+    queries = list(queries)
     tickers_seen, ticker_list = set(), []
-    for query in queries:
+    for i, query in enumerate(queries, 1):
+        if progress:
+            try:
+                progress(i, len(queries), f"Ricerca: {query}")
+            except Exception:
+                pass
         try:
             quotes = yahoo_search(query, quotes_count=quotes_per_query)
             for q in quotes:
@@ -143,3 +161,145 @@ def discover_universe(queries: Iterable[str], quotes_per_query: int, instrument_
         except Exception as e:
             logger.warning(f"Errore ricerca per '{query}': {e}")
     return ticker_list
+
+
+# --- Persistenza dell'universo ETF (file JSON accanto agli altri stati) ---
+
+def save_etf_universe(tickers: List[str]) -> Dict:
+    """Salva l'universo ETF (unione con quello esistente) su file JSON.
+
+    L'unione evita che una discovery parziale (o una risposta povera di Yahoo)
+    faccia sparire strumenti già trovati. Ritorna il riepilogo salvato.
+    """
+    new = {str(t).strip().upper() for t in (tickers or []) if t and str(t).strip()}
+    prev = set(load_etf_universe())
+    merged = sorted(prev | new)
+    payload = {
+        "tickers": merged,
+        "count": len(merged),
+        "last_discovery": date.today().isoformat(),
+    }
+    try:
+        with open(ETF_UNIVERSE_FILE, "w") as f:
+            json.dump(payload, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Errore salvataggio {ETF_UNIVERSE_FILE}: {e}")
+    return payload
+
+
+def load_etf_universe() -> List[str]:
+    """Ticker dell'universo ETF scoperto ([] se non ancora scoperto)."""
+    try:
+        with open(ETF_UNIVERSE_FILE, "r") as f:
+            data = json.load(f)
+        return [str(t).strip().upper() for t in (data.get("tickers") or [])
+                if t and str(t).strip()]
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        logger.warning(f"Errore lettura {ETF_UNIVERSE_FILE}: {e}")
+        return []
+
+
+def etf_universe_info() -> Dict:
+    """Metadati dell'universo (ultima discovery, numero strumenti)."""
+    try:
+        with open(ETF_UNIVERSE_FILE, "r") as f:
+            data = json.load(f)
+        return {
+            "count": int(data.get("count") or len(data.get("tickers") or [])),
+            "last_discovery": data.get("last_discovery"),
+            "file": os.path.abspath(ETF_UNIVERSE_FILE),
+        }
+    except FileNotFoundError:
+        return {"count": 0, "last_discovery": None, "file": os.path.abspath(ETF_UNIVERSE_FILE)}
+    except Exception as e:
+        logger.warning(f"Errore lettura {ETF_UNIVERSE_FILE}: {e}")
+        return {"count": 0, "last_discovery": None, "file": os.path.abspath(ETF_UNIVERSE_FILE)}
+
+
+def load_universe_to_db(queries: Iterable[str] = None, quotes_per_query: int = 200,
+                         period: str = "5y", instrument_types: List[str] = None,
+                         progress: Optional[Callable] = None) -> Dict:
+    """Discovery dell'universo ETF/ETP/ETN e salvataggio nel DB locale.
+
+    Flusso (centralizzato: è l'UNICA via di popolamento dell'universo):
+    1. ricerche Yahoo (query seed in config) -> strumenti ETF/ETP/ETN
+    2. dedup per ISIN e nome, tenendo il listato preferito (.DE prima)
+    3. lista persistita su ETF_UNIVERSE_FILE (unione con la precedente)
+    4. download delta/full dei ticker non aggiornati oggi -> DB Parquet
+
+    progress(done, total, msg) opzionale per la UI. Ritorna un report:
+    {found, unique, downloaded, cached_today, failed, skipped, rate_limited,
+     universe_count, last_discovery}
+    """
+    if queries is None:
+        queries = DEFAULT_SEED_QUERIES
+    report = {
+        'found': 0, 'unique': 0, 'downloaded': 0, 'cached_today': 0,
+        'failed': 0, 'skipped': 0, 'rate_limited': False,
+        'universe_count': 0, 'last_discovery': None,
+    }
+
+    # 1. Discovery via ricerche Yahoo
+    raw_tickers = discover_universe(queries, quotes_per_query=quotes_per_query,
+                                    instrument_types=instrument_types,
+                                    progress=progress)
+    report['found'] = len(raw_tickers)
+    if not raw_tickers:
+        return report
+
+    # 2. Dedup ISIN/nome con listato preferito (.DE > .MI > .AS > .L)
+    if progress:
+        try:
+            progress(0, 1, "Deduplicazione per ISIN e nome (info ticker in parallelo)…")
+        except Exception:
+            pass
+    unique_tickers = get_unique_preferred_tickers(raw_tickers)
+    report['unique'] = len(unique_tickers)
+    if not unique_tickers:
+        return report
+
+    # 3. Persiste la lista dell'universo (unione con la precedente)
+    payload = save_etf_universe(unique_tickers)
+    report['universe_count'] = payload['count']
+    report['last_discovery'] = payload['last_discovery']
+
+    # 4. Download: delta per i ticker già nel DB, full per i nuovi
+    dm = MarketDataManager()
+    to_download = dm.get_tickers_needing_update(unique_tickers)
+    report['cached_today'] = len(unique_tickers) - len(to_download)
+
+    if to_download:
+        if progress:
+            try:
+                progress(0, 1, f"Download storico ({period}) per {len(to_download)} strumenti…")
+            except Exception:
+                pass
+
+        def _dl_cb(batch_done, total_batches, downloaded):
+            if progress:
+                try:
+                    progress(batch_done, total_batches,
+                             f"Download storico: {downloaded} strumenti scaricati")
+                except Exception:
+                    pass
+
+        try:
+            downloaded = get_series_bulk(to_download, period=period,
+                                         progress_callback=_dl_cb if progress else None)
+        except Exception as e:
+            logger.error(f"Download universo fallito: {e}")
+            downloaded = {}
+        if downloaded:
+            names = get_names_bulk(list(downloaded.keys()))
+            dm.save_bulk_data(downloaded, names_dict=names)
+            report['downloaded'] = len(downloaded)
+        report['failed'] = len(to_download) - len(downloaded)
+        try:
+            from etf_metrics.clients.yahoo_client import is_rate_limited
+            report['rate_limited'] = bool(is_rate_limited())
+        except Exception:
+            pass
+
+    return report

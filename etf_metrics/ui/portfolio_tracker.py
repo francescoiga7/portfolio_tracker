@@ -4,13 +4,46 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from etf_metrics.core.portfolio_tracker import calculate_portfolio_pnl
+from etf_metrics.core.portfolio_tracker import (
+    calculate_portfolio_pnl,
+    resolve_portfolio_tickers,
+    resolve_transaction_ticker,
+)
+from etf_metrics.core.data_updater import update_tickers
 from etf_metrics.shared.config import PORTFOLIO_FILE
 from etf_metrics.ui.components import (
     format_dataframe,
     render_allocation_pie,
+    render_page_help,
     get_portfolio_store,
 )
+
+
+def _render_db_update_report(report: dict) -> None:
+    """Esito compatto dell'aggiornamento del DB locale (da Carica / Registra Acquisto)."""
+    results = report.get('results') or {}
+    skipped = report.get('skipped') or {}
+    new_rows = sum(r.get('new_rows', 0) for r in results.values())
+    if results:
+        msg = (f"🗄️ DB locale aggiornato: {len(results)} ticker sincronizzati "
+               f"({new_rows:,} righe nuove)")
+        if skipped:
+            msg += f", {len(skipped)} saltati"
+        st.success(msg + ".")
+        with st.expander("Dettaglio aggiornamento DB"):
+            rows = [{
+                "Ticker": t,
+                "Modalità": "⚡ Delta" if r.get('mode') == 'delta' else "🔄 Completo",
+                "Righe nuove": r.get('new_rows', 0),
+                "Righe totali": r.get('total_rows', 0),
+            } for t, r in sorted(results.items())]
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    elif skipped:
+        reasons = ", ".join(sorted(set(skipped.values())))
+        st.info(f"🗄️ DB locale già sincronizzato ({len(skipped)} saltati: {reasons}).")
+    if report.get('rate_limited'):
+        st.warning("Rate limit Yahoo: il download è stato interrotto. "
+                   "I dati già scaricati sono comunque stati salvati nel DB.")
 
 
 def render_portfolio_tracker_ui():
@@ -21,15 +54,12 @@ def render_portfolio_tracker_ui():
     st.title("💼 Portfolio Tracker")
     st.caption("Analizza le tue posizioni, monitora le performance e gestisci le transazioni.")
 
-    with st.expander("📖 Metodologia e Funzionamento"):
-        st.markdown("""
-        Questa sezione ti permette di monitorare e analizzare i tuoi portafogli di investimento. Puoi:
-        - **Creare nuovi portafogli** o **caricare portafogli esistenti**.
-        - **Aggiungere transazioni** di acquisto e vendita per ogni portafoglio.
-        - **Visualizzare un riepilogo** con le metriche principali del tuo portafoglio.
-        - **Analizzare le posizioni aperte** con dettagli su P&L non realizzato e segnali di trend.
-        - **Consultare lo storico delle transazioni** e il cassetto fiscale con il P&L realizzato.
-        """)
+    render_page_help(
+        "**Cosa fa**: registra acquisti/vendite e calcola valore attuale, P&L e cassetto fiscale.",
+        "**A cosa serve**: monitorare il portafoglio reale (es. Trade Republic) in tempo reale.",
+        "I prezzi sono live da Yahoo; il bottone 📥 **Carica** aggiorna anche lo storico nel DB.",
+        "La checkbox 🛰️ **satellite** segnala gli acquisti tattici (usata da 🧭 Satelliti PAC).",
+    )
 
     st.sidebar.header("⚙️ Impostazioni")
     saved_portfolios = store.names()
@@ -47,6 +77,15 @@ def render_portfolio_tracker_ui():
                     index=saved_portfolios.index(current_portfolio_name) if current_portfolio_name in saved_portfolios else 0,
                 )
                 if st.button("Carica"):
+                    # Aggiorna il DB locale con i ticker del portafoglio:
+                    # ticker nuovo -> storico completo (max), ticker esistente
+                    # -> delta dall'ultima data nel DB (anche se già aggiornato oggi).
+                    transactions = store.get(selected).get("transactions", [])
+                    tickers = resolve_portfolio_tickers(transactions)
+                    if tickers:
+                        with st.spinner(f"Aggiornamento DB: {len(tickers)} ticker..."):
+                            st.session_state.db_update_report = update_tickers(
+                                tickers, period="max")
                     st.session_state.current_portfolio_name = selected
                     st.rerun()
         else:
@@ -65,7 +104,10 @@ def render_portfolio_tracker_ui():
             trans_type = st.radio("Tipo", ["Acquisto", "Vendita"], horizontal=True)
             form_key = "buy_form" if trans_type == "Acquisto" else "sell_form"
             with st.form(form_key):
-                isin = st.text_input("ISIN")
+                isin = st.text_input(
+                    "ISIN o Ticker",
+                    help=("ISIN (es. IE00BK5BQT80) oppure ticker Yahoo diretto "
+                          "(es. VWCE.MI, SAP.DE)."))
                 qty = st.number_input("Quantità", min_value=0.000001, step=0.0004, format="%.6f")
                 price = st.number_input(f"Prezzo {trans_type} (€)", min_value=0.01, step=0.01, format="%.2f")
                 date = st.date_input(f"Data {trans_type}", datetime.now().date())
@@ -79,6 +121,21 @@ def render_portfolio_tracker_ui():
                     }
                     store.add_transaction(current_portfolio_name, trans_data)
                     store.save_to_json(PORTFOLIO_FILE)
+                    if trans_type == "Acquisto":
+                        # Inserisce il ticker nel DB locale con storico completo
+                        # (max) se assente, altrimenti lo aggiorna in delta
+                        # (anche se già aggiornato oggi).
+                        ticker = resolve_transaction_ticker(isin)
+                        if ticker:
+                            with st.spinner(f"Aggiornamento DB: {ticker}..."):
+                                st.session_state.db_update_report = update_tickers(
+                                    [ticker], period="max")
+                        else:
+                            st.session_state.db_update_report = {
+                                'requested': 1, 'results': {},
+                                'skipped': {isin.strip().upper():
+                                            'ISIN/ticker non risolvibile su Yahoo'},
+                                'rate_limited': False, 'elapsed_sec': 0.0}
                     st.rerun()
         with st.sidebar.expander("⚙️ Impostazioni Fiscali"):
             commission = st.number_input("Commissione per operazione (€)", min_value=0.0, value=1.0, step=0.5, format="%.2f")
@@ -88,12 +145,16 @@ def render_portfolio_tracker_ui():
         st.info("👈 Crea o carica un portafoglio dalla barra laterale per iniziare.")
         return
 
+    report = st.session_state.pop("db_update_report", None)
+    if report:
+        _render_db_update_report(report)
+
     portfolio_data = store.get(current_portfolio_name)
     if not portfolio_data or not portfolio_data.get("transactions"):
         st.info("Questo portafoglio è vuoto. Aggiungi una transazione per iniziare.")
         return
 
-    with st.spinner("Aggiornamento P&L e Segnali di Trend in corso..."):
+    with st.spinner("Aggiornamento P&L in corso..."):
         pnl_results = calculate_portfolio_pnl(portfolio_data["transactions"], commission, tax_rate)
 
     tab1, tab2, tab3 = st.tabs(["🧭 Riepilogo", "📊 Posizioni Dettagliate", "🗃️ Cassetto Fiscale e Storico"])
@@ -116,12 +177,13 @@ def render_portfolio_tracker_ui():
 
     with tab2:
         st.header("Analisi delle Posizioni")
-        st.subheader("Portafoglio Live: Posizioni Aperte")
+        st.subheader("Posizioni Aperte (collegate a ⚡ Trading)")
         if pnl_results['open_positions']:
             df_open = pd.DataFrame(pnl_results['open_positions'])
             config = {
                 'isin': 'ISIN',
-                'trend_signal': 'Segnale di Trend',
+                'ticker': 'Ticker',
+                'name': 'Nome',
                 'quantity': 'Quantità',
                 'avg_buy_price': 'Prezzo Medio Acq. (€)',
                 'current_price': 'Prezzo Attuale (€)',
@@ -135,7 +197,6 @@ def render_portfolio_tracker_ui():
                     df_open, config,
                     pnl_cols=['unrealized_pnl', 'unrealized_pnl_pct'],
                     bar_cols=['current_amount'],
-                    trend_cols=['trend_signal'],
                 ),
                 width="stretch",
             )
@@ -146,7 +207,8 @@ def render_portfolio_tracker_ui():
         if pnl_results['aggregated_positions']:
             df_agg = pd.DataFrame(pnl_results['aggregated_positions'])
             config = {
-                'isin': 'ISIN', 'total_bought_qty': 'Tot. Quantità Acq.', 'total_sold_qty': 'Tot. Quantità Vend.',
+                'isin': 'ISIN', 'ticker': 'Ticker', 'name': 'Nome',
+                'total_bought_qty': 'Tot. Quantità Acq.', 'total_sold_qty': 'Tot. Quantità Vend.',
                 'current_qty': 'Quantità Attuale', 'avg_buy_price': 'Prezzo Medio Acq. (€)',
                 'realized_pnl': 'P&L Realizzato (€)', 'unrealized_pnl': 'P&L Non Realizzato (€)',
                 'total_pnl': 'P&L Totale (€)', 'current_value': 'Valore Attuale (€)'
@@ -178,8 +240,14 @@ def render_portfolio_tracker_ui():
 
         with st.expander("📜 Cronologia Completa delle Transazioni"):
             df_trans = pd.DataFrame(portfolio_data["transactions"])
+            # Versamenti/prelievi: feature rimossa, mapping mantenuto per
+            # visualizzare gli storici già registrati nei portafogli esistenti.
+            type_map = {"buy": "Acquisto", "sell": "Vendita",
+                        "deposit": "Versamento", "withdrawal": "Prelievo"}
+            df_trans["type"] = df_trans["type"].map(lambda v: type_map.get(v, v))
             df_trans_display = df_trans.rename(columns={
                 'type': 'Tipo', 'isin': 'ISIN', 'quantity': 'Quantità',
-                'price': 'Prezzo (€)', 'date': 'Data'
+                'price': 'Prezzo (€)', 'date': 'Data', 'amount': 'Importo (€)',
+                'strategy': 'Strategia'
             })
             st.dataframe(df_trans_display, width="stretch")

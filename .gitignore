@@ -1,10 +1,7 @@
-/saved_portfolio.json
 /workspace.xml
-/simulated_trades.json
 /poetry.lock
 /.venv/
-/market_data.db
-/live_algo_portfolio.json
+*.json
 /uv.lock
 __pycache__
 *.egg-info

@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 # --- File di stato / persistenza ---
 PORTFOLIO_FILE = "saved_portfolio.json"
 ALGO_STATE_FILE = "live_algo_portfolio.json"
+# Universo ETF scoperto via discovery Yahoo (ticker preferiti .DE): alimenta
+# la pagina Satelliti PAC
+ETF_UNIVERSE_FILE = "etf_universe.json"
 
 # Directory di default dello store Parquet dei prezzi (partizioni mensili)
 PARQUET_STORE_DIR = "market_data_parquet"

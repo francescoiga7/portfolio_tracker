@@ -97,13 +97,16 @@ def _iso_date(value) -> Optional[str]:
 
 
 def _normalize_updates(df: pd.DataFrame) -> Dict[str, tuple]:
-    """{ticker: (name, last_updated ISO)} da un frame della tabella updates."""
+    """{ticker: (name, last_updated ISO, first_added ISO|None)} da un frame
+    della tabella updates (colonne opzionali gestite)."""
     if df is None or df.empty:
         return {}
     out = {}
     for _, r in df.iterrows():
         name = r['name'] if ('name' in df.columns and pd.notna(r['name'])) else None
-        out[str(r['ticker'])] = (name or None, _iso_date(r.get('last_updated')))
+        first = (_iso_date(r.get('first_added'))
+                 if 'first_added' in df.columns else None)
+        out[str(r['ticker'])] = (name or None, _iso_date(r.get('last_updated')), first)
     return out
 
 
@@ -162,7 +165,7 @@ def migrate_sqlite_to_parquet(source: str = "market_data.db",
             _copy_prices(_chunks(), store, report, progress_callback)
 
         if 'updates' in tables:
-            upd = pd.read_sql("SELECT ticker, name, last_updated FROM updates",
+            upd = pd.read_sql("SELECT * FROM updates",
                               conn)
             store.upsert_updates(_normalize_updates(upd))
             report['updates_rows'] = len(upd)
@@ -230,7 +233,7 @@ def migrate_duckdb_to_parquet(source: str = "market_data.duckdb",
 
         if 'updates' in tables:
             upd = con.execute(
-                "SELECT ticker, name, last_updated FROM updates").df()
+                "SELECT * FROM updates").df()
             store.upsert_updates(_normalize_updates(upd))
             report['updates_rows'] = len(upd)
 

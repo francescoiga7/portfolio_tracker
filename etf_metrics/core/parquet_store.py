@@ -51,6 +51,7 @@ _META_ARROW_SCHEMAS = {
         ('ticker', pa.string()),
         ('name', pa.string()),
         ('last_updated', pa.string()),   # data ISO 'YYYY-MM-DD'
+        ('first_added', pa.string()),    # prima volta che il ticker è entrato nel DB
     ]),
     'failed_tickers': pa.schema([
         ('ticker', pa.string()),
@@ -300,6 +301,39 @@ class ParquetStore:
                              pd.Timestamp(r.date_max))
         return out
 
+    def last_closes(self, tickers: Optional[List[str]] = None) -> Dict[str, float]:
+        """{ticker: close dell'ultima barra disponibile} per i ticker richiesti
+        (o per tutti, se tickers è None).
+
+        Legge solo le partizioni mensili che contengono l'ultima barra di
+        ciascun ticker (pruning delle altre partizioni): economico anche su
+        store con molto storico.
+        """
+        stats = self.ticker_row_stats(tickers)
+        if not stats:
+            return {}
+        # Raggruppa i ticker per mese dell'ultima barra: la riga cercata sta
+        # nella partizione di quel mese.
+        by_month: Dict[str, List[str]] = {}
+        for t, (_cnt, _first, last) in stats.items():
+            by_month.setdefault(last.strftime('%Y-%m'), []).append(t)
+        dset = self._dataset()
+        out: Dict[str, float] = {}
+        for month_key, group in by_month.items():
+            for i in range(0, len(group), _FILTER_CHUNK):
+                chunk = group[i:i + _FILTER_CHUNK]
+                tbl = dset.to_table(
+                    columns=['ticker', 'date', 'close'],
+                    filter=(ds.field('month') == month_key)
+                           & ds.field('ticker').isin(chunk))
+                if tbl.num_rows == 0:
+                    continue
+                df = tbl.to_pandas()
+                idx = df.groupby('ticker')['date'].idxmax()
+                for t, row_i in idx.items():
+                    out[t] = float(df.loc[row_i, 'close'])
+        return out
+
     def tickers_with_min_rows(self, min_rows: int) -> List[str]:
         """Ticker con almeno `min_rows` righe di prezzi."""
         if not self._has_data():
@@ -396,35 +430,51 @@ class ParquetStore:
         os.replace(tmp_path, self._meta_path(name))
 
     def read_updates(self) -> pd.DataFrame:
-        """Tabella updates: {ticker, name, last_updated}."""
+        """Tabella updates: {ticker, name, last_updated, first_added}."""
         return self._read_meta('updates')
 
-    def upsert_updates(self, updates: Dict[str, Tuple[Optional[str], str]]) -> None:
+    def upsert_updates(self, updates: Dict[str, tuple]) -> None:
         """Upsert nel registro aggiornamenti.
 
-        updates: {ticker: (name, last_updated ISO)}. name None/vuoto mantiene
-        il nome già presente (stessa semantica del COALESCE SQL)."""
+        updates: {ticker: (name, last_updated ISO)} oppure
+        {ticker: (name, last_updated ISO, first_added ISO)} (migrazione).
+        name None/vuoto mantiene il nome già presente (COALESCE SQL).
+        first_added: mai sovrascritto se già noto; i ticker nuovi prendono la
+        data esplicita (migrazione) o quella odierna; i ticker già tracciati
+        ma senza valore (store legacy) restano NULL (data sconosciuta)."""
         if not updates:
             return
         with _WRITE_LOCK:
             df = self._read_meta('updates')
             df = df.set_index('ticker') if not df.empty else \
-                pd.DataFrame(columns=['name', 'last_updated'])
+                pd.DataFrame(columns=['name', 'last_updated', 'first_added'])
             tickers = list(updates.keys())
             new_name = pd.Series(
                 [(updates[t][0] or None) if updates[t][0] else None
                  for t in tickers], index=tickers, dtype='object')
             new_date = pd.Series([updates[t][1] for t in tickers],
                                  index=tickers, dtype='object')
+            first_given = pd.Series(
+                [updates[t][2] if len(updates[t]) > 2 else None for t in tickers],
+                index=tickers, dtype='object')
             if not df.empty:
                 old_name = df['name'].reindex(tickers)
                 coalesced = new_name.where(new_name.notna() & (new_name != ''),
                                            old_name)
+                # first_added: tieni il vecchio; i nuovi ticker prendono quello
+                # esplicito (migrazione) o la data di oggi; i legacy restano NULL
+                old_first = df['first_added'].reindex(tickers)
+                is_known = pd.Index(tickers).isin(df.index)
+                first_added = old_first.copy()
+                first_added[~is_known] = first_given.where(
+                    first_given.notna(), new_date)[~is_known]
                 keep = df.loc[~df.index.isin(tickers)]
             else:
                 coalesced = new_name
+                first_added = first_given.where(first_given.notna(), new_date)
                 keep = df
-            block = pd.DataFrame({'name': coalesced, 'last_updated': new_date})
+            block = pd.DataFrame({'name': coalesced, 'last_updated': new_date,
+                                  'first_added': first_added})
             block.index.name = 'ticker'
             out = pd.concat([keep, block]) if len(keep) else block
             self._write_meta('updates', out.reset_index())

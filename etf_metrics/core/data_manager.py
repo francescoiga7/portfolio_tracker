@@ -126,18 +126,21 @@ class MarketDataManager:
             CREATE TABLE IF NOT EXISTS updates (
                 ticker TEXT PRIMARY KEY,
                 name TEXT,
-                last_updated DATE
+                last_updated DATE,
+                first_added DATE
             )
         ''')
 
         cursor.execute("PRAGMA table_info(updates)")
         columns = [info[1] for info in cursor.fetchall()]
-        if 'name' not in columns:
-            try:
-                cursor.execute("ALTER TABLE updates ADD COLUMN name TEXT")
-                logger.info("Colonna 'name' aggiunta alla tabella updates.")
-            except Exception as e:
-                logger.warning(f"Impossibile aggiungere colonna name: {e}")
+        for col, col_type in (('name', 'TEXT'), ('first_added', 'DATE')):
+            if col not in columns:
+                try:
+                    cursor.execute(
+                        f"ALTER TABLE updates ADD COLUMN {col} {col_type}")
+                    logger.info(f"Colonna '{col}' aggiunta alla tabella updates.")
+                except Exception as e:
+                    logger.warning(f"Impossibile aggiungere colonna {col}: {e}")
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS prices (
@@ -253,14 +256,15 @@ class MarketDataManager:
             ignore_index=True)
 
     def _upsert_updates(self, conn, ticker: str, asset_name: Optional[str], today: str):
-        """Upsert della riga del ticker nella tabella updates (backend SQLite)."""
+        """Upsert della riga del ticker nella tabella updates (backend SQLite).
+        first_added è scritto solo al primo INSERT, mai sovrascritto."""
         conn.execute("""
-            INSERT INTO updates (ticker, name, last_updated)
-            VALUES (?, ?, ?)
+            INSERT INTO updates (ticker, name, last_updated, first_added)
+            VALUES (?, ?, ?, ?)
             ON CONFLICT(ticker) DO UPDATE SET
                 last_updated=excluded.last_updated,
                 name=COALESCE(excluded.name, updates.name)
-        """, (ticker, asset_name, today))
+        """, (ticker, asset_name, today, today))
 
     def save_bulk_data(self, data_dict: dict, names_dict: dict = None):
         """Salva i dati nel DB SOSTITUENDO lo storico dei ticker e aggiornando
@@ -527,40 +531,48 @@ class MarketDataManager:
 
     def get_all_tickers_info(self) -> pd.DataFrame:
         """Tabella riassuntiva del contenuto del DB: ticker, nome, righe, copertura
-        date e data dell'ultimo aggiornamento (per la UI Gestione Dati)."""
+        date, prezzo dell'ultima barra, data dell'ultimo aggiornamento e data del
+        primo inserimento nel DB (per la UI Gestione Dati)."""
         if self.backend == 'parquet':
             try:
                 updates = self._store.read_updates()
                 if updates.empty:
                     return pd.DataFrame(
-                        columns=['ticker', 'name', 'last_updated', 'rows',
-                                 'first_date', 'last_date'])
+                        columns=['ticker', 'name', 'first_added', 'last_updated',
+                                 'rows', 'first_date', 'last_date', 'last_price'])
                 price_stats = self._store.ticker_row_stats()
+                last_prices = self._store.last_closes()
                 rows = []
                 for r in updates.sort_values('ticker').itertuples(index=False):
                     cnt, first, last = price_stats.get(r.ticker, (0, None, None))
                     rows.append({
                         'ticker': r.ticker,
                         'name': r.name if pd.notna(r.name) else None,
+                        'first_added': (r.first_added
+                                        if pd.notna(r.first_added) else None),
                         'last_updated': (r.last_updated
                                          if pd.notna(r.last_updated) else None),
                         'rows': cnt,
                         'first_date': first,
                         'last_date': last,
+                        'last_price': (round(last_prices[r.ticker], 4)
+                                       if r.ticker in last_prices else None),
                     })
                 return pd.DataFrame(
-                    rows, columns=['ticker', 'name', 'last_updated', 'rows',
-                                   'first_date', 'last_date'])
+                    rows, columns=['ticker', 'name', 'first_added', 'last_updated',
+                                   'rows', 'first_date', 'last_date', 'last_price'])
             except Exception as e:
                 logger.error(f"Errore get_all_tickers_info: {e}")
                 return pd.DataFrame()
         try:
             return self._query_df("""
-                SELECT u.ticker, u.name, u.last_updated,
+                SELECT u.ticker, u.name, u.first_added, u.last_updated,
                        COUNT(p.date) AS rows,
-                       MIN(p.date) AS first_date, MAX(p.date) AS last_date
+                       MIN(p.date) AS first_date, MAX(p.date) AS last_date,
+                       (SELECT p2.close FROM prices p2 WHERE p2.ticker = u.ticker
+                        ORDER BY p2.date DESC LIMIT 1) AS last_price
                 FROM updates u LEFT JOIN prices p ON p.ticker = u.ticker
-                GROUP BY u.ticker, u.name, u.last_updated
+                GROUP BY u.ticker, u.name, u.first_added, u.last_updated
                 ORDER BY u.ticker
             """)
         except Exception as e:

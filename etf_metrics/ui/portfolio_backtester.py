@@ -7,7 +7,7 @@ from etf_metrics.core.portfolio_backtester import (
     compute_weights_from_transactions,
 )
 from etf_metrics.shared.config import FAMOUS_PORTFOLIOS
-from etf_metrics.ui.components import display_backtest_results, get_portfolio_store
+from etf_metrics.ui.components import display_backtest_results, get_portfolio_store, render_page_help
 
 
 def get_weights_from_portfolio(portfolio_name: str) -> str:
@@ -23,15 +23,11 @@ def render_portfolio_backtester_ui():
     st.title("⏳ Portfolio Backtester")
     st.caption("Simula e confronta le performance di portafogli personalizzati nel tempo.")
 
-    with st.expander("📖 Metodologia e Funzionamento"):
-        st.markdown("""
-        Questa sezione ti permette di simulare e confrontare le performance di portafogli personalizzati nel tempo. Puoi:
-        - **Scegliere una strategia di investimento**: "Lump Sum (PIC)" o "PAC".
-        - **Definire il tuo portafoglio**: manualmente o caricandolo da un portafoglio esistente.
-        - **Impostare la frequenza di ribilanciamento**: "Mai" o "Annuale".
-        - **Confrontare il tuo portafoglio** con alcuni portafogli modello.
-        - **Eseguire il backtest** e visualizzare i risultati.
-        """)
+    render_page_help(
+        "**Cosa fa**: simula un portafoglio (Lump Sum o PAC mensile) sui prezzi storici del DB.",
+        "**A cosa serve**: validare un'allocazione o un piano di accumulo prima di investirci soldi veri.",
+        "Confronta il tuo portafoglio con i portafogli famosi (es. Ray Dalio).",
+    )
 
     st.sidebar.header("⚙️ Impostazioni")
 

@@ -253,6 +253,20 @@ class YahooClient(BaseFinancialClient):
         symbols = [q.get("symbol") for q in quotes if q.get("symbol")]
         return pick_preferred_symbol(symbols)
 
+    def resolve_isin_details(self, isin: str):
+        """(ticker, nome esteso) da una sola ricerca Yahoo. Nome None se assente."""
+        if isin in MANUAL_ISIN_MAP:
+            return pick_preferred_symbol(MANUAL_ISIN_MAP[isin]), None
+        quotes = self.search(isin, quotes_count=60)
+        symbols = [q.get("symbol") for q in quotes if q.get("symbol")]
+        sym = pick_preferred_symbol(symbols)
+        if not sym:
+            return None, None
+        for q in quotes:
+            if q.get("symbol") == sym:
+                return sym, q.get("longname") or q.get("shortname")
+        return sym, None
+
     def resolve_ticker_to_isin(self, ticker: str) -> Optional[str]:
         """Tenta di risolvere un ticker nel suo ISIN usando get_info."""
         info = self.get_info(ticker=ticker)
@@ -539,6 +553,22 @@ def yahoo_search(query: str, quotes_count: int = 100) -> List[Dict]:
 
 def resolve_isin_one(isin: str) -> Optional[str]:
     return _get_yahoo_client().resolve_isin_one(isin)
+
+
+def resolve_isin_details(isin: str):
+    """(ticker, nome esteso) per un ISIN; nome None se la ricerca non lo riporta."""
+    return _get_yahoo_client().resolve_isin_details(isin)
+
+
+def get_ticker_display_name(ticker: str) -> Optional[str]:
+    """Nome esteso di un ticker via get_info (longName o shortName)."""
+    if not ticker:
+        return None
+    try:
+        info = get_info(ticker=ticker) or {}
+        return info.get('longName') or info.get('shortName')
+    except Exception:
+        return None
 
 
 def resolve_ticker_to_isin(ticker: str) -> Optional[str]:
