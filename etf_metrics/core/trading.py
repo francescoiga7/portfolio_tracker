@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Trading live sul portafoglio REALE: algoritmo giornaliero, Satelliti PAC
-e stop Chandelier per posizioni satellite (ex `algo_live.py` + logica satellite).
+e stop Chandelier per posizioni satellite.
 
 - `run_daily_update` mette in PRATICA le strategie del backtest: lo stato reale
   (cassa, posizioni, log) e' persistito in JSON e replica la logica del motore
@@ -33,9 +33,7 @@ from etf_metrics.shared.config import ALGO_STATE_FILE
 from etf_metrics.clients.yahoo_client import get_series, resolve_isin_details
 from etf_metrics.core.metrics import calculate_atr_series
 from etf_metrics.core.etf_search_engine import load_etf_universe
-from etf_metrics.core.portfolio_tracker import (
-    PORTFOLIO_FILE, PortfolioStore, _calculate_open_positions,
-    calculate_cash_from_transactions)
+from etf_metrics.core.portfolio_tracker import _calculate_open_positions
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +124,7 @@ def check_satellite_status(df: pd.DataFrame, purchase_date: pd.Timestamp, curren
     }
 
 
-# --- Portafoglio algoritmico live (ex core/algo_live.py) ---
+# --- Portafoglio algoritmico live ---
 
 
 def load_algo_state(filename: str = ALGO_STATE_FILE) -> Dict:
@@ -280,122 +278,6 @@ def _reconstruct_from_history(pos: Dict, df, strat, cfg: Dict) -> None:
             pos['stop_loss'] = float(row['Close'] - atr * cfg['STOP_LOSS_ATR_MULT'])
 
 
-def sync_state_from_portfolio(state: Dict, transactions: List[Dict],
-                              market_data: Dict[str, pd.DataFrame] = None,
-                              strategy: str = None) -> Dict:
-    """Allinea lo stato dell'algo alle transazioni del portfolio collegato.
-
-    - posizioni nuove (acquisti manuali nel tracker) -> importate con
-      ricostruzione dello stato strategico dallo storico
-    - quantità diverse (acquisti/vendite manuali) -> allineate al prezzo medio
-    - posizioni chiuse nel tracker -> rimosse dallo stato
-    - cash = versamenti - prelievi - acquisti + vendite nette (commissioni e tasse)
-    - buys_this_month = acquisti scritti dall'algoritmo nel mese corrente
-
-    Ritorna {'imported', 'synced', 'removed', 'unresolved'} per la UI.
-    """
-    # import locale (core.automated_backtest importa da questo modulo: ciclo)
-    from etf_metrics.core.automated_backtest import CONFIG, STRATEGIES, get_strategy
-
-    strat_key = strategy or state.get('strategy') or DEFAULT_STRATEGY
-    if strat_key not in STRATEGIES:
-        strat_key = DEFAULT_STRATEGY
-    strat = get_strategy(strat_key)
-    cfg = dict(CONFIG)
-    cfg.update(strat.defaults)
-    if state.get('commission') is not None:
-        cfg['COMMISSION'] = float(state['commission'])
-    if state.get('max_positions') is not None:
-        cfg['MAX_POSITIONS'] = int(state['max_positions'])
-    commission = float(cfg['COMMISSION'])
-    tax_rate = float(state.get('tax_rate', 26.0))
-
-    open_pos = _calculate_open_positions(transactions)
-    keys = [k for k, d in open_pos.items() if d['quantity'] > 1e-9]
-    mapping, unresolved = resolve_portfolio_tickers(keys, state.setdefault('isin_map', {}))
-
-    _normalize_positions_dates(state)
-    positions = state['positions']
-    stats = {'imported': 0, 'synced': 0, 'removed': 0, 'unresolved': unresolved}
-
-    # 1. Posizioni presenti nel portfolio (fonte di verità)
-    seen = set()
-    for key, data in open_pos.items():
-        if data['quantity'] <= 1e-9:
-            continue
-        t = mapping.get(key)
-        if t is None:
-            continue
-        seen.add(t)
-        qty = float(data['quantity'])
-        avg_cost = float(data['total_cost']) / qty
-        pos = positions.get(t)
-        if pos is None:
-            pos = positions[t] = {
-                'qty': qty, 'entry_price': avg_cost,
-                'entry_date': data['first_buy_date'],
-                'stop_loss': None, 'tp1_taken': False,
-                'regime_at_entry': None, 'max_close': None,
-            }
-            _reconstruct_from_history(pos, market_data.get(t) if market_data else None,
-                                      strat, cfg)
-            stats['imported'] += 1
-        elif abs(float(pos.get('qty', 0)) - qty) > 1e-6:
-            # quantità cambiata manualmente nel tracker: allinea al prezzo medio
-            pos['qty'] = qty
-            pos['entry_price'] = avg_cost
-            stats['synced'] += 1
-
-    # 2. Posizioni chiuse nel tracker -> fuori dallo stato
-    for t in list(positions.keys()):
-        if t not in seen:
-            del positions[t]
-            stats['removed'] += 1
-
-    # 3. Cassa derivata dai movimenti (netta di commissioni e ritenute)
-    state['cash'] = calculate_cash_from_transactions(transactions, commission, tax_rate)
-
-    # 4. Budget acquisti del mese: solo transazioni scritte dall'algoritmo
-    now = pd.Timestamp.now()
-    month_key = f"{now.year}-{now.month:02d}"
-    state['buys_this_month'] = sum(
-        1 for tr in transactions
-        if tr.get('type') == 'buy' and tr.get('strategy')
-        and str(tr.get('date', ''))[:7] == month_key)
-    return stats
-
-
-def write_back_trades(state: Dict, store: PortfolioStore, portfolio_name: str,
-                      n_log_before: int) -> int:
-    """Scrive nel portfolio collegato le operazioni decise dall'algoritmo.
-
-    Le nuove voci del trade_log (in testa, inserite da run_daily_update)
-    diventano transazioni con campo 'strategy' e flag satellite=True
-    (etichetta di segmentazione: posizioni tattiche gestite dall'algoritmo).
-    Ritorna il numero di transazioni scritte.
-    """
-    log = state.get('trade_log') or []
-    new_entries = log[:max(0, len(log) - n_log_before)]
-    written = 0
-    for entry in reversed(new_entries):  # ordine cronologico
-        try:
-            store.add_transaction(portfolio_name, {
-                'type': 'buy' if entry.get('Action') == 'BUY' else 'sell',
-                'isin': entry['Ticker'],
-                'quantity': float(entry['Qty']),
-                'price': float(entry['Price']),
-                'date': entry['Date'],
-                'satellite': True,
-                'strategy': entry.get('Strategy'),
-            })
-            written += 1
-        except Exception as e:
-            logger.warning("Write-back transazione fallito: %s", e)
-    if written:
-        store.save_to_json(PORTFOLIO_FILE)
-    return written
-
-
 def _normalize_positions_dates(state: Dict) -> None:
     """entry_date (stringa JSON) -> pd.Timestamp per l'aritmetica delle strategie."""
     for pos in (state.get('positions') or {}).values():
@@ -465,7 +347,7 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
     if benchmark not in market_data and BENCH_PROXY_KEY in market_data:
         benchmark = BENCH_PROXY_KEY
     if benchmark not in market_data:
-        return state, [f"⚠️ Dati insufficienti (nemmeno il benchmark di riserva): "
+        return state, ["⚠️ Dati insufficienti (nemmeno il benchmark di riserva): "
                        "aggiorna i dati dalla pagina 📥 Gestione Dati."]
 
     # Indicatori specifici della strategia (come nel motore di backtest)
@@ -477,7 +359,6 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
     last_date = market_data[ref].index[-1]
 
     regime = _assess_market_regime(price_matrix, last_date, market_data, benchmark)
-    is_bull = (regime == "BULL")
     is_crash = (regime in ("DANGER", "VOLATILE"))
 
     ctx = _MarketCtx()
@@ -571,9 +452,6 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
         messages.append(f"🔴 VENDI **{t}**: {qty_sell:g} pz @ {price:.2f} — {reason}")
 
 # 2. GESTIONE INGRESSI (acquisti consigliati) ---
-    buy_allowed = strat.can_buy(ctx) and \
-        (not cfg['ENABLE_MONTHLY_LIMIT'] or buys_this_month < cfg['MAX_BUYS_PER_MONTH'])
-
     last_scan = state.get('last_buy_scan')
     scan_due = True
     if last_scan:

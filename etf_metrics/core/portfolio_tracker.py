@@ -162,7 +162,7 @@ def resolve_transaction_ticker(key: str) -> Optional[str]:
     return key
 
 
-def resolve_portfolio_tickers(transactions: List[Dict[str, Any]]) -> List[str]:
+def transaction_tickers(transactions: List[Dict[str, Any]]) -> List[str]:
     """Ticker Yahoo di tutte le chiavi (buy/sell) presenti nelle transazioni."""
     keys = list(dict.fromkeys(
         t.get('isin', '') for t in (transactions or [])

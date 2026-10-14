@@ -6,7 +6,7 @@ import streamlit as st
 
 from etf_metrics.core.portfolio_tracker import (
     calculate_portfolio_pnl,
-    resolve_portfolio_tickers,
+    transaction_tickers,
     resolve_transaction_ticker,
 )
 from etf_metrics.core.data_updater import update_tickers
@@ -81,7 +81,7 @@ def render_portfolio_tracker_ui():
                     # ticker nuovo -> storico completo (max), ticker esistente
                     # -> delta dall'ultima data nel DB (anche se già aggiornato oggi).
                     transactions = store.get(selected).get("transactions", [])
-                    tickers = resolve_portfolio_tickers(transactions)
+                    tickers = transaction_tickers(transactions)
                     if tickers:
                         with st.spinner(f"Aggiornamento DB: {len(tickers)} ticker..."):
                             st.session_state.db_update_report = update_tickers(

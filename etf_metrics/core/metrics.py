@@ -146,3 +146,31 @@ def compute_backtest_performance_metrics(df_trades: pd.DataFrame, initial_capita
         "Profit_Factor": profit_factor,
         "Equity_Curve": equity_df['Value'],
     }
+
+
+def yearly_returns_from_daily(ret: pd.Series) -> pd.Series:
+    """Rendimento per anno civile composto dai rendimenti giornalieri
+    (time-weighted: immune ai flussi di cassa). Indice = anno."""
+    out = {}
+    for year, grp in ret.groupby(ret.index.year):
+        out[year] = float((1.0 + grp).prod() - 1.0)
+    return pd.Series(out)
+
+
+def yearly_returns(equity: pd.Series) -> pd.Series:
+    """Rendimento per anno civile da una curva equity (livelli NAV), con
+    chaining tra anni (base = ultimo valore dell'anno precedente).
+    Check di robustezza: rendimenti concentrati in un solo anno suggeriscono
+    overfitting a un singolo regime di mercato."""
+    if equity is None or equity.empty:
+        return pd.Series(dtype=float)
+    eq = equity.dropna()
+    if eq.empty:
+        return pd.Series(dtype=float)
+    out: Dict[int, float] = {}
+    prev = eq.iloc[0]
+    for y in sorted(set(eq.index.year)):
+        vals = eq[eq.index.year == y]
+        out[y] = float(vals.iloc[-1] / prev - 1.0)
+        prev = vals.iloc[-1]
+    return pd.Series(out)

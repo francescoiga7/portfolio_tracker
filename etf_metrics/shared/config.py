@@ -49,10 +49,6 @@ def resolve_market_db_path() -> str:
     return PARQUET_STORE_DIR
 
 
-# Percorso dello store dei prezzi (compatibilità: usare resolve_market_db_path()
-# per leggere il valore aggiornato, es. dopo una migrazione a Parquet)
-MARKET_DATA_DB = resolve_market_db_path()
-
 # Preferenze per i suffissi dei ticker Yahoo
 PREFERRED_SUFFIXES = [".DE", ".MI", ".AS", ".L", ""]
 

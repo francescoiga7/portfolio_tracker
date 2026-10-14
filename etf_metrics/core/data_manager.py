@@ -1,7 +1,7 @@
 import sqlite3
 import pandas as pd
 from datetime import date, timedelta
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict
 import logging
 import os
 import threading

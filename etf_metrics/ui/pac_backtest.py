@@ -77,6 +77,7 @@ def _render_pac_comparison_results(run):
             "Versato (€)": r['invested'],
             "Utile (€)": r['net'],
             "Multiplo": r['multiple'],
+            "IRR anno": r.get('irr'),
             "Max DD %": (r['max_dd'] * 100) if r['max_dd'] is not None else None,
             "Sharpe": r['sharpe'],
             "Acquisti": r['n_buys'],
@@ -91,7 +92,11 @@ def _render_pac_comparison_results(run):
             "Versato (€)": ref['invested'],
             "Utile (€)": ref['core_final'] - ref['invested'],
             "Multiplo": ref['core_final'] / ref['invested'],
-            "Max DD %": None, "Sharpe": None, "Acquisti": ref['months_total'],
+            "IRR anno": ref.get('core_irr'),
+            "Max DD %": (ref['core_max_dd'] * 100)
+                        if ref.get('core_max_dd') is not None else None,
+            "Sharpe": ref.get('core_sharpe'),
+            "Acquisti": ref['months_total'],
             "Mesi senza segnale": "—", "Commissioni (€)": ref['months_total'] * run['commission'],
         })
     df_sum = pd.DataFrame(rows).set_index("Strategia").sort_values("Finale (€)", ascending=False)
@@ -99,10 +104,16 @@ def _render_pac_comparison_results(run):
     st.dataframe(
         df_sum.style.format({
             "Finale (€)": "€{:,.0f}", "Versato (€)": "€{:,.0f}", "Utile (€)": "€{:,.0f}",
-            "Multiplo": "{:.3f}", "Max DD %": "{:.1f}", "Sharpe": "{:.2f}",
+            "Multiplo": "{:.3f}", "IRR anno": "{:+.1%}", "Max DD %": "{:.1f}",
+            "Sharpe": "{:.2f}",
             "Acquisti": "{:.0f}", "Commissioni (€)": "€{:,.0f}",
         }, na_rep="—"),
         width="stretch")
+    st.caption(
+        "💼 **IRR anno** = rendimento annuo effettivo ponderato per i versamenti "
+        "(money-weighted): in un PAC è il numero giusto da guardare, perché il "
+        "capitale arriva gradualmente (il multiplo dipende dalla durata del piano, "
+        "l'IRR dal rendimento reale del capitale in linea).")
 
     best = df_sum.iloc[0]
     core_row = df_sum.loc["🛡️ Core PAC (buy & hold)"] \

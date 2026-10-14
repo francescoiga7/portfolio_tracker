@@ -37,6 +37,7 @@ from etf_metrics.core.automated_backtest import (
     _ensure_processed, prepare_market_data, _prepare_strategy_frames,
     _precompute_regimes, _assess_market_regime, check_correlation_strict,
     _FastRowPanel, _MarketCtx, BENCH_PROXY_KEY, build_benchmark_proxy)
+from etf_metrics.core.metrics import yearly_returns_from_daily
 
 
 def etf_universe_in_db() -> List[str]:
@@ -60,13 +61,143 @@ def etf_universe_in_db() -> List[str]:
     return sorted(uni & db)
 
 
-def _yearly_returns(ret: pd.Series) -> pd.Series:
-    """Rendimento per anno civile, composto dai rendimenti giornalieri
-    corretti per i versamenti (time-weighted: immune ai flussi di cassa)."""
-    out = {}
-    for year, grp in ret.groupby(ret.index.year):
-        out[year] = float((1.0 + grp).prod() - 1.0)
-    return pd.Series(out)
+def _money_weighted_irr(nav_series: pd.Series, deposit_values: np.ndarray,
+                        sim_dates: pd.DatetimeIndex) -> Optional[float]:
+    """IRR annualizzato (money-weighted) del piano: risolve
+    Σ versamento_i × (1+irr)^(anni tra i e la fine) = NAV finale.
+
+    È la metrica giusta per un PAC: il multiplo dipende dalla durata del
+    piano (il capitale arriva gradualmente), l'IRR dal rendimento reale del
+    capitale effettivamente in linea. Tutti i flussi sono versamenti
+    positivi → la fv è monotona nell'irr → bisezione robusta."""
+    if nav_series is None or len(nav_series) < 2:
+        return None
+    final = float(nav_series.iloc[-1])
+    if final <= 0:
+        return None
+    idx_of = {d: i for i, d in enumerate(sim_dates)}
+    d0 = nav_series.index[0]
+    T = (nav_series.index[-1] - d0).days / 365.25
+    if T <= 0:
+        return None
+    flows = [(float(deposit_values[idx_of[d]]), (d - d0).days / 365.25)
+             for d in nav_series.index
+             if d in idx_of and deposit_values[idx_of[d]] > 0]
+    if not flows:
+        return None
+
+    def fv(r: float) -> float:
+        return sum(f * (1.0 + r) ** (T - t) for f, t in flows)
+
+    lo, hi = -0.95, 10.0
+    try:
+        if fv(lo) > final or fv(hi) < final:
+            return None
+    except (OverflowError, ValueError):
+        return None
+    for _ in range(80):
+        mid = (lo + hi) / 2
+        try:
+            below = fv(mid) < final
+        except (OverflowError, ValueError):
+            return None
+        if below:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def _core_pac_metrics(core_nav: pd.Series, deposit_values: np.ndarray,
+                      sim_dates: pd.DatetimeIndex) -> Dict:
+    """MaxDD, Sharpe e IRR del benchmark interno (PAC puro sul core), con la
+    stessa correzione per i versamenti usata per il NAV della strategia:
+    senza questi numeri non si può giudicare se i satelliti hanno pagato in
+    termini risk-adjusted."""
+    out: Dict = {'core_max_dd': None, 'core_sharpe': None, 'core_irr': None}
+    if core_nav is None or not len(core_nav):
+        return out
+    dd_c = core_nav / core_nav.cummax() - 1.0
+    out['core_max_dd'] = float(dd_c.min())
+    out['core_irr'] = _money_weighted_irr(core_nav, deposit_values, sim_dates)
+    idx_of = {d: i for i, d in enumerate(sim_dates)}
+    dep_c = deposit_values[[idx_of[d] for d in core_nav.index]]
+    cv = core_nav.values
+    cprev = np.concatenate([[np.nan], cv[:-1]])
+    cok = cprev > 0
+    cadj = np.where(cok, (cv - dep_c) / np.where(cok, cprev, np.nan) - 1.0, np.nan)
+    cret = pd.Series(cadj, index=core_nav.index)
+    cret = cret[cret.notna() & np.isfinite(cret)]
+    if len(cret) > 1 and cret.std() > 0:
+        out['core_sharpe'] = float(cret.mean() / cret.std() * np.sqrt(252))
+    return out
+
+
+def _finalize_pac_result(strategy_name: str, strategy_key: str,
+                         nav_values: np.ndarray, core_nav_values: np.ndarray,
+                         monthly: List[Dict], trades: List[Dict],
+                         deposit_values: np.ndarray, sim_dates: pd.DatetimeIndex,
+                         deposited: float, commissions_paid: float,
+                         n_buys: int, n_sells: int, months_total: int,
+                         months_no_signal: int, months_core: int,
+                         months_skipped: Optional[int], core_available: bool,
+                         universe: List[str], engine: Optional[str] = None) -> Dict:
+    """Coda comune ai due motori PAC (daily e monthly): serie NAV, metriche
+    corrette per i versamenti e dizionario risultato con la stessa forma."""
+    nav_series = pd.Series(nav_values, index=sim_dates).dropna()
+    core_nav = pd.Series(core_nav_values, index=sim_dates).dropna()
+    deposits = pd.Series(np.cumsum(deposit_values), index=sim_dates)
+
+    # dtype omogeneo per le colonne numeriche del log mensile (i mesi senza
+    # azione hanno campi vuoti: serve per arrow/st.dataframe)
+    monthly_df = pd.DataFrame(monthly)
+    if not monthly_df.empty:
+        for col in ('score', 'qty', 'prezzo'):
+            monthly_df[col] = pd.to_numeric(monthly_df[col], errors='coerce')
+
+    # Rendimenti giornalieri corretti per i versamenti (deposito a inizio
+    # giornata, prima del movimento di mercato): senza correzione ogni
+    # versamento sembrerebbe un rendimento.
+    pos_in_sim = {d: j for j, d in enumerate(sim_dates)}
+    dep_arr = deposit_values[[pos_in_sim[d] for d in nav_series.index]]
+    vals = nav_series.values
+    prev = np.concatenate([[np.nan], vals[:-1]])
+    ok = prev > 0
+    adj = np.where(ok, (vals - dep_arr) / np.where(ok, prev, np.nan) - 1.0, np.nan)
+    ret = pd.Series(adj, index=nav_series.index)
+    ret = ret[ret.notna() & np.isfinite(ret)]
+    sharpe = float(ret.mean() / ret.std() * np.sqrt(252)) \
+        if len(ret) > 1 and ret.std() > 0 else None
+
+    dd = nav_series / nav_series.cummax() - 1.0
+    final = float(nav_series.iloc[-1]) if len(nav_series) else 0.0
+
+    out = {
+        'strategy': strategy_name, 'strategy_key': strategy_key,
+        'final': final, 'invested': float(deposited),
+        'net': final - deposited,
+        'multiple': (final / deposited) if deposited > 0 else None,
+        'max_dd': float(dd.min()) if len(dd) else None,
+        'sharpe': sharpe,
+        'irr': _money_weighted_irr(nav_series, deposit_values, sim_dates),
+        'n_buys': n_buys, 'n_sells': n_sells,
+        'months_total': months_total, 'months_no_signal': months_no_signal,
+        'months_core': months_core,
+        'commissions': float(commissions_paid),
+        'nav_daily': nav_series, 'core_nav': core_nav, 'deposits': deposits,
+        'trades': pd.DataFrame(trades),
+        'monthly': monthly_df,
+        'yearly': yearly_returns_from_daily(ret),
+        **_core_pac_metrics(core_nav, deposit_values, sim_dates),
+        'core_available': core_available,
+        'core_final': float(core_nav.iloc[-1]) if len(core_nav) else None,
+        'universe_size': len(universe),
+    }
+    if engine is not None:
+        out['engine'] = engine
+    if months_skipped is not None:
+        out['months_skipped'] = months_skipped
+    return out
 
 
 # 2. STRATEGIE PAC-NATIVE (mensili) ---
@@ -333,7 +464,6 @@ def _run_pac_backtest_monthly(
             first_of_month.append(int(p))
     mi_dates = full_index[first_of_month]
     mi_of_date = {d: mi for mi, d in enumerate(mi_dates)}
-    sim_idx_of_date = {d: i for i, d in enumerate(sim_dates)}
 
     # --- storico allineato al calendario del benchmark + frame mensili ---
     # (stessa convenzione del motore daily: si decide e si esegue alla
@@ -559,51 +689,11 @@ def _run_pac_backtest_monthly(
             except Exception:
                 pass
 
-    nav_series = pd.Series(nav_values, index=sim_dates).dropna()
-    core_nav = pd.Series(core_nav_values, index=sim_dates).dropna()
-    deposits = pd.Series(np.cumsum(deposit_values), index=sim_dates)
-
-    # colonne numeriche omogenee (come nel percorso daily)
-    monthly_df = pd.DataFrame(monthly)
-    if not monthly_df.empty:
-        for col in ('score', 'qty', 'prezzo'):
-            monthly_df[col] = pd.to_numeric(monthly_df[col], errors='coerce')
-
-    # rendimenti giornalieri corretti per i versamenti (deposito a inizio
-    # giornata): stessa logica del percorso daily
-    dep_arr = deposit_values[[sim_idx_of_date[d] for d in nav_series.index]]
-    vals = nav_series.values
-    prev = np.concatenate([[np.nan], vals[:-1]])
-    okm = prev > 0
-    adj = np.where(okm, (vals - dep_arr) / np.where(okm, prev, np.nan) - 1.0, np.nan)
-    ret = pd.Series(adj, index=nav_series.index)
-    ret = ret[ret.notna() & np.isfinite(ret)]
-    sharpe = float(ret.mean() / ret.std() * np.sqrt(252)) \
-        if len(ret) > 1 and ret.std() > 0 else None
-
-    dd = nav_series / nav_series.cummax() - 1.0
-    final = float(nav_series.iloc[-1]) if len(nav_series) else 0.0
-    core_final = float(core_nav.iloc[-1]) if len(core_nav) else None
-
-    return {
-        'strategy': pstrat.name, 'strategy_key': strategy_key,
-        'engine': 'pac-native',
-        'final': final, 'invested': float(deposited),
-        'net': final - deposited,
-        'multiple': (final / deposited) if deposited > 0 else None,
-        'max_dd': float(dd.min()) if len(dd) else None,
-        'sharpe': sharpe,
-        'n_buys': n_buys, 'n_sells': n_sells,
-        'months_total': months_total, 'months_no_signal': months_no_signal,
-        'months_core': months_core, 'months_skipped': months_skipped,
-        'commissions': float(commissions_paid),
-        'nav_daily': nav_series, 'core_nav': core_nav, 'deposits': deposits,
-        'trades': pd.DataFrame(trades),
-        'monthly': monthly_df,
-        'yearly': _yearly_returns(ret),
-        'core_available': core_available, 'core_final': core_final,
-        'universe_size': len(universe),
-    }
+    return _finalize_pac_result(
+        pstrat.name, strategy_key, nav_values, core_nav_values, monthly, trades,
+        deposit_values, sim_dates, deposited, commissions_paid,
+        n_buys, n_sells, months_total, months_no_signal, months_core,
+        months_skipped, core_available, universe, engine='pac-native')
 
 
 def run_pac_backtest(
@@ -876,52 +966,11 @@ def run_pac_backtest(
         monthly.append(action)
         pending = 0.0
 
-    nav_series = pd.Series(nav_values, index=sim_dates).dropna()
-    core_nav = pd.Series(core_nav_values, index=sim_dates).dropna()
-    deposits = pd.Series(np.cumsum(deposit_values), index=sim_dates)
-
-    # colonne numeriche omogenee (i mesi senza azione hanno campi vuoti:
-    # serve dtype coerente per la serializzazione arrow/st.dataframe)
-    monthly_df = pd.DataFrame(monthly)
-    if not monthly_df.empty:
-        for col in ('score', 'qty', 'prezzo'):
-            monthly_df[col] = pd.to_numeric(monthly_df[col], errors='coerce')
-
-    # Rendimenti giornalieri corretti per i versamenti (il deposito entra a
-    # inizio giornata, prima del movimento di mercato)
-    pos_in_sim = {d: j for j, d in enumerate(sim_dates)}
-    dep_arr = deposit_values[[pos_in_sim[d] for d in nav_series.index]]
-    vals = nav_series.values
-    prev = np.concatenate([[np.nan], vals[:-1]])
-    ok = prev > 0
-    adj = np.where(ok, (vals - dep_arr) / np.where(ok, prev, np.nan) - 1.0, np.nan)
-    ret = pd.Series(adj, index=nav_series.index)
-    ret = ret[ret.notna() & np.isfinite(ret)]
-    sharpe = float(ret.mean() / ret.std() * np.sqrt(252)) \
-        if len(ret) > 1 and ret.std() > 0 else None
-
-    dd = nav_series / nav_series.cummax() - 1.0
-    final = float(nav_series.iloc[-1]) if len(nav_series) else 0.0
-    core_final = float(core_nav.iloc[-1]) if len(core_nav) else None
-
-    return {
-        'strategy': strat.name, 'strategy_key': strategy_key,
-        'final': final, 'invested': float(deposited),
-        'net': final - deposited,
-        'multiple': (final / deposited) if deposited > 0 else None,
-        'max_dd': float(dd.min()) if len(dd) else None,
-        'sharpe': sharpe,
-        'n_buys': n_buys, 'n_sells': n_sells,
-        'months_total': months_total, 'months_no_signal': months_no_signal,
-        'months_core': months_core,
-        'commissions': float(commissions_paid),
-        'nav_daily': nav_series, 'core_nav': core_nav, 'deposits': deposits,
-        'trades': pd.DataFrame(trades),
-        'monthly': monthly_df,
-        'yearly': _yearly_returns(ret),
-        'core_available': core_available, 'core_final': core_final,
-        'universe_size': len(universe),
-    }
+    return _finalize_pac_result(
+        strat.name, strategy_key, nav_values, core_nav_values, monthly, trades,
+        deposit_values, sim_dates, deposited, commissions_paid,
+        n_buys, n_sells, months_total, months_no_signal, months_core,
+        None, core_available, universe)
 
 
 def run_pac_comparison(

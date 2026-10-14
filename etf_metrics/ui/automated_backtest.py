@@ -15,7 +15,6 @@ correnti differiscono da quelli dell'ultima run).
 import streamlit as st
 import pandas as pd
 import numpy as np
-from typing import Dict
 
 try:  # richiesto da Styler.background_gradient (tabelle colorate)
     import matplotlib  # noqa: F401
@@ -42,7 +41,8 @@ from etf_metrics.ui.components import (
 )
 from etf_metrics.ui.pac_backtest import render_pac_backtest_ui
 from etf_metrics.core.metrics import (compute_backtest_performance_metrics,
-                                      compute_metrics_from_series)
+                                      compute_metrics_from_series,
+                                      yearly_returns)
 
 
 DEFAULT_TRADING_LIST = """NVDA
@@ -188,7 +188,7 @@ def _bench_kpis(curve, initial_capital):
 
 
 def _fragility_kpis(df_trades, diag):
-    """Metriche di fragilita' (fix 2026-10-13): se il profitto poggia su poche
+    """Metriche di fragilita': se il profitto poggia su poche
     vendite o su una posizione sola, il risultato e' path-dependence, non edge.
 
     - Top-5 % utili: quota del profitto lordo portata dalle 5 migliori vendite
@@ -206,24 +206,6 @@ def _fragility_kpis(df_trades, diag):
     max_pos_pct = (mpw * 100.0) if mpw is not None else np.nan
     max_adv = df_trades['ADV_Pct'].max() if 'ADV_Pct' in df_trades.columns else np.nan
     return top5_pct, max_pos_pct, max_adv
-
-
-def _yearly_returns(equity: pd.Series) -> Dict[int, float]:
-    """Rendimenti % per anno civile da una curva equity (per il check di
-    robustezza per sottoperiodi: una strategia che rende solo in un regime
-    specifico è sospetta di overfitting)."""
-    if equity is None or equity.empty:
-        return {}
-    eq = equity.dropna()
-    if eq.empty:
-        return {}
-    out: Dict[int, float] = {}
-    prev = eq.iloc[0]
-    for y in sorted(set(eq.index.year)):
-        vals = eq[eq.index.year == y]
-        out[y] = (vals.iloc[-1] / prev - 1.0) * 100.0
-        prev = vals.iloc[-1]
-    return out
 
 
 def _strategy_equity_curve(r, initial_capital):
@@ -563,12 +545,12 @@ def _render_yearly_table(results, bh_curves, initial_capital):
     for key, r in results.items():
         curve = _strategy_equity_curve(r, initial_capital)
         if curve is not None and len(curve) > 1:
-            yearly_rows[r["name"]] = _yearly_returns(curve)
+            yearly_rows[r["name"]] = yearly_returns(curve)
     bench_s, bench_lbl = _bench_curve_and_label(bh_curves)
     if bench_s is not None and len(bench_s) > 1:
-        yearly_rows[f"🏁 {bench_lbl} B&H"] = _yearly_returns(bench_s)
+        yearly_rows[f"🏁 {bench_lbl} B&H"] = yearly_returns(bench_s)
     if 'equal_weight' in bh_curves:
-        yearly_rows["Universo Eq. Weight"] = _yearly_returns(bh_curves['equal_weight'])
+        yearly_rows["Universo Eq. Weight"] = yearly_returns(bh_curves['equal_weight'])
 
     if not yearly_rows:
         return
@@ -582,7 +564,7 @@ def _render_yearly_table(results, bh_curves, initial_capital):
     df_yearly = pd.DataFrame(yearly_rows).T
     df_yearly.columns = [str(c) for c in df_yearly.columns]
     st.dataframe(
-        _bg_gradient(df_yearly.style.format("{:+.1f}%"), cmap='RdYlGn', axis=None),
+        _bg_gradient(df_yearly.style.format("{:+.1%}"), cmap='RdYlGn', axis=None),
         width="stretch",
     )
 

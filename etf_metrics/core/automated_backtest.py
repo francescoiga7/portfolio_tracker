@@ -68,7 +68,7 @@ CONFIG = {
 #      all'ULTIMA rottura (vale il blocco piu' recente). Vale per QUALUNQUE
 #      gap di calendario: i salti attraverso sospensioni lunghe sono reverse
 #      split non aggiustati, non riaperture genuine (3TSE.DE +3.605%/493gg).
-# Cronaca: docs/STRATEGY_LEDGER.md, hardening 2026-10-13.
+# Dettagli e motivazioni: docs/STRATEGY_LEDGER.md.
 _PRICE_BREAK_LOG = float(np.log(3.0))
 
 
@@ -505,7 +505,7 @@ class BaseStrategy:
         return ""
 
 
-# 3a. AI Enhanced Momentum (strategia ORIGINALE, portata 1:1) ---
+# 3a. AI Enhanced Momentum ---
 class AIMomentumStrategy(BaseStrategy):
     key = "ai_momentum"
     name = "🧠 AI Enhanced Momentum (originale)"
@@ -1297,7 +1297,6 @@ def run_market_aware_backtest(
 
         regime = regime_series.iloc[i] if regime_series is not None \
             else _assess_market_regime(price_matrix, current_date, market_data, benchmark)
-        is_bull = (regime == "BULL")
         is_crash = (regime == "DANGER" or regime == "VOLATILE")
 
         ctx.regime = regime

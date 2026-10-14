@@ -369,7 +369,6 @@ def _render_daily_algo(state):
                              "Scarica i dati dalla pagina "
                              "📥 Gestione Dati e riprova.")
                 else:
-                    n_log = len(state.get('trade_log') or [])
                     new_state, msgs = run_daily_update(
                         state, tickers_list, allow_fractional,
                         market_data=market_data, strategy=strategy_key)

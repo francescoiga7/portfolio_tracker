@@ -89,7 +89,6 @@ def render_universe_selector(
               "universo già scaricato nel database locale."),
     )
 
-    allow_download = False
     if mode == UNIVERSE_WHOLE_DB:
         tickers = list(db_tickers)
         if tickers:
