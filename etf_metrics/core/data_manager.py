@@ -2,10 +2,8 @@
 backend, Parquet (default) o SQLite (legacy), e cache negativa dei ticker
 senza dati.
 
-Costanti di modulo: _SQL_CHUNK_SIZE e' il numero massimo di parametri per
-query SQL (query a chunk: compatibilita' con SQLite vecchi, limite 999);
-_CONVERT_LOCK serializza la conversione one-shot del file DuckDB legacy
-(l'app e' multithread con Streamlit).
+Costante di modulo: _SQL_CHUNK_SIZE e' il numero massimo di parametri per
+query SQL (query a chunk: compatibilita' con SQLite vecchi, limite 999).
 """
 import sqlite3
 import pandas as pd
@@ -13,11 +11,9 @@ from datetime import date, timedelta
 from typing import Optional, Dict
 import logging
 import os
-import threading
 
 from etf_metrics.shared.config import (
     FAILED_TICKER_RETRY_DAYS,
-    PARQUET_STORE_DIR,
     resolve_market_db_path,
 )
 from etf_metrics.core.parquet_store import ParquetStore
@@ -26,25 +22,19 @@ logger = logging.getLogger(__name__)
 
 _SQL_CHUNK_SIZE = 500
 
-_CONVERT_LOCK = threading.Lock()
-
 
 class MarketDataManager:
     """Gestore del DB dei prezzi con doppio backend: Parquet (default) o SQLite (legacy).
 
     Backend scelto dal percorso (`.db`/`.sqlite` = SQLite, directory = Parquet).
-    Un file `.duckdb` legacy viene convertito one-shot a Parquet al primo uso
-    (originale rinominato `.pre-parquet.bak`). API identica per entrambi i
-    backend. Layout e vantaggi dello store Parquet: vedi parquet_store.py.
+    API identica per entrambi i backend. Layout e vantaggi dello store Parquet:
+    vedi parquet_store.py.
     """
 
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
             db_path = resolve_market_db_path()
         db_path = str(db_path)
-
-        if db_path.lower().endswith('.duckdb'):
-            db_path = self._convert_legacy_duckdb(db_path)
 
         self.db_path = db_path
         if db_path.lower().endswith(('.db', '.sqlite', '.sqlite3')) \
@@ -54,34 +44,6 @@ class MarketDataManager:
             self.backend = 'parquet'
             self._store = ParquetStore(db_path)
         self._init_db()
-
-    def _convert_legacy_duckdb(self, db_path: str) -> str:
-        """Converte un DB DuckDB legacy in Parquet (one-shot); ritorna il
-        percorso dello store. L'originale viene rinominato
-        `<nome>.duckdb.pre-parquet.bak` (dati intatti)."""
-        if not os.path.exists(db_path):
-            raise RuntimeError(
-                "Il percorso del DB dei prezzi punta a un file DuckDB legacy che "
-                "non esiste. Il backend DuckDB è stato sostituito da Parquet: punti "
-                "la variabile d'ambiente ETF_METRICS_DB a una directory Parquet "
-                "(o a un file .db SQLite), oppure rimuovila per usare il default.")
-        from etf_metrics.core.store_migration import migrate_duckdb_to_parquet
-        with _CONVERT_LOCK:
-            dest = os.path.join(os.path.dirname(os.path.abspath(db_path)),
-                                PARQUET_STORE_DIR)
-            report = migrate_duckdb_to_parquet(db_path, dest)
-            backup = db_path + '.pre-parquet.bak'
-            try:
-                if os.path.exists(backup):
-                    os.remove(backup)
-                os.rename(db_path, backup)
-            except OSError as e:
-                logger.warning(
-                    f"Impossibile rinominare {db_path} in {backup}: {e}")
-            logger.info(
-                f"DB DuckDB legacy convertito in Parquet ({report['price_rows']:,} "
-                f"righe, {report['tickers']} ticker) → {dest}")
-            return dest
 
     def _get_conn(self):
         """Connessione SQLite: con journal WAL, synchronous=NORMAL e' sicuro

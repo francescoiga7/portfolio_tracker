@@ -50,11 +50,9 @@ def resolve_market_db_path() -> str:
        Parquet oppure file .db SQLite legacy)
     2. market_data_parquet/, se esiste (backend Parquet: è il backend di
        default, formato colonnare aperto con partizioni mensili)
-    3. market_data.duckdb, se esiste (legacy: convertito automaticamente
-       in Parquet al primo uso)
-    4. market_data.db (SQLite, legacy: usato solo se è l'unico DB presente
+    3. market_data.db (SQLite, legacy: usato solo se è l'unico DB presente
        e lo store Parquet non è ancora stato creato)
-    5. market_data_parquet nuovo (installazioni da zero: il Gestore Dati
+    4. market_data_parquet nuovo (installazioni da zero: il Gestore Dati
        crea e popola direttamente lo store Parquet)
 
     La risoluzione a runtime permette il cambio di backend senza riavviare
@@ -65,8 +63,6 @@ def resolve_market_db_path() -> str:
         return explicit
     if os.path.isdir(PARQUET_STORE_DIR):
         return PARQUET_STORE_DIR
-    if os.path.exists("market_data.duckdb"):
-        return "market_data.duckdb"
     if os.path.exists("market_data.db"):
         return "market_data.db"
     return PARQUET_STORE_DIR

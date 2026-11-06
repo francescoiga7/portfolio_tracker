@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """Migrazione dello store dei prezzi verso Parquet partizionato per mese.
 
-Fonti supportate:
-- SQLite legacy (`market_data.db`)
-- DuckDB legacy (`market_data.duckdb`)
+Fonte supportata: SQLite legacy (`market_data.db`).
 
 La copia è un MERGE (upsert) nello store di destinazione: rieseguire la
 migrazione è sicuro e non perde mai dati già presenti. La fonte NON viene
@@ -12,11 +10,10 @@ modificata.
 Uso CLI:
     python3 scripts/migrate_to_parquet.py                      # auto-rileva la fonte
     python3 scripts/migrate_to_parquet.py --source mio.db
-    python3 scripts/migrate_to_parquet.py --source mio.duckdb --dest mio_parquet
+    python3 scripts/migrate_to_parquet.py --source mio.db --dest mio_parquet
 
-Dalla UI: pagina 📥 Gestione Dati → pulsante "🚀 Migra a Parquet" (fonte SQLite).
-Un file `market_data.duckdb` legacy viene invece convertito automaticamente al
-primo uso da `MarketDataManager` (che poi lo rinomina in `.pre-parquet.bak`).
+Dalla UI: pagina 📥 Gestione Dati → pulsante "🚀 Migra a Parquet" (visibile
+solo quando il backend in uso è SQLite).
 """
 import logging
 import os
@@ -183,75 +180,9 @@ def migrate_sqlite_to_parquet(source: str = "market_data.db",
     return report
 
 
-def migrate_duckdb_to_parquet(source: str = "market_data.duckdb",
-                              dest: Optional[str] = None,
-                              progress_callback: Optional[Callable] = None) -> dict:
-    """Copia un DB DuckDB legacy nello store Parquet (merge/upsert, fonte intatta).
-
-    La copia di `prices` avviene a chunk (_CHUNK_ROWS righe) per limitare la
-    memoria su DB enormi.
-
-    Richiede il modulo `duckdb` (solo per la migrazione: non è più una
-    dipendenza del progetto). Ritorna lo stesso report di
-    `migrate_sqlite_to_parquet` con kind='duckdb'.
-    """
-    try:
-        import duckdb
-    except ImportError as e:
-        raise RuntimeError(
-            "La migrazione da DuckDB richiede il modulo 'duckdb', che non è più "
-            "una dipendenza del progetto. Installalo al volo con: "
-            "uv run --with duckdb python scripts/migrate_to_parquet.py "
-            f"--source {source}") from e
-
-    t0 = time.time()
-    source = os.path.abspath(str(source))
-    if not os.path.exists(source):
-        raise FileNotFoundError(f"DB DuckDB di origine non trovato: {source}")
-    dest = os.path.abspath(dest) if dest else _default_dest(source)
-    store = ParquetStore(dest)
-
-    report = {'source': source, 'dest': dest, 'kind': 'duckdb',
-              'tickers': 0, 'price_rows': 0, 'months': 0,
-              'updates_rows': 0, 'failed_rows': 0, 'total_price_rows': 0,
-              'elapsed_sec': 0.0}
-
-    con = duckdb.connect(source, read_only=True)
-    try:
-        tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
-
-        if 'prices' in tables:
-            report['total_price_rows'] = \
-                con.execute("SELECT COUNT(*) FROM prices").fetchone()[0] or 0
-
-            def _chunks():
-                reader = con.execute(
-                    "SELECT date, ticker, open, high, low, close, volume "
-                    "FROM prices ORDER BY date").fetch_record_batch(_CHUNK_ROWS)
-                for batch in reader:
-                    yield batch.to_pandas()
-
-            _copy_prices(_chunks(), store, report, progress_callback)
-
-        if 'updates' in tables:
-            upd = con.execute(
-                "SELECT * FROM updates").df()
-            store.upsert_updates(_normalize_updates(upd))
-            report['updates_rows'] = len(upd)
-
-        if 'failed_tickers' in tables:
-            fail = _normalize_failed(con.execute(
-                "SELECT ticker, reason, first_failed, last_failed, attempts "
-                "FROM failed_tickers").df())
-            store.upsert_failed_rows(fail)
-            report['failed_rows'] = len(fail)
-    finally:
-        con.close()
-
     report['tickers'] = len(store.distinct_tickers())
     report['elapsed_sec'] = time.time() - t0
     return report
 
 
-__all__ = ['PRICES_COLUMNS', 'migrate_sqlite_to_parquet',
-           'migrate_duckdb_to_parquet']
+__all__ = ['PRICES_COLUMNS', 'migrate_sqlite_to_parquet']
