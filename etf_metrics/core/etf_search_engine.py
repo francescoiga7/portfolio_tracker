@@ -85,8 +85,6 @@ def get_unique_preferred_tickers(tickers: List[str]) -> List[str]:
     if not tickers:
         return []
 
-    # Precarica le info in parallelo: il dedup qui sotto ne fa una per ticker,
-    # in sequenza sarebbe lentissimo con migliaia di strumenti.
     if len(tickers) > 8:
         prefetch_ticker_infos(tickers)
 
@@ -162,8 +160,6 @@ def discover_universe(queries: Iterable[str], quotes_per_query: int,
             logger.warning(f"Errore ricerca per '{query}': {e}")
     return ticker_list
 
-
-# --- Persistenza dell'universo ETF (file JSON accanto agli altri stati) ---
 
 def save_etf_universe(tickers: List[str]) -> Dict:
     """Salva l'universo ETF (unione con quello esistente) su file JSON.
@@ -241,7 +237,6 @@ def load_universe_to_db(queries: Iterable[str] = None, quotes_per_query: int = 2
         'universe_count': 0, 'last_discovery': None,
     }
 
-    # 1. Discovery via ricerche Yahoo
     raw_tickers = discover_universe(queries, quotes_per_query=quotes_per_query,
                                     instrument_types=instrument_types,
                                     progress=progress)
@@ -249,7 +244,6 @@ def load_universe_to_db(queries: Iterable[str] = None, quotes_per_query: int = 2
     if not raw_tickers:
         return report
 
-    # 2. Dedup ISIN/nome con listato preferito (.DE > .MI > .AS > .L)
     if progress:
         try:
             progress(0, 1, "Deduplicazione per ISIN e nome (info ticker in parallelo)…")
@@ -260,12 +254,10 @@ def load_universe_to_db(queries: Iterable[str] = None, quotes_per_query: int = 2
     if not unique_tickers:
         return report
 
-    # 3. Persiste la lista dell'universo (unione con la precedente)
     payload = save_etf_universe(unique_tickers)
     report['universe_count'] = payload['count']
     report['last_discovery'] = payload['last_discovery']
 
-    # 4. Download: delta per i ticker già nel DB, full per i nuovi
     dm = MarketDataManager()
     to_download = dm.get_tickers_needing_update(unique_tickers)
     report['cached_today'] = len(unique_tickers) - len(to_download)

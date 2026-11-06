@@ -34,16 +34,14 @@ from etf_metrics.clients.yahoo_client import get_series, resolve_isin_details
 from etf_metrics.core.metrics import calculate_atr_series
 from etf_metrics.core.etf_search_engine import load_etf_universe
 from etf_metrics.core.portfolio_tracker import _calculate_open_positions
+from etf_metrics.core.tax_engine import ItalianTaxLedger
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_STRATEGY = "ai_momentum"
 
-# Chiave ISIN: 2 lettere (paese) + 9 alfanumerici + 1 cifra di controllo
 _ISIN_RE = re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
 
-
-# --- Stop Chandelier per posizioni satellite (scala condivisa col backtest) ---
 
 def _get_latest_vix() -> Optional[float]:
     """Ultimo valore del VIX da Yahoo (None se offline)."""
@@ -64,16 +62,21 @@ def atr_multiplier_from_vol(vol_pct: Optional[float]) -> float:
       vol < 15 -> 3.0 | < 25 -> 3.5 | < 35 -> 4.5 | panico -> 6.0 | None -> 3.5
     """
     if vol_pct is None or pd.isna(vol_pct):
-        return 3.5  # Default senza dato di volatilità
-    if vol_pct < 15: return 3.0  # Bassa volatilità: stop stretto ma non soffocante
-    if vol_pct < 25: return 3.5  # Volatilità normale: spazio di manovra
-    if vol_pct < 35: return 4.5  # Volatilità alta: serve aria
-    return 6.0  # Panico (VIX > 35): stop molto largo per evitare whipsaw
+        return 3.5
+    if vol_pct < 15: return 3.0
+    if vol_pct < 25: return 3.5
+    if vol_pct < 35: return 4.5
+    return 6.0
 
 
 def check_satellite_status(df: pd.DataFrame, purchase_date: pd.Timestamp, current_shares: float,
                            market_vol_pct: Optional[float] = None) -> Dict:
     """Stato di una posizione satellite con Trailing Stop Chandelier su Close.
+
+    Il Chandelier Exit e' calcolato sul massimo dei CLOSE dall'acquisto (non
+    High: fedele alla logica live e alla strategia GoldenChandelier), con
+    moltiplicatore dinamico: proxy della volatilita' se fornita, altrimenti
+    VIX da Yahoo.
 
     market_vol_pct: volatilita' annualizzata del mercato in % (proxy del VIX).
     Se None prova a scaricare il VIX da Yahoo. Passando la proxy si replica
@@ -96,12 +99,9 @@ def check_satellite_status(df: pd.DataFrame, purchase_date: pd.Timestamp, curren
 
     atr_val = atr_series.iloc[-1]
 
-    # Moltiplicatore dinamico: proxy della volatilita' se fornita, altrimenti VIX da Yahoo
     vol = market_vol_pct if market_vol_pct is not None else _get_latest_vix()
     mult = atr_multiplier_from_vol(vol)
 
-    # Chandelier Exit sul massimo dei CLOSE dall'acquisto (non High:
-    # fedele alla logica live e alla strategia GoldenChandelier)
     highest_close_since = df_since['Close'].max()
 
     stop_price = highest_close_since - (atr_val * mult)
@@ -124,9 +124,6 @@ def check_satellite_status(df: pd.DataFrame, purchase_date: pd.Timestamp, curren
     }
 
 
-# --- Portafoglio algoritmico live ---
-
-
 def load_algo_state(filename: str = ALGO_STATE_FILE) -> Dict:
     """Carica lo stato persistito del portafoglio algoritmico."""
     if os.path.exists(filename):
@@ -139,11 +136,15 @@ def load_algo_state(filename: str = ALGO_STATE_FILE) -> Dict:
 
 
 def _default_state() -> Dict:
+    """Stato iniziale del portafoglio algoritmico live: include il cassetto
+    fiscale (aliquota e minusvalenze residue, persistite tra le esecuzioni
+    come il resto dello stato)."""
     return {
         "cash": 10000.0, "positions": {}, "trade_log": [], "last_update": None,
         "strategy": DEFAULT_STRATEGY, "commission": None, "max_positions": None,
         "universe_tickers": None, "month_key": None, "buys_this_month": 0,
         "last_buy_scan": None,
+        "tax_rate": 26.0, "tax_ledger": None,
     }
 
 
@@ -162,18 +163,19 @@ def get_latest_market_data(tickers: List[str], allow_download: bool = True,
 
     DB-first: i ticker già aggiornati oggi si leggono dal DB locale (zero rete);
     solo i mancanti/vecchi vengono scaricati da Yahoo e salvati nel DB.
-    Gli indicatori sono calcolati CON il benchmark come riferimento (come nel
-    backtest), così le colonne RS sono disponibili alle strategie.
+    SPY viene caricato se presente nel DB anche se non nell'universo: e' il
+    benchmark REALE per regime e RS; senza SPY (es. universo Xetra puro) si
+    ricade sulla proxy equal-weight dell'universo, cosi' regime e RS restano
+    significativi. Gli indicatori sono calcolati CON il benchmark come
+    riferimento (come nel backtest), così le colonne RS sono disponibili alle
+    strategie.
     progress(done, total, msg) opzionale per la UI (calcolo indicatori).
     """
-    # import locale (core.automated_backtest importa da questo modulo: ciclo)
     from etf_metrics.core.automated_backtest import (
         BENCH_PROXY_KEY, CONFIG, build_benchmark_proxy,
         calculate_advanced_metrics_vectorized, load_recent_market_data)
 
     benchmark = CONFIG['SPY_TICKER']
-    # SPY nel DB (anche se non nell'universo): benchmark REALE per regime e
-    # RS. Senza SPY si ricade sul proxy equal-weight dell'universo.
     load_list = [t for t in tickers if t != benchmark]
     try:
         from etf_metrics.core.data_manager import MarketDataManager
@@ -188,8 +190,6 @@ def get_latest_market_data(tickers: List[str], allow_download: bool = True,
     if spy_df is not None and not spy_df.empty:
         data[benchmark] = calculate_advanced_metrics_vectorized(spy_df)
     else:
-        # Senza SPY (es. universo Xetra puro): proxy equal-weight, cosi' regime
-        # e RS restano significativi
         proxy = build_benchmark_proxy(raw)
         if proxy is not None:
             data[BENCH_PROXY_KEY] = calculate_advanced_metrics_vectorized(proxy)
@@ -211,9 +211,10 @@ def resolve_portfolio_tickers(keys: List[str],
                              isin_map: Dict[str, str] = None) -> Tuple[Dict[str, str], List[str]]:
     """Chiavi del portfolio (ISIN o ticker) -> ticker Yahoo.
 
-    ISIN: cache isin_map (aggiornata in place) -> ricerca Yahoo (rete, una
-    sola volta per ISIN: poi resta nella cache dello stato). Ticker: usati
-    direttamente. Ritorna (key->ticker, chiavi non risolte).
+    ISIN (riconosciuti da _ISIN_RE: 2 lettere di paese + 9 alfanumerici +
+    1 cifra di controllo): cache isin_map (aggiornata in place) -> ricerca
+    Yahoo (rete, una sola volta per ISIN: poi resta nella cache dello stato).
+    Ticker: usati direttamente. Ritorna (key->ticker, chiavi non risolte).
     """
     isin_map = isin_map if isin_map is not None else {}
     mapping, unresolved = {}, []
@@ -302,15 +303,38 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
                      strategy: str = None) -> Tuple[Dict, List[str]]:
     """Analisi giornaliera del portafoglio REALE con la strategia scelta.
 
-    Replica il motore del backtest sull'ultimo giorno di dati disponibile:
-    - USCITE: stop loss ATR del motore + regole di uscita della strategia
-      (exit_signal) + manutenzione posizione (update_position / trailing stop)
-    - INGRESSI: filtro di regime (can_buy), scoring della strategia (entry),
-      controllo correlazione, sizing per slot, limite acquisti/mese e
-      frequenza di ribilanciamento (REBALANCE_DAYS)
+    Replica il motore del backtest sull'ultimo giorno di dati disponibile,
+    in tre fasi:
+      1. USCITE (vendite consigliate), in tre livelli come nel motore:
+         (1a) stop loss "fisico" (se la strategia usa gli stop);
+         (1b) regole di uscita della strategia (exit_signal); (1c) se non si
+         esce, manutenzione posizione (update_position: trailing stop, flag
+         TP); se non c'e' nessuna uscita viene aggiornato l'exit_outlook
+         (riepilogo delle condizioni di uscita: informativo, non
+         decisionale). Ogni vendita applica la fiscalita' italiana: imposta
+         (state['tax_rate'], default 26%) sulla plusvalenza dopo il recupero
+         delle minusvalenze accumulate (art. 68 c.9 TUIR, 4 anni) — le stesse
+         regole del motore di backtest (coerenza backtest <-> live). La base
+         fiscale e' il costo di carico (cost_basis, commissioni d'ingresso
+         incluse; le posizioni pregresse senza cost_basis ricadono sul
+         prezzo medio di carico).
+      2. INGRESSI: filtro di regime (can_buy), scoring della strategia
+         (entry), controllo correlazione, sizing per slot, limite
+         acquisti/mese (azzerato al cambio mese) e frequenza di
+         ribilanciamento (REBALANCE_DAYS). Le posizioni aperte restano
+         sempre monitorate, anche fuori universo.
+      3. RIEPILOGO: cassa, posizioni, NAV stimato e minusvalenze residue;
+         il cassetto fiscale (state['tax_ledger']) viene persistito con lo
+         stato, come il resto.
+
+    Benchmark effettivo: SPY se disponibile, altrimenti la proxy
+    equal-weight dell'universo; gli indicatori sono calcolati CON il
+    benchmark come nel motore di backtest. Se la strategia salvata e'
+    ritirata o non nota, ricade sul default senza crashare.
 
     Args:
-        state: stato persistito (cassa, posizioni, log, strategia, costi)
+        state: stato persistito (cassa, posizioni, log, strategia, costi,
+            cassetto fiscale)
         tickers_list: candidati all'acquisto (le posizioni aperte sono sempre monitorate)
         allow_fractional: azioni frazionarie ammesse
         market_data: dati già caricati (opzionale; default: fetch DB-first)
@@ -319,14 +343,12 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
     Returns:
         (nuovo_stato, messaggi) — i messaggi con 🔴/🟢 sono operazioni da eseguire.
     """
-    # import locale (core.automated_backtest importa da questo modulo: ciclo)
     from etf_metrics.core.automated_backtest import (
         BENCH_PROXY_KEY, CONFIG, STRATEGIES, _MarketCtx, _assess_market_regime,
         check_correlation_strict, get_strategy)
 
     strat_key = strategy or state.get('strategy') or DEFAULT_STRATEGY
     if strat_key not in STRATEGIES:
-        # strategia ritirata o non nota: ricade sul default senza crashare
         strat_key = DEFAULT_STRATEGY
     state['strategy'] = strat_key
     strat = get_strategy(strat_key)
@@ -340,17 +362,20 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
     benchmark = cfg['SPY_TICKER']
     commission = float(cfg['COMMISSION'])
 
+    tax_rate = state.get('tax_rate')
+    tax_rate = 26.0 if tax_rate is None else float(tax_rate)
+    tax_ledger = ItalianTaxLedger.from_state(state.get('tax_ledger'),
+                                              tax_rate=tax_rate)
+
     if market_data is None:
         market_data = get_latest_market_data(
             sorted(set(tickers_list or []) | set((state.get('positions') or {}).keys())))
-    # Benchmark effettivo: SPY se disponibile, altrimenti proxy equal-weight
     if benchmark not in market_data and BENCH_PROXY_KEY in market_data:
         benchmark = BENCH_PROXY_KEY
     if benchmark not in market_data:
         return state, ["⚠️ Dati insufficienti (nemmeno il benchmark di riserva): "
                        "aggiorna i dati dalla pagina 📥 Gestione Dati."]
 
-    # Indicatori specifici della strategia (come nel motore di backtest)
     spy_df = market_data.get(benchmark)
     market_data = {t: strat.prepare(df, spy_df, cfg) for t, df in market_data.items()}
     price_matrix = pd.DataFrame({t: d['Close'] for t, d in market_data.items()}).ffill()
@@ -379,14 +404,12 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
     _normalize_positions_dates(state)
     positions = state['positions']
 
-    # Limite acquisti mensile (azzerato al cambio mese)
     month_key = f"{last_date.year}-{last_date.month:02d}"
     if state.get('month_key') != month_key:
         state['month_key'] = month_key
         state['buys_this_month'] = 0
     buys_this_month = int(state.get('buys_this_month', 0))
 
-# 1. GESTIONE USCITE (vendite consigliate) ---
     for t in list(positions.keys()):
         pos = positions.get(t)
         if pos is None:
@@ -396,13 +419,11 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
         row = market_data[t].loc[last_date]
 
         action = None
-        # 1a. Stop loss "fisico" del motore (se la strategia usa gli stop)
         if strat.use_stops and pos.get('stop_loss') is not None \
                 and pd.notna(pos['stop_loss']) and row['Low'] < pos['stop_loss']:
             exit_price = max(row['Open'], pos['stop_loss'])
             action = ("STOP LOSS", 1.0, exit_price)
         else:
-            # 1b. Regole di uscita specifiche della strategia
             try:
                 sig = strat.exit_signal(pos, row, ctx)
             except Exception:
@@ -412,14 +433,12 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
                 price = sig[2] if len(sig) > 2 and sig[2] is not None else row['Close']
                 action = (reason, portion, price)
             else:
-                # 1c. Manutenzione posizione (trailing stop, flag TP, ecc.)
                 try:
                     strat.update_position(pos, row, ctx)
                 except Exception:
                     pass
 
         if action is None:
-            # riepilogo delle condizioni di uscita (informativo, non decisionale)
             try:
                 pos['exit_outlook'] = strat.exit_outlook(pos, row, ctx)
             except Exception:
@@ -436,22 +455,33 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
             continue
 
         cash_in = (qty_sell * price) - commission
-        state['cash'] += cash_in
-        pnl = (price - pos['entry_price']) * qty_sell - commission
+        basis = pos.get('cost_basis')
+        if basis is None:
+            basis = pos['qty'] * pos['entry_price']
+        cost_portion = basis * (qty_sell / pos['qty'])
+        gain = cash_in - cost_portion
+        tax, credit_used = tax_ledger.register_sale(gain, last_date)
+
+        state['cash'] += cash_in - tax
+        pnl = gain - tax
 
         if portion >= 0.99 or (pos['qty'] - qty_sell) < (0.001 if allow_fractional else 1):
             del positions[t]
         else:
+            pos['cost_basis'] = basis - cost_portion
             pos['qty'] -= qty_sell
 
         state['trade_log'].insert(0, {
             "Date": last_date.strftime('%Y-%m-%d'), "Ticker": t, "Action": "SELL",
             "Price": float(price), "Reason": reason, "PnL_Net": round(float(pnl), 2),
-            "Qty": qty_sell, "Commission": commission, "Strategy": strat.key,
+            "Qty": qty_sell, "Commission": commission, "Tax": round(float(tax), 2),
+            "Strategy": strat.key,
         })
-        messages.append(f"🔴 VENDI **{t}**: {qty_sell:g} pz @ {price:.2f} — {reason}")
+        tax_note = f" · 🧾 tasse €{tax:.2f}" if tax > 0.005 else ""
+        if credit_used > 0.005:
+            tax_note += f" (compensati €{credit_used:.2f} di minusvalenze)"
+        messages.append(f"🔴 VENDI **{t}**: {qty_sell:g} pz @ {price:.2f} — {reason}{tax_note}")
 
-# 2. GESTIONE INGRESSI (acquisti consigliati) ---
     last_scan = state.get('last_buy_scan')
     scan_due = True
     if last_scan:
@@ -523,6 +553,7 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
                     stop = strat.initial_stop(row, ctx, cfg)
                     positions[t] = {
                         'qty': qty, 'entry_price': float(price),
+                        'cost_basis': float(cost),
                         'entry_date': last_date,
                         'stop_loss': float(stop) if (stop is not None and pd.notna(stop)) else None,
                         'tp1_taken': False, 'regime_at_entry': regime,
@@ -542,7 +573,6 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
                     stop_txt = f" (stop iniziale {float(stop):.2f})" if stop is not None else ""
                     messages.append(f"🟢 COMPRA **{t}**: {qty:g} pz @ {price:.2f}{stop_txt} — {cand['reason']}")
 
-# 3. Riepilogo ---
     nav = state['cash']
     for t, p in positions.items():
         try:
@@ -552,12 +582,19 @@ def run_daily_update(state: Dict, tickers_list: List[str], allow_fractional: boo
     messages.append(f"💰 Cassa: **{state['cash']:.2f}** | Posizioni aperte: **{len(positions)}** "
                     f"| NAV stimato: **{nav:.2f}**")
 
+    state['tax_ledger'] = tax_ledger.to_state()
+    residual = tax_ledger.available_credit(last_date)
+    if residual > 0.005:
+        by_exp = tax_ledger.credit_by_expiry(last_date)
+        first_exp = by_exp[0]['expires'] if by_exp and by_exp[0]['expires'] else None
+        exp_txt = f" (scadono dal {first_exp})" if first_exp else ""
+        messages.append(f"🧾 Minusvalenze recuperabili: **€{residual:.2f}**{exp_txt} — "
+                        "compensano le prossime plusvalenze (tasse ridotte).")
+
     _serialize_positions_dates(state)
     state['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M")
     return state, messages
 
-
-# --- Satelliti PAC: analisi consulenza core-satellite (READ-ONLY) ---
 
 def pac_universe_tickers() -> List[str]:
     """Universo dei candidati per i satelliti PAC: ETF scoperti con la
@@ -586,6 +623,11 @@ def _simulate_position_state(pos: Dict, df: pd.DataFrame, strat, ctx) -> None:
     all'ultima barra disponibile: lo stesso risultato che avrebbe il motore
     giornaliero, senza persistere nulla. Usato dall'analisi consulenza
     (Satelliti PAC), che lavora su stati effimeri ricostruiti a ogni run.
+
+    Lo stato ricostruito e' effimero: se dallo storico risulta una vendita
+    parziale dopo l'ingresso, si assume che il take-profit parziale (TP1)
+    sia stato eseguito — senza questo accorgimento il consiglio "vendi il
+    25%" si ripeterebbe a ogni analisi.
     """
     _reconstruct_from_history(pos, df, strat, ctx.cfg)
     entry = pos.get('entry_date')
@@ -609,16 +651,16 @@ def analyze_pac_portfolio(state: Dict, transactions: List[Dict],
     """Analisi consulenza core-satellite sul portfolio REALE (READ-ONLY).
 
     Legge le posizioni aperte dalle transazioni (saved_portfolio) e:
-    - USCITE: regole di uscita della strategia sulle posizioni NON core
-      (stato strategico ricostruito dallo storico, mai persistito)
-    - INGRESSO: miglior candidato dell'universo ETF per il PAC del mese
-      (top-1 per punteggio, controllo correlazione con le posizioni detenute,
-      guard mensile sulle transazioni satellite)
+      1. USCITE: regole di uscita della strategia sulle posizioni NON core
+         (stato strategico ricostruito dallo storico, mai persistito); le
+         posizioni core sono mostrate ma mai analizzate;
+      2. INGRESSO: miglior candidato dell'universo ETF per il PAC del mese
+         (top-1 per punteggio, controllo correlazione con le posizioni
+         detenute, guard mensile sulle transazioni satellite).
 
     Non modifica né lo stato né il portfolio: ritorna (report, messaggi).
     Il chiamante può salvare lo stato solo per persistere la cache isin_map.
     """
-    # import locale (core.automated_backtest importa da questo modulo: ciclo)
     from etf_metrics.core.automated_backtest import (
         BENCH_PROXY_KEY, CONFIG, STRATEGIES, _MarketCtx, _assess_market_regime,
         check_correlation_strict, get_strategy)
@@ -698,7 +740,6 @@ def analyze_pac_portfolio(state: Dict, transactions: List[Dict],
     except Exception:
         names = {}
 
-# 1. USCITE: regole della strategia sulle posizioni non-core ---
     for key in sorted(sat_keys):
         t = mapping.get(key)
         if t is None:
@@ -720,10 +761,6 @@ def analyze_pac_portfolio(state: Dict, transactions: List[Dict],
             messages.append(f"⚠️ {t}: dati non disponibili nel DB (posizione non analizzata).")
             continue
 
-        # stato strategico effimero, ricostruito dallo storico. Se risulta già
-        # una vendita parziale dopo l'ingresso, si assume che il take-profit
-        # parziale (TP1) sia stato eseguito: senza questo accorgimento il
-        # consiglio "vendi il 25%" si ripeterebbe a ogni analisi.
         first_buy = pd.Timestamp(d['first_buy_date'])
         has_sell_after_entry = any(
             tr.get('type') == 'sell' and tr.get('isin') == key
@@ -741,12 +778,10 @@ def analyze_pac_portfolio(state: Dict, transactions: List[Dict],
         pnl_pct = (last_price / avg_cost) - 1.0
 
         action = None
-        # 1a. stop loss "fisico" del motore
         if strat.use_stops and pos.get('stop_loss') is not None \
                 and pd.notna(pos['stop_loss']) and row['Low'] < pos['stop_loss']:
             action = ("STOP LOSS", 1.0, max(row['Open'], pos['stop_loss']))
         else:
-            # 1b. regole di uscita specifiche della strategia
             try:
                 sig = strat.exit_signal(pos, row, ctx)
             except Exception:
@@ -776,7 +811,6 @@ def analyze_pac_portfolio(state: Dict, transactions: List[Dict],
             messages.append(f"🔴 VENDI **{t}**: {qty_sell:g} pz @ {price:.2f} — {reason}")
         report['positions'].append(entry)
 
-    # posizioni core: mostrate ma mai analizzate
     for key in sorted(keys):
         t = mapping.get(key)
         if t is None or t not in core:
@@ -793,7 +827,6 @@ def analyze_pac_portfolio(state: Dict, transactions: List[Dict],
             'qty': float(d['quantity']), 'last_price': last_price,
         })
 
-# 2. INGRESSO: miglior candidato per il PAC del mese (top-1) ---
     month_key = pd.Timestamp.now().strftime('%Y-%m')
     sat_buys = [tr for tr in transactions
                 if tr.get('type') == 'buy' and tr.get('satellite')

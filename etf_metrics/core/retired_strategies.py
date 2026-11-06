@@ -20,6 +20,11 @@ Come riattivare una strategia ritirata (per un confronto sperimentale):
 ATTENZIONE: il codice è conservato com'era al momento del ritiro. Non va
 "migliorato" in silenzio: ogni variante è una nuova strategia, con una nuova
 voce nel registro.
+
+Il registro RETIRED mappa ogni chiave in {'class', 'retired_on' (data del
+pensionamento), 'reason' (motivo: numeri e dettagli in
+docs/STRATEGY_LEDGER.md), 'lineage' (dove vive oggi l'idea, se da qualche
+parte)}.
 """
 
 from typing import Dict
@@ -30,15 +35,13 @@ import pandas as pd
 from etf_metrics.core.automated_backtest import BaseStrategy
 
 
-# ---------------------------------------------------------------------
-# Helper del Volume Profile (usato solo dalla strategia ritirata omonima)
-# ---------------------------------------------------------------------
 def _rolling_volume_profile(df: pd.DataFrame, window: int = 60, bins: int = 24,
                             va_pct: float = 0.70):
     """Profilo del volume per prezzo rolling: ritorna (POC, VAH, VAL) come array.
 
-    Versione vettorizzata (sliding_window_view + bincount con offset di riga).
-    Semantica identica alla versione originale a loop.
+    Usato solo dalla strategia ritirata VolumeProfile. Versione vettorizzata
+    (sliding_window_view + bincount con offset di riga). Semantica identica
+    alla versione originale a loop.
     """
     n = len(df)
     poc = np.full(n, np.nan); vah = np.full(n, np.nan); val = np.full(n, np.nan)
@@ -89,9 +92,6 @@ def _rolling_volume_profile(df: pd.DataFrame, window: int = 60, bins: int = 24,
     return poc, vah, val
 
 
-# ---------------------------------------------------------------------
-# 🐻 Bear Market Regime Switcher — RITIRATA 2026-10-12
-# ---------------------------------------------------------------------
 class BearMarketStrategy(BaseStrategy):
     key = "bear_market"
     name = "🐻 Bear Market Regime Switcher (ritirata)"
@@ -176,9 +176,6 @@ class BearMarketStrategy(BaseStrategy):
                     pos['stop_loss'] = new_stop
 
 
-# ---------------------------------------------------------------------
-# 📊 Volume Profile — RITIRATA 2026-10-12
-# ---------------------------------------------------------------------
 class VolumeProfileStrategy(BaseStrategy):
     key = "volume_profile"
     name = "📊 Volume Profile (Value Area Breakout, ritirata)"
@@ -242,9 +239,6 @@ class VolumeProfileStrategy(BaseStrategy):
                     pos['stop_loss'] = new_stop
 
 
-# ---------------------------------------------------------------------
-# 🔄 Dual Momentum 12-1 — RITIRATA 2026-10-12 (v2; la v1 fu ritirata 2026-10-05)
-# ---------------------------------------------------------------------
 class DualMomentumStrategy(BaseStrategy):
     key = "dual_momentum"
     name = "🔄 Dual Momentum 12-1 (rotazione mensile, ritirata)"
@@ -297,15 +291,10 @@ saltando l'ultimo, ribilanciamento mensile), nessun numero tarato sui dati.
         return None
 
     def update_position(self, pos, row, ctx):
-        pass  # nessun trailing: le uscite sono di segnale (dual momentum classico)
+        """Nessun trailing: le uscite sono di segnale (dual momentum classico)."""
+        pass
 
 
-# ---------------------------------------------------------------------
-# REGISTRO DELLE RITIRATE
-# ---------------------------------------------------------------------
-# retired_on  = data del pensionamento
-# reason      = motivo (numeri e dettagli in docs/STRATEGY_LEDGER.md)
-# lineage     = dove vive oggi l'idea, se da qualche parte
 RETIRED: Dict[str, Dict] = {
     s.key: {"class": s, "retired_on": None, "reason": "", "lineage": ""}
     for s in [BearMarketStrategy(), VolumeProfileStrategy(), DualMomentumStrategy()]

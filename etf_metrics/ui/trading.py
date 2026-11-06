@@ -1,4 +1,18 @@
 # -*- coding: utf-8 -*-
+"""Pagine UI: 🌱 Satelliti PAC e ⚡ Trading (algoritmo giornaliero live).
+
+Entrambe le pagine operano sullo stato live del portafoglio
+(live_algo_portfolio.json) e ne specchiano la logica di core/trading.py:
+ciò che si valida in backtest è esattamente ciò che viene eseguito sul
+portafoglio reale.
+
+- `render_pac_ui`: consiglio mensile dei Satelliti PAC (analisi + report in
+  session_state, rendering in `_render_pac_report`);
+- `render_algo_daily_ui` / `_render_daily_algo`: esecuzione giornaliera
+  della strategia con sidebar di configurazione e dashboard dei risultati;
+- l'automazione fuori UI (cron) vive in scripts/live_daily.py e riusa le
+  stesse funzioni core.
+"""
 import streamlit as st
 import pandas as pd
 
@@ -6,6 +20,7 @@ from etf_metrics.core.trading import (
     DEFAULT_STRATEGY, load_algo_state, save_algo_state, run_daily_update,
     get_latest_market_data, portfolio_position_tickers,
     analyze_pac_portfolio, pac_universe_tickers)
+from etf_metrics.core.tax_engine import ItalianTaxLedger
 from etf_metrics.core.automated_backtest import CONFIG, STRATEGIES, STRATEGY_ORDER
 from etf_metrics.core.data_updater import update_tickers
 from etf_metrics.ui.components import (render_universe_selector,
@@ -34,7 +49,11 @@ def _throttled_logger(step: int = 10):
 
 def _run_pac_analysis(state, store, portfolio_name, strategy_key,
                       pac_amount, core_tickers, update_data):
-    """Esegue l'analisi Satelliti PAC e ne salva il report in session_state."""
+    """Esegue l'analisi Satelliti PAC e ne salva il report in session_state.
+
+    L'analisi è di sola lettura sul portafoglio: l'unico stato persistito è
+    la cache ISIN->ticker, riusata dai giri successivi.
+    """
     transactions = (store.get(portfolio_name) or {}).get('transactions', [])
     if not transactions:
         st.warning("Il portafoglio selezionato è vuoto: registra prima le tue "
@@ -75,7 +94,6 @@ def _run_pac_analysis(state, store, portfolio_name, strategy_key,
             state, transactions, strategy=strategy_key,
             market_data=market_data, core_tickers=core_tickers,
             pac_amount=pac_amount)
-        # persiste solo la cache isin_map (l'analisi è read-only)
         save_algo_state(state)
         st.session_state.pac_report = report
         st.session_state.pac_messages = msgs
@@ -83,7 +101,11 @@ def _run_pac_analysis(state, store, portfolio_name, strategy_key,
 
 
 def _render_pac_report():
-    """Renderizza il report dell'analisi Satelliti PAC (da session_state)."""
+    """Renderizza il report dell'analisi Satelliti PAC (da session_state).
+
+    Sezioni: vendite consigliate, posizioni satellite (con condizioni di
+    uscita), core buy & hold e acquisto del mese.
+    """
     report = st.session_state.get('pac_report')
     if not report:
         return
@@ -95,7 +117,6 @@ def _render_pac_report():
     c3.metric("Vendite consigl.", report['sell_count'])
     c4.metric("Satelliti monitorati", len(report['positions']))
 
-    # --- Vendite consigliate ---
     sells = [p for p in report['positions'] if p['verdict'] == 'SELL']
     if sells:
         for p in sells:
@@ -105,7 +126,6 @@ def _render_pac_report():
     elif report['positions']:
         st.success("✅ Nessuna vendita da eseguire sulle posizioni satellite.")
 
-    # --- Posizioni satellite (tabella + condizioni di uscita) ---
     rows = [{
         "Ticker": p['ticker'], "Nome": p['name'],
         "Qtà": round(p['qty'], 4),
@@ -128,7 +148,6 @@ def _render_pac_report():
                 else:
                     st.caption("Nessuna condizione di uscita calcolabile.")
 
-    # --- Core (buy & hold) ---
     if report['core']:
         with st.expander(f"🛡️ Core — buy & hold ({len(report['core'])} posizioni, non analizzate)"):
             st.dataframe(pd.DataFrame([{
@@ -137,7 +156,6 @@ def _render_pac_report():
                 "Ultimo": f"€{c['last_price']:.2f}" if c['last_price'] else "—",
             } for c in report['core']]), width="stretch", hide_index=True)
 
-    # --- Acquisto del mese ---
     buy = report.get('buy')
     if report['buy_status'] == 'ok' and buy:
         qty_txt = f" ≈ **{buy['qty']:g} pz**" if buy.get('qty') else ""
@@ -240,6 +258,7 @@ def render_algo_daily_ui():
         "**Cosa fa**: consigli 🔴 vendi / 🟢 compra sul portafoglio reale, ogni giorno.",
         "**A cosa serve**: eseguire sul broker i consigli dell'algoritmo.",
         "🤖 Logica **identica al motore di backtest**: ingressi, uscite, stop, limite acquisti/mese.",
+        "🧾 Fiscalità **identica al backtest**: ritenuta del 26% sulle plusvalenze con recupero delle minusvalenze (4 anni, art. 68 TUIR).",
         "Le posizioni aperte restano sempre monitorate, anche fuori universo.",
         "Il backtest del consiglio mensile dei Satelliti PAC è in 💹 Backtest → 🧭 *Confronto Strategie PAC*.",
         "Automazione serale: `scripts/live_daily.py` via cron (es. alle 19:00).",
@@ -249,11 +268,24 @@ def render_algo_daily_ui():
 
 
 def _render_daily_algo(state):
-    """Modalità 🤖: esecuzione giornaliera della strategia sul portafoglio reale."""
-    # --- SIDEBAR: SETUP CAPITALE E OPZIONI ---
+    """Modalità 🤖: esecuzione giornaliera della strategia sul portafoglio reale.
+
+    Sidebar (setup capitale e opzioni): strategia (dal backtest) con logica
+    in expander — al cambio strategia gli override dei costi tornano ai
+    default della strategia; capitale liquido (stato autonomo del
+    portafoglio, aggiornato dopo versamenti/prelievi); costi e rischio
+    (default = quelli della strategia); fiscalità (ritenuta live con
+    recupero minusvalenze); flag Frazionato; universo (tutto il DB o
+    watchlist); reset totale.
+
+    Dashboard: KPI del portafoglio + cassetto fiscale (minusvalenze residue
+    recuperabili sulle prossime vendite). L'azione ESEGUI persiste costi e
+    universo scelti (riusati anche dallo script cron); le posizioni aperte
+    restano sempre monitorate anche se escono dall'universo. Tabelle finali:
+    portafoglio, consigli e log operazioni.
+    """
     st.sidebar.header("⚙️ Configurazione")
 
-    # 1. Strategia (dal backtest)
     current_strategy = state.get('strategy') or DEFAULT_STRATEGY
     idx = STRATEGY_ORDER.index(current_strategy) if current_strategy in STRATEGY_ORDER else 0
     strategy_key = st.sidebar.selectbox(
@@ -265,7 +297,6 @@ def _render_daily_algo(state):
              "la sua logica verrà applicata ogni giorno al portafoglio reale.",
     )
     if strategy_key != current_strategy:
-        # cambio strategia: azzera gli override dei costi ai default della strategia
         state['strategy'] = strategy_key
         state['commission'] = None
         state['max_positions'] = None
@@ -276,11 +307,9 @@ def _render_daily_algo(state):
     with st.sidebar.expander(f"📖 Logica: {strat.name}", expanded=False):
         st.markdown(strat.description)
 
-    # 1b. Costi di default della strategia
     def_commission = strat.defaults.get('COMMISSION', CONFIG['COMMISSION'])
     def_max_pos = strat.defaults.get('MAX_POSITIONS', CONFIG['MAX_POSITIONS'])
 
-    # 2. Capitale liquido (stato autonomo: aggiorna dopo versamenti/prelievi)
     current_cash = state.get('cash', 10000.0)
     new_cash = st.sidebar.number_input(
         "💰 Capitale Liquido (€)",
@@ -295,7 +324,6 @@ def _render_daily_algo(state):
         save_algo_state(state)
         st.rerun()
 
-    # 3. Costi & rischio (default = quelli della strategia)
     commission = st.sidebar.number_input(
         "💸 Commissione per operazione (€)", 0.0, 20.0,
         float(state.get('commission') if state.get('commission') is not None else def_commission),
@@ -305,14 +333,22 @@ def _render_daily_algo(state):
         int(state.get('max_positions') if state.get('max_positions') is not None else def_max_pos),
         help="Pochi titoli = concentrazione sui migliori segnali e meno commissioni.")
 
-    # 4. Flag Frazionato
+    tax_rate = st.sidebar.number_input(
+        "🧾 Imposta plusvalenze (%)", 0.0, 50.0,
+        float(state.get('tax_rate') if state.get('tax_rate') is not None else 26.0), 0.5,
+        help="Aliquota italiana (26%): le vendite in utile detraggono la ritenuta "
+             "dalla cassa, dopo aver compensato le minusvalenze accumulate "
+             "(recupero art. 68 TUIR, 4 anni). 0 per disattivare.")
+    if tax_rate != float(state.get('tax_rate') if state.get('tax_rate') is not None else 26.0):
+        state['tax_rate'] = float(tax_rate)
+        save_algo_state(state)
+
     allow_fractional = st.sidebar.checkbox(
         "Ammetti Azioni Frazionate",
         value=False,
         help="Se attivo, compra es. 0.5 azioni. Se disattivo, solo numeri interi."
     )
 
-    # 5. Universo ticker: tutto il DB già scaricato oppure watchlist
     with st.sidebar.expander("🎯 Universo Ticker", expanded=True):
         tickers_list, universe_mode = render_universe_selector(
             default_watchlist=DEFAULT_LIVE_LIST,
@@ -320,7 +356,6 @@ def _render_daily_algo(state):
             default_mode=UNIVERSE_WHOLE_DB,
         )
 
-    # Reset Button
     if st.sidebar.button("🗑️ Reset Totale"):
         from etf_metrics.core.trading import _default_state
         state = _default_state()
@@ -328,7 +363,6 @@ def _render_daily_algo(state):
         save_algo_state(state)
         st.rerun()
 
-    # --- DASHBOARD ---
     cash_display = state['cash']
     n_open = len(state['positions'])
     col1, col2, col3, col4 = st.columns(4)
@@ -344,21 +378,26 @@ def _render_daily_algo(state):
         st.caption(f"✍️ Universo: **watchlist** ({len(tickers_list)} ticker). "
                    "Le posizioni aperte vengono sempre monitorate, anche fuori watchlist.")
 
+    tax_ledger_state = state.get('tax_ledger')
+    if tax_ledger_state:
+        residual = ItalianTaxLedger.from_state(
+            tax_ledger_state, tax_rate=float(state.get('tax_rate') or 26.0)).available_credit()
+        if residual > 0.005:
+            st.success(f"🧾 Minusvalenze recuperabili: **€{residual:,.2f}** — le prossime "
+                       "plusvalenze pagheranno l'imposta solo sulla parte eccedente.")
+
     st.divider()
 
-    # --- ACTION ---
     if st.button("🚀 ESEGUI ANALISI GIORNALIERA", type="primary", width="stretch"):
         pos_tickers = list(state['positions'].keys())
         if not tickers_list and not pos_tickers:
             st.warning("Nessun ticker da analizzare: compila la watchlist o popola il DB "
                        "dalla pagina 📥 Gestione Dati.")
         else:
-            # persiste i costi scelti e l'universo (riusato anche dallo script cron)
             state['commission'] = float(commission)
             state['max_positions'] = int(max_positions)
             state['universe_tickers'] = list(tickers_list)
             with st.status("Elaborazione Strategia...", expanded=True) as status:
-                # Le posizioni aperte restano sempre monitorate, anche fuori universo
                 universe = sorted(set(tickers_list) | set(pos_tickers))
                 st.write("Caricamento dati da parquet")
                 market_data = get_latest_market_data(universe, allow_download=False)
@@ -390,7 +429,6 @@ def _render_daily_algo(state):
         st.session_state['algo_updated'] = False
         st.rerun()
 
-    # --- TABELLE ---
     st.subheader("💼 Posizioni")
     if state['positions']:
         pos_data = []

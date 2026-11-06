@@ -31,7 +31,6 @@ from etf_metrics.shared.config import PARQUET_STORE_DIR
 
 logger = logging.getLogger(__name__)
 
-# Righe per chunk nella copia di `prices` (limita la memoria su DB enormi)
 _CHUNK_ROWS = 500_000
 
 
@@ -188,6 +187,9 @@ def migrate_duckdb_to_parquet(source: str = "market_data.duckdb",
                               dest: Optional[str] = None,
                               progress_callback: Optional[Callable] = None) -> dict:
     """Copia un DB DuckDB legacy nello store Parquet (merge/upsert, fonte intatta).
+
+    La copia di `prices` avviene a chunk (_CHUNK_ROWS righe) per limitare la
+    memoria su DB enormi.
 
     Richiede il modulo `duckdb` (solo per la migrazione: non è più una
     dipendenza del progetto). Ritorna lo stesso report di

@@ -77,9 +77,11 @@ def compute_backtest_performance_metrics(df_trades: pd.DataFrame, initial_capita
     Con `nav_daily` (Serie NAV mark-to-market giornaliera emessa dal motore,
     `diag['nav_daily']`) la curva equity e' quella vera: DD e volatilita'
     riflettono il prezzo del portafoglio a OGNI seduta e il CAGR parte
-    dall'inizio della simulazione (periodo in cash incluso). Senza `nav_daily`
-    si ricade nella ricostruzione storica (Total_Equity/Capital ffilled sui
-    soli giorni di trade), che sottostima volatilita' e drawdown.
+    dall'inizio della simulazione (periodo in cash incluso). Se la serie e'
+    incompleta rispetto al log dei trade (meno di 2 punti o ultima data
+    precedente all'ultimo trade) viene scartata e si ricade nella
+    ricostruzione storica (Total_Equity/Capital ffilled sui soli giorni di
+    trade), che sottostima volatilita' e drawdown.
     """
     if df_trades is None or df_trades.empty:
         return None
@@ -96,7 +98,7 @@ def compute_backtest_performance_metrics(df_trades: pd.DataFrame, initial_capita
     if nav_daily is not None:
         nav = _normalize_timezone(pd.Series(nav_daily)).dropna().astype(float)
         if len(nav) < 2 or nav.index[-1] < end_date:
-            nav = None  # incompleta rispetto al log: fallback alla ricostruzione
+            nav = None
 
     if nav is not None:
         equity_df = pd.DataFrame(index=nav.index)

@@ -48,6 +48,16 @@ def update_tickers(
             "aggiorna tutto il DB" senza sprecare richieste)
         progress_callback(done, total, label): opzionale, per la UI
 
+    Pipeline: 1) cache negativa: nessuna richiesta per i ticker noti come
+    "no data found"; 2) skip opzionale dei già sincronizzati oggi; 3) piano
+    di download raggruppato per ultima data disponibile nel DB: i ticker
+    aggiornati insieme condividono la stessa ultima data -> un solo batch
+    yf.download per gruppo con start = data (download delta); lavori
+    ordinati: prima i delta (economici), poi i full (costosi); i nomi
+    vengono recuperati best-effort solo per i ticker senza nome nel DB
+    (saltato se rate-limited); 4) chi non è processato finisce in 'skipped'
+    col motivo.
+
     Returns:
         {
           'requested': int,                    # ticker richiesti (dopo normalizzazione)
@@ -74,7 +84,6 @@ def update_tickers(
         report['elapsed_sec'] = time.time() - t0
         return report
 
-    # 1. Cache negativa: niente richieste per i ticker noti come "no data found"
     failed = get_failed_tickers()
     candidates = []
     for t in unique:
@@ -83,7 +92,6 @@ def update_tickers(
         else:
             candidates.append(t)
 
-    # 2. (Opzionale) salta i già sincronizzati oggi
     if skip_updated_today:
         updated_today = dm.get_tickers_updated_today()
         remaining = []
@@ -94,9 +102,6 @@ def update_tickers(
                 remaining.append(t)
         candidates = remaining
 
-    # 3. Piano di download: raggruppa per ultima data disponibile nel DB.
-    #    I ticker aggiornati insieme condividono la stessa ultima data -> un solo
-    #    batch yf.download per gruppo, con start = data (download delta).
     last_dates = dm.get_last_dates(candidates)
     full_group: List[str] = []
     delta_groups: Dict[str, List[str]] = {}
@@ -109,7 +114,6 @@ def update_tickers(
     total = len(candidates)
     done = 0
 
-    # Lavori ordinati: prima i delta (economici), poi il full (costoso)
     jobs = [("delta", start_key, group) for start_key, group in sorted(delta_groups.items())]
     if full_group:
         jobs.append(("full", None, full_group))
@@ -146,7 +150,6 @@ def update_tickers(
             new_data = {}
 
         if new_data:
-            # Nomi solo per i ticker senza nome nel DB (best effort: saltato se rate-limited)
             names = {}
             need_names = [t for t in new_data if t in missing_name]
             if need_names:
@@ -169,7 +172,6 @@ def update_tickers(
             report['rate_limited'] = True
             break
 
-    # 4. Chi non è stato processato: motivo
     for t in candidates:
         if t not in report['results'] and t not in report['skipped']:
             report['skipped'][t] = ("rate limit Yahoo (riprova più tardi)"

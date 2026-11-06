@@ -16,6 +16,17 @@ DUE famiglie di strategie, due motori:
    posizioni sono gestite GIORNO PER GIORNO con stop ATR, TP1 parziale e
    uscite momentum/regime, come in `analyze_pac_portfolio`.
 
+Perche' le PAC-native esistono: le strategie di trading giornaliero sono
+   nate per gestire un portafoglio lump-sum ribilanciato ogni pochi giorni
+   (stop ATR giornalieri, filtri di regime, max posizioni). Riutilizzate
+   nel PAC producono sistematicamente multiple ~1.0x perche': (1) i
+   proventi delle vendite restano in cassa, mai reinvestiti; (2) gli stop
+   giornalieri vendono al primo ribasso ciò che e' stato comprato una volta
+   al mese al top del ranking; (3) i filtri di regime bloccano l'acquisto
+   proprio nei mesi in cui un PAC comprerebbe a prezzi bassi. Le
+   PAC-native risolvono alla radice: decisione SOLO mensile, niente stop
+   intramonth, proventi delle vendite subito nel core.
+
 I mesi senza segnale (o senza candidato) destinano l'importo al CORE buy &
 hold (core_fallback=True, come il consiglio live) oppure lo lasciano in
 cassa; le strategie PAC-native con carry_over possono invece accumularlo.
@@ -38,6 +49,7 @@ from etf_metrics.core.automated_backtest import (
     _precompute_regimes, _assess_market_regime, check_correlation_strict,
     _FastRowPanel, _MarketCtx, BENCH_PROXY_KEY, build_benchmark_proxy)
 from etf_metrics.core.metrics import yearly_returns_from_daily
+from etf_metrics.core.tax_engine import ItalianTaxLedger
 
 
 def etf_universe_in_db() -> List[str]:
@@ -141,23 +153,32 @@ def _finalize_pac_result(strategy_name: str, strategy_key: str,
                          n_buys: int, n_sells: int, months_total: int,
                          months_no_signal: int, months_core: int,
                          months_skipped: Optional[int], core_available: bool,
-                         universe: List[str], engine: Optional[str] = None) -> Dict:
+                         universe: List[str], engine: Optional[str] = None,
+                         taxes_paid: Optional[float] = None,
+                         tax_credit_residual: Optional[float] = None) -> Dict:
     """Coda comune ai due motori PAC (daily e monthly): serie NAV, metriche
-    corrette per i versamenti e dizionario risultato con la stessa forma."""
+    corrette per i versamenti e dizionario risultato con la stessa forma.
+
+    Dettagli del calcolo:
+      - il log mensile forza dtype omogeneo sulle colonne numeriche (score,
+        qty, prezzo: i mesi senza azione hanno campi vuoti, serve per
+        arrow/st.dataframe);
+      - i rendimenti giornalieri sono corretti per i versamenti (deposito a
+        inizio giornata, prima del movimento di mercato): senza correzione
+        ogni versamento sembrerebbe un rendimento;
+      - 'taxes' e 'tax_credit' (imposta plusvalenze pagata con recupero
+        minusvalenze, art. 68 TUIR, e credito residuo) sono inclusi solo se
+        passati dal motore.
+    """
     nav_series = pd.Series(nav_values, index=sim_dates).dropna()
     core_nav = pd.Series(core_nav_values, index=sim_dates).dropna()
     deposits = pd.Series(np.cumsum(deposit_values), index=sim_dates)
 
-    # dtype omogeneo per le colonne numeriche del log mensile (i mesi senza
-    # azione hanno campi vuoti: serve per arrow/st.dataframe)
     monthly_df = pd.DataFrame(monthly)
     if not monthly_df.empty:
         for col in ('score', 'qty', 'prezzo'):
             monthly_df[col] = pd.to_numeric(monthly_df[col], errors='coerce')
 
-    # Rendimenti giornalieri corretti per i versamenti (deposito a inizio
-    # giornata, prima del movimento di mercato): senza correzione ogni
-    # versamento sembrerebbe un rendimento.
     pos_in_sim = {d: j for j, d in enumerate(sim_dates)}
     dep_arr = deposit_values[[pos_in_sim[d] for d in nav_series.index]]
     vals = nav_series.values
@@ -197,22 +218,11 @@ def _finalize_pac_result(strategy_name: str, strategy_key: str,
         out['engine'] = engine
     if months_skipped is not None:
         out['months_skipped'] = months_skipped
+    if taxes_paid is not None:
+        out['taxes'] = float(taxes_paid)
+    if tax_credit_residual is not None:
+        out['tax_credit'] = float(tax_credit_residual)
     return out
-
-
-# 2. STRATEGIE PAC-NATIVE (mensili) ---
-# =====================================================================
-# Le strategie di trading giornaliero sono nate per gestire un portafoglio
-# lump-sum ribilanciato ogni pochi giorni: stop ATR giornalieri, filtri di
-# regime, max posizioni. Riutilizzate nel PAC producono sistematicamente
-# multiple ~1.0x perché:
-#   1. i proventi delle vendite restano in cassa (mai reinvestiti);
-#   2. gli stop giornalieri vendono al primo ribasso ciò che è stato
-#      comprato una volta al mese al top del ranking;
-#   3. i filtri di regime bloccano l'acquisto proprio nei mesi in cui un
-#      PAC comprerebbe a prezzi bassi.
-# Le strategie PAC-native risolvono alla radice: decisione SOLO mensile,
-# niente stop intramonth, proventi delle vendite subito nel core.
 
 
 class _PACMonthCtx:
@@ -230,13 +240,17 @@ class _PACStrategy:
       ('skip', motivo)                → sospende il versamento (budget accumulato)
     `exit_position(pos, ctx)` ritorna il motivo della vendita al ribilanciamento
     (i proventi finiscono comunque nel core), oppure None per tenere.
+
+    Attributi di classe: max_satellites (tetto posizioni simultanee),
+    max_carry_months (mesi di budget accumulabile per le strategie 'skip')
+    e growth (crescita mensile del percorso obiettivo, solo Value Averaging).
     """
     key = "pac_base"
     name = "Base PAC"
     description = ""
-    max_satellites = 8        # tetto posizioni simultanee
-    max_carry_months = 0      # mesi di budget accumulabile (strategie skip)
-    growth = None             # crescita mensile del percorso obiettivo (VA)
+    max_satellites = 8
+    max_carry_months = 0
+    growth = None
 
     def decide_month(self, ctx: _PACMonthCtx) -> tuple:
         raise NotImplementedError
@@ -302,9 +316,9 @@ class PacDipStrategy(_PACStrategy):
   torna al 95% del massimo 52s → si raccoglie il rimbalzo nel core.
 - **Logica**: un PAC compra a prezzi bassi per costruzione; questa strategia
   concentra il "basso" dove c'è più valore relativo."""
-    market_dd_trigger = -0.15   # drawdown del benchmark che attiva il dip
-    cand_dd_min = -0.20         # drawdown minimo del candidato
-    recover_frac = 0.95         # vendita quando torna al 95% del max 52s
+    market_dd_trigger = -0.15
+    cand_dd_min = -0.20
+    recover_frac = 0.95
     min_hold_months = 3
 
     def decide_month(self, ctx):
@@ -322,7 +336,7 @@ class PacDipStrategy(_PACStrategy):
         if not cands:
             return ('core', f'benchmark a {bdd:.0%} ma nessun candidato "buono" '
                             f'(drawdown ≥ {abs(self.cand_dd_min):.0%} e RS 12m ≥ benchmark)')
-        cands.sort(key=lambda x: x[1])           # il più battuto
+        cands.sort(key=lambda x: x[1])
         t, d = cands[0]
         return ('buy', t, float(-d),
                 f'il più battuto: {d:.0%} dal max 52s, RS 12m {ret[t]:+.1%} '
@@ -354,8 +368,8 @@ budget fisso). Non detiene satelliti.
 - **Onestà**: in un mercato sempre rialzista perde contro il PAC core puro
   (compra tardi); il vantaggio arriva nei mercati laterali e volatili."""
     max_carry_months = 2
-    growth = 0.005    # crescita mensile del percorso (+0,5%/mese ≈ +6%/anno)
-    band = 0.10       # tolleranza sopra il percorso prima di sospendere
+    growth = 0.005
+    band = 0.10
 
     def decide_month(self, ctx):
         nav, target = ctx.nav, ctx.target
@@ -365,7 +379,7 @@ budget fisso). Non detiene satelliti.
         return ('core', 'NAV entro o sotto il percorso obiettivo → PAC al core')
 
     def exit_position(self, pos, ctx):
-        return None   # la VA non detiene satelliti
+        return None
 
 
 class PacFaberStrategy(_PACStrategy):
@@ -416,13 +430,28 @@ def _run_pac_backtest_monthly(
     core_fallback: bool = True,
     preloaded_data: Optional[Dict[str, pd.DataFrame]] = None,
     progress_callback: Optional[Callable[[float], None]] = None,
+    tax_rate: float = 26.0,
 ) -> Optional[Dict]:
     """Backtest PAC con strategia NATIVA mensile. Stesso contratto e stesso
-    formato dei risultati del percorso daily di `run_pac_backtest`."""
+    formato dei risultati del percorso daily di `run_pac_backtest`.
+
+    Dati: alle strategie mensili servono solo i Close (niente indicatori
+    pesanti: run molto piu' veloci del percorso daily). Il primo giorno
+    utile di ogni mese e' il giorno di ribilanciamento; lo storico e'
+    allineato al calendario del benchmark in frame mensili (stessa
+    convenzione del motore daily: si decide e si esegue alla chiusura del
+    giorno di ribilanciamento, senza lookahead).
+
+    Ciclo mensile: (1) versamento; (2) benchmark interno = PAC puro sul
+    core ogni mese (come il daily); (3) USCITE: solo mensili, mai stop
+    intramonth — i proventi vanno SUBITO nel core; (4) decisione sul budget
+    del mese (decide_month: buy/core/skip); (5) NAV giornaliero
+    mark-to-market. Ogni vendita e' tassata (imposta sul plusvalenze con
+    recupero delle minusvalenze, art. 68 c.9 TUIR, finestra 4 anni:
+    ItalianTaxLedger) e il netto finisce nel core.
+    """
     pstrat = PAC_STRATEGIES[strategy_key]
 
-    # --- dati: alle strategie mensili servono solo i Close (niente indicatori
-    #     pesanti: run molto più veloci del percorso daily) ---
     if preloaded_data is not None:
         market_data = {t: df for t, df in preloaded_data.items()
                        if df is not None and not df.empty}
@@ -453,7 +482,6 @@ def _run_pac_backtest_monthly(
     universe = [t for t in dict.fromkeys(tickers)
                 if t in market_data and t not in (benchmark, core_ticker)]
 
-    # --- primo giorno utile di ogni mese = giorno di ribilanciamento ---
     first_of_month: List[int] = []
     seen_months = set()
     for p in sim_pos:
@@ -465,9 +493,6 @@ def _run_pac_backtest_monthly(
     mi_dates = full_index[first_of_month]
     mi_of_date = {d: mi for mi, d in enumerate(mi_dates)}
 
-    # --- storico allineato al calendario del benchmark + frame mensili ---
-    # (stessa convenzione del motore daily: si decide e si esegue alla
-    #  chiusura del giorno di ribilanciamento, senza lookahead)
     px_cols, ret_cols, dd_cols, above_cols = {}, {}, {}, {}
     for t in [benchmark] + universe + ([core_ticker] if core_available else []):
         s = market_data[t]['Close'].reindex(full_index).ffill()
@@ -477,15 +502,15 @@ def _run_pac_backtest_monthly(
                       - 1.0).iloc[first_of_month]
         above_cols[t] = (s > s.rolling(210, min_periods=210).mean()) \
             .iloc[first_of_month]
-    px = pd.DataFrame(px_cols)                     # close ffilled, storico pieno
-    sim_px = px.iloc[sim_pos].values               # righe = giorni di simulazione
+    px = pd.DataFrame(px_cols)
+    sim_px = px.iloc[sim_pos].values
     col_idx = {t: j for j, t in enumerate(px.columns)}
     core_col = col_idx.get(core_ticker)
-    m_ret = pd.DataFrame(ret_cols)[universe]       # righe = mesi, solo satelliti
+    m_ret = pd.DataFrame(ret_cols)[universe]
     m_dd = pd.DataFrame(dd_cols)[universe]
     m_above = pd.DataFrame(above_cols)[universe]
     m_close = pd.DataFrame({t: px_cols[t].iloc[first_of_month] for t in px_cols})
-    m_rank = m_ret.rank(ascending=False, axis=1)   # rank momentum 12m per mese
+    m_rank = m_ret.rank(ascending=False, axis=1)
 
     cash = 0.0
     deposited = 0.0
@@ -502,6 +527,8 @@ def _run_pac_backtest_monthly(
     n_buys = n_sells = 0
     months_total = months_no_signal = months_core = months_skipped = 0
     month_key = ''
+    tax_ledger = ItalianTaxLedger(tax_rate=tax_rate)
+    taxes_paid = 0.0
 
     def _close_at(i: int, t: str) -> Optional[float]:
         v = sim_px[i, col_idx[t]]
@@ -540,30 +567,35 @@ def _run_pac_backtest_monthly(
                       i: int, date: pd.Timestamp):
         """Vende il satellite e reinveste SUBITO i proventi nel core: è il
         fix strutturale del motore daily (lì i proventi restavano in cassa
-        a rendimento zero)."""
-        nonlocal cash, commissions_paid, n_sells
+        a rendimento zero). La vendita paga l'imposta sul plusvalenze NETTO
+        delle minusvalenze accumulate (recupero art. 68 c.9 TUIR, 4 anni):
+        nel core finisce il netto dopo le tasse."""
+        nonlocal cash, commissions_paid, n_sells, taxes_paid
         qty = pos['qty']
         pnl = (price - pos['entry_price']) * qty
         proceeds = qty * price - commission
-        cash += proceeds
+        tax, _cu = tax_ledger.register_sale(pnl - commission, date)
+        taxes_paid += tax
+        proceeds_net = proceeds - tax
+        cash += proceeds_net
         commissions_paid += commission
         n_sells += 1
         trades.append({
             'data': date.date(), 'tipo': 'VENDITA', 'ticker': t,
             'qty': round(qty, 4), 'prezzo': round(price, 4),
             'motivo': reason, 'P&L (€)': round(pnl, 2),
+            'tasse (€)': round(tax, 2),
             'cash dopo (€)': round(cash, 2),
         })
         del positions[t]
-        if proceeds > commission:
-            _buy_core(proceeds, i, date, f'provento vendita {t} → core')
+        if proceeds_net > commission:
+            _buy_core(proceeds_net, i, date, f'provento vendita {t} → core')
 
     for i in range(n_sim):
         date = sim_dates[i]
         mi = mi_of_date.get(date)
 
         if mi is not None:
-            # --- inizio mese: versamento + ribilanciamento ---
             months_total += 1
             cash += monthly_amount
             deposited += monthly_amount
@@ -572,7 +604,6 @@ def _run_pac_backtest_monthly(
             carry = 0.0
             month_key = f"{date.year}-{date.month:02d}"
 
-            # benchmark interno: PAC puro sul core, ogni mese (come il daily)
             if core_available:
                 cprice = _close_at(i, core_ticker)
                 if cprice and monthly_amount > commission:
@@ -595,7 +626,6 @@ def _run_pac_backtest_monthly(
             ctx.nav = None
             ctx.target = None
 
-            # --- 1. USCITE (solo mensili: mai stop intramonth) ---
             if positions:
                 for t in sorted(list(positions.keys())):
                     reason = pstrat.exit_position(positions[t], ctx)
@@ -606,7 +636,6 @@ def _run_pac_backtest_monthly(
                         _sell_to_core(t, positions[t], price, reason, i, date)
                 ctx.positions = dict(positions)
 
-            # --- 2. decisione sul budget del mese ---
             g = pstrat.growth
             ctx.nav = _nav_now(i)
             ctx.target = (monthly_amount * (((1.0 + g) ** months_total - 1.0) / g)
@@ -664,7 +693,7 @@ def _run_pac_backtest_monthly(
                     'mese': month_key, 'azione': action, 'ticker': '',
                     'score': '', 'motivo': decision[1], 'qty': '', 'prezzo': '',
                 })
-            else:  # 'core'
+            else:
                 months_no_signal += 1
                 ok = core_fallback and _buy_core(budget, i, date, decision[1])
                 if ok:
@@ -677,7 +706,6 @@ def _run_pac_backtest_monthly(
                     'score': '', 'motivo': decision[1], 'qty': '', 'prezzo': '',
                 })
 
-        # --- NAV giornaliero mark-to-market ---
         nav_values[i] = _nav_now(i)
         if core_available and core_col is not None:
             cp = _close_at(i, core_ticker)
@@ -693,7 +721,9 @@ def _run_pac_backtest_monthly(
         pstrat.name, strategy_key, nav_values, core_nav_values, monthly, trades,
         deposit_values, sim_dates, deposited, commissions_paid,
         n_buys, n_sells, months_total, months_no_signal, months_core,
-        months_skipped, core_available, universe, engine='pac-native')
+        months_skipped, core_available, universe, engine='pac-native',
+        taxes_paid=taxes_paid,
+        tax_credit_residual=tax_ledger.available_credit(sim_dates[-1]))
 
 
 def run_pac_backtest(
@@ -706,16 +736,29 @@ def run_pac_backtest(
     core_fallback: bool = True,
     preloaded_data: Optional[Dict[str, pd.DataFrame]] = None,
     progress_callback: Optional[Callable[[float], None]] = None,
+    tax_rate: float = 26.0,
 ) -> Optional[Dict]:
     """Backtest PAC per UNA strategia (PAC-native mensile o replay della
-    strategia di trading giornaliera). Ritorna None se i dati non bastano."""
+    strategia di trading giornaliera). Ritorna None se i dati non bastano.
+
+    Percorso daily (replay delle strategie di trading): a inizio mese entra
+    il versamento (pending); la scansione dei candidati e' GIORNALIERA
+    finche' il versamento non viene investito (max 1 satellite al mese);
+    le uscite sulle posizioni satellite sono giornaliere (stop ATR,
+    exit_signal della strategia) e i proventi restano in cassa. I mesi
+    senza segnale destinano il versamento in sospeso al core (core_fallback,
+    come il consiglio live) oppure lo lasciano in cassa. Benchmark interno:
+    PAC puro sul core, ogni mese, senza vendite. Ogni vendita e' tassata
+    (imposta sul plusvalenze NETTO delle minusvalenze accumulate, art. 68
+    c.9 TUIR: ItalianTaxLedger). Il NAV e' mark-to-market a ogni seduta.
+    """
     if strategy_key in PAC_STRATEGIES:
-        # strategia PAC-native: motore mensile dedicato
         return _run_pac_backtest_monthly(
             strategy_key, tickers, monthly_amount=monthly_amount,
             start_date=start_date, commission=commission,
             core_ticker=core_ticker, core_fallback=core_fallback,
-            preloaded_data=preloaded_data, progress_callback=progress_callback)
+            preloaded_data=preloaded_data, progress_callback=progress_callback,
+            tax_rate=tax_rate)
     strat = get_strategy(strategy_key)
     cfg = dict(CONFIG)
     cfg.update(strat.defaults)
@@ -764,27 +807,35 @@ def run_pac_backtest(
     deposited = 0.0
     commissions_paid = 0.0
     positions: Dict[str, Dict] = {}
-    core_qty = 0.0            # core comprato nei mesi senza segnale (fallback)
-    core_pure_qty = 0.0       # benchmark: PAC puro sul core, ogni mese
+    core_qty = 0.0
+    core_pure_qty = 0.0
     trades: List[Dict] = []
     monthly: List[Dict] = []
     nav_values = np.full(n_sim, np.nan)
     core_nav_values = np.full(n_sim, np.nan)
     deposit_values = np.zeros(n_sim)
     current_month = None
-    pending = 0.0             # versamento del mese non ancora investito
-    pending_month = None      # chiave 'YYYY-MM' del versamento in sospeso
+    pending = 0.0
+    pending_month = None
     n_buys = n_sells = 0
     months_total = months_no_signal = months_core = 0
+    tax_ledger = ItalianTaxLedger(tax_rate=tax_rate)
+    taxes_paid = 0.0
 
     def _sell(t: str, pos: Dict, qty: float, price: float, reason: str,
               date: pd.Timestamp):
-        nonlocal cash, n_sells, commissions_paid
+        """Vendita (anche parziale) di un satellite nel replay daily: i
+        proventi NETTI restano in cassa. La vendita paga l'imposta sul
+        plusvalenze NETTO delle minusvalenze accumulate (recupero art. 68
+        c.9 TUIR, 4 anni)."""
+        nonlocal cash, n_sells, commissions_paid, taxes_paid
         qty = min(qty, pos['qty'])
         if qty <= 1e-9:
             return
         pnl = (price - pos['entry_price']) * qty
-        cash += qty * price - commission
+        tax, _cu = tax_ledger.register_sale(pnl - commission, date)
+        taxes_paid += tax
+        cash += qty * price - commission - tax
         commissions_paid += commission
         n_sells += 1
         pos['qty'] -= qty
@@ -792,6 +843,7 @@ def run_pac_backtest(
             'data': date.date(), 'tipo': 'VENDITA', 'ticker': t,
             'qty': round(qty, 4), 'prezzo': round(price, 4),
             'motivo': reason, 'P&L (€)': round(pnl, 2),
+            'tasse (€)': round(tax, 2),
             'cash dopo (€)': round(cash, 2),
         })
         if pos['qty'] <= 1e-9:
@@ -826,8 +878,6 @@ def run_pac_backtest(
         m = (current_date.year, current_date.month)
         new_month = (m != current_month)
         if new_month:
-            # il mese precedente non ha dato segnali: il versamento in sospeso
-            # va al core (come il consiglio live) oppure resta in cassa
             if pending > 0:
                 months_no_signal += 1
                 action = {
@@ -848,13 +898,11 @@ def run_pac_backtest(
             deposit_values[i] += monthly_amount
             pending = monthly_amount
             pending_month = f"{current_date.year}-{current_date.month:02d}"
-            # benchmark: PAC puro sul core, ogni mese, senza vendite
             if core_available:
                 cprice = panel.close_ff(core_ticker, i)
                 if cprice and cprice > 0 and monthly_amount > commission:
                     core_pure_qty += (monthly_amount - commission) / cprice
 
-        # --- USCITE giornaliere sulle posizioni satellite ---
         for t in sorted(list(positions.keys())):
             pos = positions[t]
             row = panel.row(t, i)
@@ -878,9 +926,6 @@ def run_pac_backtest(
                 except Exception:
                     pass
 
-        # --- ACQUISTO: scansione giornaliera finché il versamento del mese
-        #     non viene investito (max 1 satellite al mese, come il consiglio
-        #     live "chiedi all'algoritmo quando hai i soldi") ---
         if pending > 0 and strat.can_buy(ctx):
             candidates = []
             for t in universe:
@@ -936,7 +981,6 @@ def run_pac_backtest(
                         'qty': round(qty, 4), 'prezzo': round(price, 2),
                     })
 
-        # --- NAV mark-to-market ---
         cprice = panel.close_ff(core_ticker, i) if core_available else None
         nav = cash + (core_qty * cprice if cprice else 0.0)
         for t, pos in positions.items():
@@ -951,7 +995,6 @@ def run_pac_backtest(
             except Exception:
                 pass
 
-    # ultimo mese: risolvi il versamento ancora in sospeso
     if pending > 0:
         months_no_signal += 1
         action = {
@@ -970,7 +1013,9 @@ def run_pac_backtest(
         strat.name, strategy_key, nav_values, core_nav_values, monthly, trades,
         deposit_values, sim_dates, deposited, commissions_paid,
         n_buys, n_sells, months_total, months_no_signal, months_core,
-        None, core_available, universe)
+        None, core_available, universe,
+        taxes_paid=taxes_paid,
+        tax_credit_residual=tax_ledger.available_credit(sim_dates[-1]))
 
 
 def run_pac_comparison(
@@ -983,6 +1028,7 @@ def run_pac_comparison(
     core_fallback: bool = True,
     preloaded_data: Optional[Dict[str, pd.DataFrame]] = None,
     progress_callback: Optional[Callable[[float], None]] = None,
+    tax_rate: float = 26.0,
 ) -> Dict[str, Optional[Dict]]:
     """Confronto PAC su più strategie (native e/o di trading giornaliero),
     stessi dati e stessi versamenti.
@@ -999,7 +1045,8 @@ def run_pac_comparison(
         results[key] = run_pac_backtest(
             key, tickers, monthly_amount=monthly_amount, start_date=start_date,
             commission=commission, core_ticker=core_ticker,
-            core_fallback=core_fallback, preloaded_data=preloaded_data)
+            core_fallback=core_fallback, preloaded_data=preloaded_data,
+            tax_rate=tax_rate)
         if progress_callback is not None:
             try:
                 progress_callback((idx + 1) / len(keys))

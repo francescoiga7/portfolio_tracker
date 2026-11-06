@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+"""Router principale dell'app: definisce la navigazione e include le pagine UI."""
 import streamlit as st
 
 from etf_metrics.ui.portfolio_tracker import render_portfolio_tracker_ui
@@ -9,8 +10,10 @@ from etf_metrics.ui.trading import render_pac_ui, render_algo_daily_ui
 
 
 def init_session_state():
-    """Inizializza lo stato della sessione per l'applicazione."""
-    # Le chiavi di sessione vive sono gestite direttamente dai moduli UI.
+    """Inizializza lo stato della sessione per l'applicazione.
+
+    Le chiavi di sessione vive sono gestite direttamente dai moduli UI.
+    """
     pass
 
 

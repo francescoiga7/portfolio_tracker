@@ -1,6 +1,14 @@
 # -*- coding: utf-8 -*-
 """Logica di tracciamento portafogli: persistenza (PortfolioStore) + calcolo P&L.
 
+Contenuto:
+  - calcolo delle posizioni aperte e del realizzato dalle transazioni
+    (`_calculate_open_positions`, `calculate_cash_from_transactions`,
+    `_calculate_realized_pnl`, `calculate_tax_position`);
+  - API pubblica di calcolo (`calculate_portfolio_pnl`) e aggregati per ISIN;
+  - risoluzione ISIN/ticker e recupero prezzi/nomi da Yahoo e dal DB locale;
+  - persistenza pura dei portafogli su JSON (`PortfolioStore`).
+
 Nessuna dipendenza da Streamlit: la UI istanzia PortfolioStore e lo conserva in
 session_state, mentre il calcolo è puro e testabile.
 """
@@ -14,20 +22,23 @@ import pandas as pd
 
 from etf_metrics.clients.yahoo_client import (resolve_isin_details,
                                               get_series, get_ticker_display_name)
+from etf_metrics.core.tax_engine import ItalianTaxLedger
 from etf_metrics.shared.config import PORTFOLIO_FILE
 
 logger = logging.getLogger(__name__)
 
 
-# Calcolo posizioni aperte / realizzato ---
 def _calculate_open_positions(transactions: List[Dict[str, Any]]) -> DefaultDict[str, Dict[str, Any]]:
-    """Calcola le quantità e i costi totali. Tiene traccia della data del primo acquisto attivo."""
+    """Calcola le quantità e i costi totali, con la data del primo acquisto
+    attivo. Le transazioni che non sono buy/sell (versamenti/prelievi) sono
+    movimenti di liquidità, non posizioni: vengono ignorate.
+    """
     positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0, 'satellite': False, 'first_buy_date': None})
     sorted_trans = sorted(transactions, key=lambda x: x['date'])
 
     for t in sorted_trans:
         if t.get('type') not in ('buy', 'sell'):
-            continue  # versamenti/prelievi: movimenti di liquidità, non posizioni
+            continue
         isin = t['isin']
         qty = float(t['quantity'])
         price = float(t['price'])
@@ -99,14 +110,18 @@ def calculate_cash_from_transactions(transactions: List[Dict[str, Any]],
 
 
 def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: float, tax_rate: float) -> List[Dict[str, Any]]:
-    """Calcola plusvalenze e minusvalenze per ogni operazione di vendita."""
+    """Calcola plusvalenze e minusvalenze per ogni operazione di vendita
+    (ritenuta per singola vendita, senza recupero: per la vista con recupero
+    delle minusvalenze vedi `calculate_tax_position`). Versamenti e prelievi
+    vengono ignorati.
+    """
     sales_gains = []
     positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0})
     sorted_trans = sorted(transactions, key=lambda x: x['date'])
 
     for t in sorted_trans:
         if t.get('type') not in ('buy', 'sell'):
-            continue  # versamenti/prelievi: movimenti di liquidità, non posizioni
+            continue
         isin = t['isin']
         qty = float(t['quantity'])
         price = float(t['price'])
@@ -143,7 +158,6 @@ def _calculate_realized_pnl(transactions: List[Dict[str, Any]], commission: floa
     return sales_gains
 
 
-# Chiave ISIN: 2 lettere (paese) + 9 alfanumerici (NSIN) + 1 cifra di controllo
 _ISIN_RE = re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
 
 
@@ -152,6 +166,8 @@ def resolve_transaction_ticker(key: str) -> Optional[str]:
 
     Gli ISIN vengono risolti via ricerca Yahoo (o mappa manuale); le chiavi che
     non sono ISIN validi vengono usate direttamente come ticker (es. "VWCE.MI").
+    Formato ISIN riconosciuto da `_ISIN_RE`: 2 lettere (paese) + 9
+    alfanumerici (NSIN) + 1 cifra di controllo.
     """
     key = (key or "").strip().upper()
     if not key:
@@ -181,8 +197,10 @@ def _fetch_current_prices_and_series(keys: List[str]) -> Dict[str, Dict[str, Any
     chiave di posizione.
 
     Le chiavi possono essere ISIN (risolti in ticker via ricerca Yahoo) oppure
-    ticker Yahoo diretti (es. "VWCE.MI"), usati così come sono.
-    Nome: dalla ricerca ISIN, poi dal DB locale, infine da get_info.
+    ticker Yahoo diretti (es. "VWCE.MI"), usati così come sono. Il nome è
+    risolto con una cascata a costo crescente: ricerca ISIN (fatta comunque
+    per il ticker), poi DB locale (nessuna rete), infine get_info su Yahoo
+    solo se i primi due non hanno dato nulla.
     """
     data = {}
     fetch_period = "1y"
@@ -198,7 +216,6 @@ def _fetch_current_prices_and_series(keys: List[str]) -> Dict[str, Dict[str, Any
             if n:
                 names[key] = n
 
-    # Nomi dal DB locale (nessuna rete) per le chiavi ancora senza nome
     if tickers:
         try:
             from etf_metrics.core.data_manager import MarketDataManager
@@ -221,7 +238,6 @@ def _fetch_current_prices_and_series(keys: List[str]) -> Dict[str, Dict[str, Any
             series_df = None
             logger.warning(f"Dati incompleti per {key} ({t})")
 
-        # Ultimo tentativo nome: get_info (solo se ricerca e DB non hanno dato nulla)
         if key not in names:
             n = get_ticker_display_name(t)
             if n:
@@ -238,8 +254,11 @@ def _fetch_current_prices_and_series(keys: List[str]) -> Dict[str, Dict[str, Any
 
 def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, Any]],
                                     market_data: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Arricchisce le posizioni aperte con P&L non realizzato e flag satellite.
+    """Arricchisce le posizioni aperte con P&L non realizzato e flag satellite.
+
+    Il flag satellite è solo un'ETICHETTA di segmentazione: le posizioni
+    satellite sono gestite dall'Algoritmo Live (pagina ⚡ Trading), che decide
+    ingressi, uscite e stop. Nessuna logica di decisione qui.
     """
     enriched = []
     for isin, data in open_positions.items():
@@ -252,9 +271,6 @@ def _enrich_open_positions_with_pnl(open_positions: DefaultDict[str, Dict[str, A
             unrealized = curr_val - invested
             unrealized_pct = (unrealized / invested * 100) if invested > 0 else 0
 
-            # Il flag satellite e' un'ETICHETTA di segmentazione: le posizioni
-            # satellite sono gestite dall'Algoritmo Live (pagina 💲), che decide
-            # ingressi, uscite e stop. Nessuna logica di decisione qui.
             enriched.append({
                 'isin': isin,
                 'ticker': mkt.get('ticker', ''),
@@ -286,12 +302,84 @@ def _aggregate_portfolio_summary(open_positions_details, realized_pnl_net, trans
     }
 
 
-# API di calcolo pubblica (pura) ---
-def calculate_portfolio_pnl(transactions: List[Dict[str, Any]], commission: float = 1.0, tax_rate: float = 26.0) -> Dict[str, Any]:
+def calculate_tax_position(transactions: List[Dict[str, Any]], commission: float = 1.0,
+                           tax_rate: float = 26.0,
+                           carryforward_years: Optional[int] = 4) -> Dict[str, Any]:
+    """Posizione fiscale italiana del portafoglio (cassetto delle minusvalenze).
+
+    Confronta due viste delle imposte sulle vendite realizzate:
+      - 'tax_withheld': ritenuta per singola vendita, come applicata alla
+        fonte (il modello storico del tracker: nessuna compensazione);
+      - 'tax_due': imposta dovuta con il recupero delle minusvalenze
+        (art. 68 c.9 TUIR: le perdite compensano le plusvalenze dello stesso
+        periodo e dei 4 successivi) — quella che emerge dal modello Redditi.
+
+    La differenza (tax_recoverable) è l'eccesso di ritenuta recuperabile in
+    dichiarazione; 'residual_credit' sono le minusvalenze ancora usabili,
+    con le rispettive scadenze. Le vendite senza basa acquisti tracciata
+    (storico importato a metà) vengono saltate, come in _calculate_realized_pnl.
+    La base imponibile di ogni vendita è il plusvalore al netto della
+    commissione di vendita (deducibile fiscalmente).
+    """
+    ledger = ItalianTaxLedger(tax_rate=tax_rate,
+                              carryforward_years=carryforward_years)
+    withheld = 0.0
+    tax_due = 0.0
+    gains = losses = 0.0
+    last_date = None
+    positions = defaultdict(lambda: {'quantity': 0, 'total_cost': 0})
+
+    for t in sorted(transactions or [], key=lambda x: x.get('date', '')):
+        if t.get('type') not in ('buy', 'sell'):
+            continue
+        isin, qty, price = t['isin'], float(t['quantity']), float(t['price'])
+        if t.get('type') == 'buy':
+            positions[isin]['quantity'] += qty
+            positions[isin]['total_cost'] += qty * price
+            continue
+
+        if positions[isin]['quantity'] < qty:
+            continue
+
+        avg_buy_price = positions[isin]['total_cost'] / positions[isin]['quantity']
+        capital_gain = qty * (price - avg_buy_price)
+        gain = capital_gain - commission
+
+        withheld += max(0.0, gain) * (tax_rate / 100.0)
+        tax, _credit_used = ledger.register_sale(gain, t.get('date'))
+        tax_due += tax
+        if gain > 0:
+            gains += gain
+        else:
+            losses += -gain
+
+        positions[isin]['quantity'] -= qty
+        positions[isin]['total_cost'] -= qty * avg_buy_price
+        if last_date is None or str(t.get('date', '')) > str(last_date):
+            last_date = t.get('date')
+
+    return {
+        'tax_rate': tax_rate,
+        'carryforward_years': carryforward_years,
+        'gains_realized': gains,
+        'losses_realized': losses,
+        'tax_withheld': withheld,
+        'tax_due': tax_due,
+        'tax_recoverable': max(0.0, withheld - tax_due),
+        'residual_credit': ledger.available_credit(last_date),
+        'credit_by_expiry': ledger.credit_by_expiry(last_date),
+        'losses_expired': ledger.total_losses_expired,
+    }
+
+
+def calculate_portfolio_pnl(transactions: List[Dict[str, Any]], commission: float = 1.0,
+                            tax_rate: float = 26.0,
+                            carryforward_years: Optional[int] = 4) -> Dict[str, Any]:
     """Calcola P&L realizzato/non realizzato, posizioni aperte e aggregati."""
     if not transactions:
         return {'open_positions': [], 'aggregated_positions': [], 'capital_gains': [], 'net_invested': 0,
-                'current_value': 0, 'realized_pnl': 0, 'total_pnl': 0, 'total_pnl_pct': 0}
+                'current_value': 0, 'realized_pnl': 0, 'total_pnl': 0, 'total_pnl_pct': 0,
+                'tax_position': {}}
 
     capital_gains_realized = _calculate_realized_pnl(transactions, commission, tax_rate)
     realized_pnl_net = sum(cg['net_pnl'] for cg in capital_gains_realized)
@@ -301,9 +389,11 @@ def calculate_portfolio_pnl(transactions: List[Dict[str, Any]], commission: floa
     open_positions_details = _enrich_open_positions_with_pnl(open_positions_base, market_data)
     summary = _aggregate_portfolio_summary(open_positions_details, realized_pnl_net, transactions)
     aggregated_positions = calculate_aggregated_positions(transactions, open_positions_details)
+    tax_position = calculate_tax_position(transactions, commission, tax_rate,
+                                          carryforward_years=carryforward_years)
 
     return {**summary, 'open_positions': open_positions_details, 'aggregated_positions': aggregated_positions,
-            'capital_gains': capital_gains_realized}
+            'capital_gains': capital_gains_realized, 'tax_position': tax_position}
 
 
 def calculate_aggregated_positions(transactions, open_positions_details):
@@ -332,7 +422,6 @@ def calculate_aggregated_positions(transactions, open_positions_details):
     return aggregated
 
 
-# Persistenza portafogli (pura, senza Streamlit) ---
 class PortfolioStore:
     """Gestione in-memory dei portafogli con persistenza su file JSON."""
 

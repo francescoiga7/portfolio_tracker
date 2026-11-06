@@ -47,8 +47,18 @@ def _render_db_update_report(report: dict) -> None:
 
 
 def render_portfolio_tracker_ui():
+    """Pagina 💼 Portfolio Tracker: posizioni reali, P&L e cassetto fiscale.
+
+    All'avvio persiste su file eventuali modifiche in memoria (safety net
+    al primo avvio). Il bottone 📥 Carica aggiorna il DB locale con i
+    ticker del portafoglio: ticker nuovo -> storico completo (max), ticker
+    esistente -> delta dall'ultima data nel DB (anche se già aggiornato
+    oggi). La registrazione di un acquisto fa lo stesso per il ticker
+    dell'operazione (se risolvibile). Versamenti/prelievi: feature rimossa,
+    mapping mantenuto solo per visualizzare gli storici già registrati nei
+    portafogli esistenti.
+    """
     store = get_portfolio_store()
-    # Persiste eventuali modifiche in memoria al file (safety net al primo avvio).
     store.save_to_json(PORTFOLIO_FILE)
 
     st.title("💼 Portfolio Tracker")
@@ -77,9 +87,6 @@ def render_portfolio_tracker_ui():
                     index=saved_portfolios.index(current_portfolio_name) if current_portfolio_name in saved_portfolios else 0,
                 )
                 if st.button("Carica"):
-                    # Aggiorna il DB locale con i ticker del portafoglio:
-                    # ticker nuovo -> storico completo (max), ticker esistente
-                    # -> delta dall'ultima data nel DB (anche se già aggiornato oggi).
                     transactions = store.get(selected).get("transactions", [])
                     tickers = transaction_tickers(transactions)
                     if tickers:
@@ -122,9 +129,6 @@ def render_portfolio_tracker_ui():
                     store.add_transaction(current_portfolio_name, trans_data)
                     store.save_to_json(PORTFOLIO_FILE)
                     if trans_type == "Acquisto":
-                        # Inserisce il ticker nel DB locale con storico completo
-                        # (max) se assente, altrimenti lo aggiorna in delta
-                        # (anche se già aggiornato oggi).
                         ticker = resolve_transaction_ticker(isin)
                         if ticker:
                             with st.spinner(f"Aggiornamento DB: {ticker}..."):
@@ -140,6 +144,11 @@ def render_portfolio_tracker_ui():
         with st.sidebar.expander("⚙️ Impostazioni Fiscali"):
             commission = st.number_input("Commissione per operazione (€)", min_value=0.0, value=1.0, step=0.5, format="%.2f")
             tax_rate = st.slider("Imposta plusvalenze (%)", 0, 100, 26, 1)
+            carryforward_years = st.slider(
+                "Anni recupero minusvalenze", 0, 8, 4,
+                help="Art. 68 c.9 TUIR: le minusvalenze compensano le plusvalenze dei "
+                     "4 periodi d'imposta successivi (default fiscale italiano). "
+                     "0 = compensazione solo nello stesso anno.")
 
     if not current_portfolio_name:
         st.info("👈 Crea o carica un portafoglio dalla barra laterale per iniziare.")
@@ -155,7 +164,8 @@ def render_portfolio_tracker_ui():
         return
 
     with st.spinner("Aggiornamento P&L in corso..."):
-        pnl_results = calculate_portfolio_pnl(portfolio_data["transactions"], commission, tax_rate)
+        pnl_results = calculate_portfolio_pnl(portfolio_data["transactions"], commission, tax_rate,
+                                              carryforward_years=carryforward_years)
 
     tab1, tab2, tab3 = st.tabs(["🧭 Riepilogo", "📊 Posizioni Dettagliate", "🗃️ Cassetto Fiscale e Storico"])
 
@@ -222,6 +232,47 @@ def render_portfolio_tracker_ui():
 
     with tab3:
         st.header("Dettaglio Fiscale e Transazioni")
+        st.subheader("🧾 Recupero Minusvalenze (art. 68 TUIR)")
+        tp = pnl_results.get('tax_position') or {}
+        if tp and (tp.get('gains_realized') or tp.get('losses_realized')):
+            cf = tp.get('carryforward_years')
+            cf_txt = f"{cf} anni" if cf is not None else "illimitato"
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Tasse (ritenuta per vendita)", f"€{tp['tax_withheld']:,.2f}",
+                        help="Somma dell'imposta calcolata su ogni singola vendita in utile, "
+                             "senza compensazione (modello alla fonte).")
+            col2.metric("Imposta dovuta (con recupero)", f"€{tp['tax_due']:,.2f}",
+                        help=f"Imposta con compensazione delle minusvalenze (recupero {cf_txt}): "
+                             "quella che emerge dal modello Redditi.")
+            col3.metric("Recuperabile in dichiarazione", f"€{tp['tax_recoverable']:,.2f}",
+                        delta=f"-{tp['tax_recoverable'] / max(tp['tax_withheld'], 0.01) * 100:.0f}% di tasse",
+                        delta_color="inverse",
+                        help="Eccesso di ritenuta rispetto all'imposta dovuta: si recupera "
+                             "in dichiarazione dei redditi.")
+            residual = tp.get('residual_credit') or 0.0
+            if residual > 0.005:
+                st.success(f"📉 Minusvalenze residue recuperabili: **€{residual:,.2f}** — "
+                           "compensano le prossime plusvalenze (tasse ridotte).")
+                exp_rows = [{
+                    "Scadenza": (f"31/12/{b['expires']}" if b.get('expires') is not None else "mai (illimitato)"),
+                    "Importo (€)": round(b['amount'], 2)
+                } for b in (tp.get('credit_by_expiry') or [])]
+                if exp_rows:
+                    st.dataframe(pd.DataFrame(exp_rows), width="stretch", hide_index=True)
+                st.caption("Le minusvalenze si usano entro il 4° periodo d'imposta successivo: "
+                           "una perdita del 2022 copre fino al 2026, poi decade.")
+            else:
+                st.info("Nessuna minusvalenza residua: le prossime plusvalenze pagano "
+                        f"l'imposta piena ({tp.get('tax_rate', 26)}%).")
+            if tp.get('losses_expired', 0) > 0.005:
+                st.warning(f"⏳ Minusvalenze perse per scadenza: **€{tp['losses_expired']:,.2f}** "
+                           "(non più compensabili).")
+            st.caption("Semplificazioni: aliquota unica per strumento (la quota al 12,5% dei "
+                       "titoli di Stato non è distinta), commissioni di vendita dedotte dalla "
+                       "base imponibile, vendite senza storico d'acquisto escluse.")
+        else:
+            st.info("Nessuna vendita registrata: niente da compensare.")
+
         st.subheader("Dettaglio Plus/Minusvalenze Realizzate")
         if pnl_results['capital_gains']:
             df_gains = pd.DataFrame(pnl_results['capital_gains'])
@@ -240,8 +291,6 @@ def render_portfolio_tracker_ui():
 
         with st.expander("📜 Cronologia Completa delle Transazioni"):
             df_trans = pd.DataFrame(portfolio_data["transactions"])
-            # Versamenti/prelievi: feature rimossa, mapping mantenuto per
-            # visualizzare gli storici già registrati nei portafogli esistenti.
             type_map = {"buy": "Acquisto", "sell": "Vendita",
                         "deposit": "Versamento", "withdrawal": "Prelievo"}
             df_trans["type"] = df_trans["type"].map(lambda v: type_map.get(v, v))

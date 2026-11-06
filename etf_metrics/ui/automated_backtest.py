@@ -7,16 +7,32 @@ Tre modalità:
 - 🧭 Confronto Strategie PAC: replay storico del consiglio mensile dei
   Satelliti PAC (rendering in `ui/pac_backtest.py`, come in core)
 
-I risultati delle simulazioni vengono conservati in `st.session_state`: cambiare
-parametro, tab o selezione NON rilancia la simulazione — i risultati spariscono
-solo quando una nuova esecuzione li sostituisce (con avviso se i parametri
-correnti differiscono da quelli dell'ultima run).
+I risultati delle simulazioni vengono conservati in `st.session_state`
+(`backtest_result` / `backtest_signature` per la simulazione singola,
+`comparison_result` / `comparison_signature` per il confronto): cambiare
+parametro, tab o selezione NON rilancia la simulazione — i risultati
+spariscono solo quando una nuova esecuzione li sostituisce (con avviso se
+i parametri correnti differiscono da quelli dell'ultima run).
+
+Struttura della pagina: caricamento dati in cache di sessione → KPI e
+metriche di supporto → persistenza delle run → report della singola
+strategia (incluso l'impatto dei costi e la fiscalità: tasse pagate e
+minusvalenze residue recuperabili, art. 68 TUIR) → confronto strategie
+(classifica, robustezza multi-start, log operazioni) → pagina principale
+con le due modalità.
+
+Nota: la modalità PAC ha sidebar propria (importo, strategie, core,
+commissioni): i parametri comuni del backtest (capitale, universo,
+posizioni max) non si applicano al PAC mensile. La logica PAC vive in
+`ui/pac_backtest.py` (specchia `core/pac_backtest.py`). L'import di
+matplotlib (HAS_MATPLOTLIB) serve a Styler.background_gradient per le
+tabelle colorate: e' solo un controllo che la dipendenza esista.
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-try:  # richiesto da Styler.background_gradient (tabelle colorate)
+try:
     import matplotlib  # noqa: F401
     HAS_MATPLOTLIB = True
 except Exception:
@@ -58,12 +74,9 @@ QQQ
 TQQQ
 SQQQ"""
 
-# Chiavi di session_state per i risultati delle due modalità.
-_BT_RUN_KEY = 'trading_backtest_run'    # simulazione singola
-_CMP_RUN_KEY = 'trading_comparison_run'  # confronto strategie
+_BT_RUN_KEY = 'trading_backtest_run'
+_CMP_RUN_KEY = 'trading_comparison_run'
 
-
-# 1. CARICAMENTO DATI (cache di sessione) ---
 
 @st.cache_data(show_spinner=False)
 def _load_real_data(tickers_tuple):
@@ -157,8 +170,6 @@ def _load_real_data_for_backtest(tickers, universe_mode, start_date_backtest):
     return market_data, str(start_date_backtest), tickers
 
 
-# 2. KPI E METRICHE DI SUPPORTO ---
-
 def _bench_curve_and_label(bh_curves):
     """(serie_benchmark, etichetta): S&P500 se presente, proxy universo altrimenti."""
     if not bh_curves:
@@ -223,7 +234,8 @@ def _strategy_equity_curve(r, initial_capital):
 
 def _multi_start_cagr_table(results, selected, sim_tickers, market_data, params,
                             initial_capital, start_date, progress=None,
-                            allow_fractional=True):
+                            allow_fractional=True, tax_rate=26.0,
+                            loss_carryforward_years=4):
     """Ri-esegue le strategie da 3 date di inizio aggiuntive (+1/+2/+3 anni)
     e ritorna {nome strategia: {data inizio: CAGR %}}.
 
@@ -254,7 +266,9 @@ def _multi_start_cagr_table(results, selected, sim_tickers, market_data, params,
         res_j = run_strategy_comparison(
             sim_tickers, strategies=selected, start_date=str(s.date()),
             initial_capital=initial_capital, preloaded_data=market_data,
-            allow_fractional=allow_fractional, strategy_params=params)
+            allow_fractional=allow_fractional, strategy_params=params,
+            tax_rate=tax_rate,
+            loss_carryforward_years=loss_carryforward_years)
         years_j = max((end_ts - s).days / 365.25, 1e-9)
         for key, r in res_j.items():
             out.setdefault(r["name"], {})[str(s.date())] = \
@@ -266,8 +280,6 @@ def _multi_start_cagr_table(results, selected, sim_tickers, market_data, params,
                 pass
     return out
 
-
-# 3. PERSISTENZA DELLE RUN (st.session_state) ---
 
 def _run_signature(**fields):
     """Fingerprint dei parametri di una run: se un parametro cambia, i risultati
@@ -293,8 +305,6 @@ def _load_run(key, sig):
                    "attuali.")
     return run
 
-
-# 4. REPORT DELLA SINGOLA STRATEGIA ---
 
 def _style_backtest_rows(row):
     act = row['Action']
@@ -329,8 +339,8 @@ def _render_kpi_header(final_cap, initial_capital, strategy_name, metrics, diag=
                     delta_color="inverse")
 
 
-def _render_cost_impact(df_trades, initial_capital, metrics):
-    """Focus 'poche operazioni': quanto pesano le commissioni."""
+def _render_cost_impact(df_trades, initial_capital, metrics, diag=None):
+    """Focus 'poche operazioni': quanto pesano commissioni E tasse."""
     comm_total = float(df_trades['Commission'].sum()) if ('Commission' in df_trades.columns) else 0.0
     n_buys = int((df_trades['Action'] == 'BUY').sum())
     n_sells = int((df_trades['Action'] == 'SELL').sum())
@@ -346,6 +356,19 @@ def _render_cost_impact(df_trades, initial_capital, metrics):
               help="Meno acquisti all'anno = meno commissioni. Obiettivo: < 15/anno.")
     c4.metric("⚖️ Commissioni / Capitale", f"{(comm_total / max(initial_capital, 1)) * 100:.1f}%",
               help="Impatto delle commissioni sul capitale iniziale.")
+
+    diag = diag or {}
+    taxes = diag.get('taxes_paid')
+    if taxes is not None:
+        t1, t2, t3 = st.columns(3)
+        t1.metric("🧾 Tasse Pagate", f"€{taxes:,.0f}",
+                  help="Imposta sulle plusvalenze realizzate, al netto del recupero "
+                       "delle minusvalenze (art. 68 c.9 TUIR).")
+        t2.metric("📉 Minusvalenze Residue", f"€{diag.get('tax_credit_residual', 0):,.0f}",
+                  help="Perdite ancora compensabili con le prossime plusvalenze "
+                       "(entro il 4° periodo d'imposta successivo).")
+        t3.metric("⏳ Minusvalenze Scadute", f"€{diag.get('losses_expired', 0):,.0f}",
+                  help="Perdete non compensate entro la finestra fiscale: perse.")
 
 
 def _render_risk_stats(metrics):
@@ -417,7 +440,7 @@ def _render_strategy_report(df_trades, final_cap, initial_capital, strategy_name
                                                    nav_daily=nav_daily)
 
     _render_kpi_header(final_cap, initial_capital, strategy_name, metrics, diag)
-    _render_cost_impact(df_trades, initial_capital, metrics)
+    _render_cost_impact(df_trades, initial_capital, metrics, diag)
     st.divider()
     _render_risk_stats(metrics)
     _render_trade_stats(df_trades)
@@ -425,8 +448,6 @@ def _render_strategy_report(df_trades, final_cap, initial_capital, strategy_name
     st.divider()
     _render_trade_log(df_trades)
 
-
-# 5. CONFRONTO STRATEGIE (classifica, robustezza, log operazioni) ---
 
 def _comparison_summary_rows(results, bh_curves, initial_capital, commission):
     """Righe della classifica: strategie + benchmark B&H, con metriche di
@@ -439,6 +460,7 @@ def _comparison_summary_rows(results, bh_curves, initial_capital, commission):
         n_sells = int((df_trades['Action'] == 'SELL').sum()) if not df_trades.empty else 0
         comm = float(df_trades['Commission'].sum()) if ('Commission' in df_trades.columns) else 0.0
         top5_pct, max_pos_pct, max_adv = _fragility_kpis(df_trades, r.get("diag"))
+        taxes = (r.get("diag") or {}).get("taxes_paid", np.nan)
         rows.append({
             "Strategia": r["name"],
             "Finale (€)": final,
@@ -449,6 +471,7 @@ def _comparison_summary_rows(results, bh_curves, initial_capital, commission):
             "Profit Factor": m['Profit_Factor'] if m else np.nan,
             "Vendite": n_sells,
             "Commissioni (€)": comm,
+            "Tasse (€)": taxes,
             "Top-5 % utili": top5_pct,
             "Peso max pos. %": max_pos_pct,
             "Max ADV %": max_adv,
@@ -464,7 +487,7 @@ def _comparison_summary_rows(results, bh_curves, initial_capital, commission):
             "Rend. Tot. %": ((bench_final - initial_capital) / initial_capital) * 100,
             "CAGR %": b_cagr, "Max DD %": b_mdd, "Sharpe": b_sharpe,
             "Profit Factor": np.nan, "Vendite": 1,
-            "Commissioni (€)": float(commission),
+            "Commissioni (€)": float(commission), "Tasse (€)": np.nan,
             "Top-5 % utili": np.nan, "Peso max pos. %": np.nan, "Max ADV %": np.nan,
         })
     return rows
@@ -483,6 +506,7 @@ def _render_comparison_leaderboard(rows):
             "Finale (€)": "€{:,.0f}", "Rend. Tot. %": "{:+.1f}",
             "CAGR %": "{:.1f}", "Max DD %": "{:.1f}", "Sharpe": "{:.2f}",
             "Profit Factor": "{:.2f}", "Vendite": "{:.0f}", "Commissioni (€)": "€{:,.0f}",
+            "Tasse (€)": "€{:,.0f}",
             "Top-5 % utili": "{:.0f}", "Peso max pos. %": "{:.0f}", "Max ADV %": "{:.0f}",
         }),
         width="stretch",
@@ -594,8 +618,6 @@ def _render_comparison_results(run):
         st.dataframe(df_sel, width="stretch")
 
 
-# 6. PAGINA PRINCIPALE ---
-
 def render_automated_backtest_ui():
     st.title("💹 Backtest")
 
@@ -620,10 +642,6 @@ def render_automated_backtest_ui():
     st.sidebar.divider()
 
     if mode == "🧭 Confronto Strategie PAC":
-        # Modalità con sidebar propria (importo PAC, strategie, core, commissioni):
-        # i parametri comuni del backtest (capitale, universo, posizioni max)
-        # non si applicano al PAC mensile. La logica PAC vive in
-        # ui/pac_backtest.py (specchia core/pac_backtest.py).
         render_pac_backtest_ui()
         return
 
@@ -651,6 +669,23 @@ def render_automated_backtest_ui():
         "Commissione per operazione (€)", 0.0, 20.0, 1.0, 0.5,
         help="Commissione del tuo broker per ogni acquisto/vendita (Trade Republic: 1€)."
     )
+    tax_rate = st.sidebar.number_input(
+        "🧾 Imposta plusvalenze (%)", 0.0, 50.0, 26.0, 0.5,
+        help="Aliquota italiana sulle plusvalenze realizzate (26%). Le vendite in "
+             "utile pagano l'imposta DOPO aver compensato le minusvalenze accumulate."
+    )
+    carryforward_mode = st.sidebar.selectbox(
+        "📉 Recupero minusvalenze",
+        ["4 anni (fiscalità italiana)", "Illimitato", "Solo stesso anno"],
+        help="Art. 68 c.9 TUIR: le minusvalenze compensano le plusvalenze dei 4 periodi "
+             "d'imposta successivi, poi decadono. 'Illimitato' replica il comportamento "
+             "storico del motore (per confronto)."
+    )
+    loss_carryforward_years = {
+        "4 anni (fiscalità italiana)": 4,
+        "Illimitato": None,
+        "Solo stesso anno": 0,
+    }[carryforward_mode]
     max_positions = st.sidebar.slider(
         "Posizioni massime", 1, 5, 3,
         help="Pochi titoli = concentrazione sui migliori segnali e meno commissioni."
@@ -666,18 +701,19 @@ def render_automated_backtest_ui():
     if mode == "🤖 Automated Backtest":
         _render_single_backtest_mode(initial_capital, start_date_backtest, tickers,
                                      universe_mode, commission,
-                                     max_positions, allow_fractional)
+                                     max_positions, allow_fractional,
+                                     tax_rate, loss_carryforward_years)
     else:
         _render_comparison_mode(initial_capital, start_date_backtest, tickers,
                                 universe_mode, commission,
-                                max_positions, allow_fractional)
+                                max_positions, allow_fractional,
+                                tax_rate, loss_carryforward_years)
 
-
-# Modalità 1: Automated Backtest (strategia singola) ---
 
 def _render_single_backtest_mode(initial_capital, start_date_backtest, tickers,
                                  universe_mode, commission,
-                                 max_positions, allow_fractional):
+                                 max_positions, allow_fractional,
+                                 tax_rate=26.0, loss_carryforward_years=4):
     st.subheader("🤖 Simulazione Portafoglio Algoritmico")
     st.caption("Validazione Strategia: Rischio, Rendimento, Drawdown e impatto commissioni.")
 
@@ -696,7 +732,8 @@ def _render_single_backtest_mode(initial_capital, start_date_backtest, tickers,
         strategy=strategy_key, start=start_date_backtest, capital=initial_capital,
         commission=commission, positions=max_positions,
         tickers=tuple(tickers),
-        fractional=allow_fractional)
+        fractional=allow_fractional,
+        tax_rate=tax_rate, carryforward=loss_carryforward_years)
 
     if st.button("▶️ Avvia Simulazione Completa"):
         params = _build_strategy_params(commission, max_positions)
@@ -715,6 +752,8 @@ def _render_single_backtest_mode(initial_capital, start_date_backtest, tickers,
                 progress_callback=progress_bar.progress,
                 strategy=strategy_key,
                 strategy_params=params,
+                tax_rate=tax_rate,
+                loss_carryforward_years=loss_carryforward_years,
             )
             progress_bar.empty()
 
@@ -739,11 +778,10 @@ def _render_single_backtest_mode(initial_capital, start_date_backtest, tickers,
                                 nav_daily=run['nav'], diag=run['diag'])
 
 
-# Modalità 2: Confronto Strategie ---
-
 def _render_comparison_mode(initial_capital, start_date_backtest, tickers,
                             universe_mode, commission,
-                            max_positions, allow_fractional):
+                            max_positions, allow_fractional,
+                            tax_rate=26.0, loss_carryforward_years=4):
     st.subheader("🏁 Confronto Strategie sullo stesso mercato")
     st.caption(
         "Tutte le strategie girano sugli stessi dati, con le stesse commissioni: "
@@ -806,7 +844,8 @@ def _render_comparison_mode(initial_capital, start_date_backtest, tickers,
         strategies=tuple(selected), start=start_date_backtest, capital=initial_capital,
         commission=commission, positions=max_positions,
         tickers=tuple(tickers),
-        multi_start=robustness_multi, fractional=allow_fractional)
+        multi_start=robustness_multi, fractional=allow_fractional,
+        tax_rate=tax_rate, carryforward=loss_carryforward_years)
 
     if st.button("▶️ Avvia Confronto"):
         if not selected:
@@ -828,6 +867,8 @@ def _render_comparison_mode(initial_capital, start_date_backtest, tickers,
                     allow_fractional=allow_fractional,
                     progress_callback=progress_bar.progress,
                     strategy_params=params,
+                    tax_rate=tax_rate,
+                    loss_carryforward_years=loss_carryforward_years,
                 )
                 progress_bar.empty()
 
@@ -841,7 +882,9 @@ def _render_comparison_mode(initial_capital, start_date_backtest, tickers,
                     multi_start_tbl = _multi_start_cagr_table(
                         results, selected, sim_tickers, market_data, params,
                         initial_capital, start_date_backtest,
-                        progress=prog_ms.progress, allow_fractional=allow_fractional)
+                        progress=prog_ms.progress, allow_fractional=allow_fractional,
+                        tax_rate=tax_rate,
+                        loss_carryforward_years=loss_carryforward_years)
                     prog_ms.empty()
 
                 _store_run(_CMP_RUN_KEY, sig, {

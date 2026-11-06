@@ -275,6 +275,8 @@ def _render_db_content_tab(dm, stats):
 
 
 def render_data_hub_ui():
+    """Pagina 📥 Gestione Dati: panoramica del DB e tre aree — download
+    incrementale, universo ETF e ispezione del DB."""
     st.title("📥 Gestione Dati di Mercato")
     st.caption("Scarica una sola volta lo storico dei ticker nel DB locale; ai giri "
                "successivi aggiorna solo il delta. Nessun'altra pagina scarica dati.")
@@ -292,7 +294,6 @@ def render_data_hub_ui():
     dm = MarketDataManager()
     stats = dm.get_db_stats()
 
-    # --- Panoramica del DB ---
     c1, c2, c3 = st.columns(3)
     c1.metric("Ticker nel DB", f"{stats['tickers']:,}")
     c2.metric("Righe di prezzi", f"{stats['rows']:,}")
@@ -309,7 +310,6 @@ def render_data_hub_ui():
             "(`prices/month=YYYY-MM/`)"
         )
 
-    # --- Tre aree: download, universo ETF, ispezione del DB ---
     tab_download, tab_universe, tab_db = st.tabs(
         ["⬇️ Scarica / Aggiorna", "🌍 Universo ETF", "🗄️ Contenuto del DB"])
 

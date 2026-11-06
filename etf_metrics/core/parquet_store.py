@@ -9,9 +9,14 @@ pruning row-group + multithread), upsert che riscrive SOLO le partizioni
 dei mesi coinvolti (lo storico non viene mai toccato), layout standard
 leggibile da pandas/polars/DuckDB/Spark.
 
-Concorrenza: scritture serializzate da un lock di processo (RLock); le
+Concorrenza: scritture serializzate da un lock di processo; le
 letture non richiedono lock perche' i file pubblicati sono immutabili
-(scrittura su file temporaneo nascosto + rename atomico).
+(scrittura su file temporaneo nascosto, prefisso _TMP_PREFIX, escluso
+dalle scansioni del dataset + rename atomico). Il lock e' un RLock:
+le operazioni composite (prezzi + metadati) richiamano metodi interni
+che ri-acquisiscono il lock. Costante _FILTER_CHUNK: massimo numero di
+ticker per espressione di filtro (parita' con _SQL_CHUNK_SIZE del
+data manager).
 """
 import logging
 import os
@@ -27,12 +32,8 @@ import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
 
-# Lock di processo per le scritture (l'app e' multithread con Streamlit).
-# RLock: le operazioni composite (prezzi + metadati) richiamano metodi
-# interni che ri-acquisiscono il lock.
 _WRITE_LOCK = threading.RLock()
 
-# Schema canonico della tabella prezzi (colonne e ordine fissi)
 PRICES_COLUMNS = ['date', 'ticker', 'open', 'high', 'low', 'close', 'volume']
 
 _PRICES_SCHEMA = pa.schema([
@@ -45,27 +46,24 @@ _PRICES_SCHEMA = pa.schema([
     ('volume', pa.float64()),
 ])
 
-# Metadati piccoli (una riga per ticker): un file Parquet ciascuno
 _META_ARROW_SCHEMAS = {
     'updates': pa.schema([
         ('ticker', pa.string()),
         ('name', pa.string()),
-        ('last_updated', pa.string()),   # data ISO 'YYYY-MM-DD'
-        ('first_added', pa.string()),    # prima volta che il ticker è entrato nel DB
+        ('last_updated', pa.string()),
+        ('first_added', pa.string()),
     ]),
     'failed_tickers': pa.schema([
         ('ticker', pa.string()),
         ('reason', pa.string()),
-        ('first_failed', pa.string()),   # data ISO 'YYYY-MM-DD'
-        ('last_failed', pa.string()),    # data ISO 'YYYY-MM-DD'
+        ('first_failed', pa.string()),
+        ('last_failed', pa.string()),
         ('attempts', pa.int64()),
     ]),
 }
 
-# Prefisso dei file temporanei: esclusi dalle scansioni dataset
 _TMP_PREFIX = '.tmp'
 
-# Massimo numero di ticker per espressione di filtro (parità con _SQL_CHUNK_SIZE)
 _FILTER_CHUNK = 500
 
 
@@ -83,8 +81,6 @@ class ParquetStore:
         os.makedirs(self.prices_dir, exist_ok=True)
         os.makedirs(self.meta_dir, exist_ok=True)
         self._cleanup_tmp_files()
-
-# Primitive di basso livello ---
 
     @property
     def write_lock(self) -> threading.RLock:
@@ -166,8 +162,6 @@ class ParquetStore:
         if os.path.exists(final_path):
             os.remove(final_path)
         os.replace(tmp_path, final_path)
-
-# Prezzi: upsert incrementale / replace / letture ---
 
     def merge_prices(self, new_df: pd.DataFrame) -> int:
         """Upsert incrementale: aggiorna/aggiunge le righe di `new_df` riscrivendo
@@ -275,7 +269,11 @@ class ParquetStore:
         return pd.concat(frames, ignore_index=True)
 
     def last_dates(self, tickers: List[str]) -> Dict[str, pd.Timestamp]:
-        """{ticker: ultima data disponibile} per i ticker richiesti."""
+        """{ticker: ultima data disponibile} per i ticker richiesti.
+
+        La scansione raggruppa i ticker per mese dell'ultima barra: la riga
+        cercata sta nella partizione di quel mese (pruning delle altre).
+        """
         if not tickers:
             return {}
         tbl = self._scan_ticker_dates(list(tickers))
@@ -312,8 +310,6 @@ class ParquetStore:
         stats = self.ticker_row_stats(tickers)
         if not stats:
             return {}
-        # Raggruppa i ticker per mese dell'ultima barra: la riga cercata sta
-        # nella partizione di quel mese.
         by_month: Dict[str, List[str]] = {}
         for t, (_cnt, _first, last) in stats.items():
             by_month.setdefault(last.strftime('%Y-%m'), []).append(t)
@@ -395,8 +391,6 @@ class ParquetStore:
             'partitions': len(self.month_partitions()),
         }
 
-# Metadati: registro aggiornamenti (updates) ---
-
     def _meta_path(self, name: str) -> str:
         return os.path.join(self.meta_dir, f'{name}.parquet')
 
@@ -461,8 +455,6 @@ class ParquetStore:
                 old_name = df['name'].reindex(tickers)
                 coalesced = new_name.where(new_name.notna() & (new_name != ''),
                                            old_name)
-                # first_added: tieni il vecchio; i nuovi ticker prendono quello
-                # esplicito (migrazione) o la data di oggi; i legacy restano NULL
                 old_first = df['first_added'].reindex(tickers)
                 is_known = pd.Index(tickers).isin(df.index)
                 first_added = old_first.copy()
@@ -478,8 +470,6 @@ class ParquetStore:
             block.index.name = 'ticker'
             out = pd.concat([keep, block]) if len(keep) else block
             self._write_meta('updates', out.reset_index())
-
-# Metadati: cache negativa (failed_tickers) ---
 
     def read_failed(self) -> pd.DataFrame:
         """Tabella failed_tickers: {ticker, reason, first_failed, last_failed, attempts}."""

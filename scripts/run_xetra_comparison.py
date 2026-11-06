@@ -24,15 +24,16 @@ from etf_metrics.core.automated_backtest import (
 from etf_metrics.core.metrics import compute_backtest_performance_metrics
 from etf_metrics.core.parquet_store import ParquetStore
 
-UNIVERSE_MIN_ROWS = 200     # come il selettore "Tutto il DB" della UI
+UNIVERSE_MIN_ROWS = 200
 INITIAL_CAPITAL = 10000.0
 
 
 def load_universe():
-    """Ticker del DB con storico sufficiente (>= UNIVERSE_MIN_ROWS righe)."""
+    """Ticker del DB con storico sufficiente (>= UNIVERSE_MIN_ROWS righe),
+    come il selettore "Tutto il DB" della UI: il minimo garantisce gli
+    indicatori del motore (SMA200 ecc.)."""
     store = ParquetStore('market_data_parquet')
     stats = store.ticker_row_stats()
-    # solo ticker con abbastanza storico per gli indicatori del motore
     tickers = sorted(t for t, (r, _f, _l) in stats.items() if r >= UNIVERSE_MIN_ROWS)
     return tickers
 

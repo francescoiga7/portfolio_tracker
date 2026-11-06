@@ -22,8 +22,6 @@ except Exception:
 from etf_metrics.core.metrics import compute_metrics_from_series, compute_sharpe_ratio
 
 
-# Selettore universo ticker (watchlist manuale o tutto il DB locale) ---
-
 UNIVERSE_WATCHLIST = "✍️ Ticker che inserisco"
 UNIVERSE_WHOLE_DB = "📦 Tutto il DB locale"
 
@@ -111,7 +109,6 @@ def render_universe_selector(
             "Watchlist (un ticker per riga)", default_watchlist, height=textarea_height)
         tickers = [t.strip().upper() for t in txt.split('\n') if t.strip()]
 
-        # Validazione live contro il DB
         if tickers and db_tickers:
             db_set = set(db_tickers)
             in_db = [t for t in tickers if t in db_set]

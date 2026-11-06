@@ -10,6 +10,9 @@ compra il miglior ETF dell'universo secondo la strategia. Due famiglie:
 - **strategie di trading giornaliero** (in coda, per confronto): replay
   con stop ATR, filtro di regime e proventi delle vendite in cassa.
 
+_ALL_PAC_KEYS ordina le strategie selezionabili nel confronto: prima le
+PAC-native, poi quelle di trading giornaliero (mantenute per confronto).
+
 Il motore è `core/pac_backtest.py` (`run_pac_comparison`): questa UI ne è il
 rendering, e specchia la struttura core/automated_backtest.py + pac_backtest.py.
 
@@ -31,8 +34,6 @@ from etf_metrics.core.automated_backtest import (
 from etf_metrics.core.pac_backtest import (
     run_pac_comparison, etf_universe_in_db, PAC_STRATEGIES, PAC_STRATEGY_ORDER)
 
-# strategie selezionabili nel confronto: prima le PAC-native, poi quelle di
-# trading giornaliero (mantenute per confronto)
 _ALL_PAC_KEYS = PAC_STRATEGY_ORDER + [k for k in STRATEGY_ORDER if k in STRATEGIES]
 
 
@@ -41,14 +42,17 @@ def _pac_strategy_name(k: str) -> str:
 
 
 def _render_pac_comparison_results(run):
-    """Rendering dell'ultima run del Confronto Strategie PAC (cache di sessione)."""
+    """Rendering dell'ultima run del Confronto Strategie PAC (cache di sessione).
+
+    Sezioni: grafico NAV, tabella riassuntiva, rendimenti per anno civile,
+    log mensile e operazioni per strategia.
+    """
     results = {k: r for k, r in run['results'].items() if r is not None}
     if not results:
         st.warning("Nessuna strategia ha prodotto risultati (dati insufficienti).")
         return
     amount = run['amount']
 
-    # --- Grafico NAV ---
     if HAS_MATPLOTLIB:
         import matplotlib.pyplot as plt
         fig, ax = plt.subplots(figsize=(10, 5))
@@ -68,7 +72,6 @@ def _render_pac_comparison_results(run):
         st.pyplot(fig)
         plt.close(fig)
 
-    # --- Tabella riassuntiva ---
     rows = []
     for r in results.values():
         rows.append({
@@ -83,6 +86,7 @@ def _render_pac_comparison_results(run):
             "Acquisti": r['n_buys'],
             "Mesi senza segnale": f"{r['months_no_signal']}/{r['months_total']}",
             "Commissioni (€)": r['commissions'],
+            "Tasse (€)": r.get('taxes'),
         })
     ref = next(iter(results.values()))
     if ref['core_final'] is not None:
@@ -98,6 +102,7 @@ def _render_pac_comparison_results(run):
             "Sharpe": ref.get('core_sharpe'),
             "Acquisti": ref['months_total'],
             "Mesi senza segnale": "—", "Commissioni (€)": ref['months_total'] * run['commission'],
+            "Tasse (€)": None,
         })
     df_sum = pd.DataFrame(rows).set_index("Strategia").sort_values("Finale (€)", ascending=False)
     st.markdown("### 🏆 Classifica")
@@ -106,7 +111,7 @@ def _render_pac_comparison_results(run):
             "Finale (€)": "€{:,.0f}", "Versato (€)": "€{:,.0f}", "Utile (€)": "€{:,.0f}",
             "Multiplo": "{:.3f}", "IRR anno": "{:+.1%}", "Max DD %": "{:.1f}",
             "Sharpe": "{:.2f}",
-            "Acquisti": "{:.0f}", "Commissioni (€)": "€{:,.0f}",
+            "Acquisti": "{:.0f}", "Commissioni (€)": "€{:,.0f}", "Tasse (€)": "€{:,.0f}",
         }, na_rep="—"),
         width="stretch")
     st.caption(
@@ -129,7 +134,6 @@ def _render_pac_comparison_results(run):
                         f"(€{core_row['Finale (€)']:,.0f} vs €{best['Finale (€)']:,.0f} "
                         f"della migliore strategia): i satelliti non hanno pagato.")
 
-    # --- Rendimenti per anno civile ---
     years = sorted({int(y) for r in results.values() for y in r['yearly'].index})
     if years:
         tbl = {}
@@ -140,7 +144,6 @@ def _render_pac_comparison_results(run):
         with st.expander("📅 Rendimenti per anno civile (time-weighted)"):
             st.dataframe(ydf.style.format("{:+.1%}", na_rep="—"), width="stretch")
 
-    # --- Log mensile e operazioni per strategia ---
     sel = st.selectbox(
         "📋 Log di quale strategia?",
         list(results.keys()), format_func=lambda k: results[k]['strategy'])
@@ -180,8 +183,12 @@ def render_pac_backtest_ui():
             "**Pochi trade:** una decisione al mese = ~12 trade l'anno: il risultato è "
             "dominato da pochi mesi fortunati (path-dependence). Guarda più anni e più "
             "strategie, non il singolo numero finale.\n\n"
-            "**Costi e tasse:** commissioni per operazione sì, **nessuna tassa** sulle "
-            "plusvalenze (26% in Italia al realizzo, non simulata)."
+            "**Costi e tasse:** commissioni per operazione e **imposta sul plusvalenze "
+            "con recupero delle minusvalenze** (fiscalità italiana, art. 68 c.9 TUIR: "
+            "le perdite realizzate compensano le plusvalenze entro 4 anni, poi "
+            "decadono). Le vendite dei satelliti pagano l'imposta al realizzo; il "
+            "core buy & hold non vende mai e non paga nulla (il differimento fiscale "
+            "è parte del vantaggio del PAC)."
         )
 
     universe = etf_universe_in_db()
@@ -214,9 +221,14 @@ def render_pac_backtest_ui():
              "invece che in cassa.")
     commission = st.sidebar.number_input(
         "💸 Commissione per operazione (€)", 0.0, 20.0, 1.0, 0.5)
+    tax_rate = st.sidebar.number_input(
+        "🧾 Imposta plusvalenze (%)", 0.0, 50.0, 26.0, 0.5,
+        help="Aliquota italiana sulle plusvalenze realizzate vendendo i satelliti "
+             "(26%), con recupero delle minusvalenze (art. 68 TUIR, 4 anni).")
 
     sig = (tuple(selected), str(start_date), float(monthly_amount), core_ticker,
-           bool(core_fallback), float(commission), tuple(universe))
+           bool(core_fallback), float(commission), tuple(universe),
+           float(tax_rate))
 
     if st.button("▶️ Avvia Confronto PAC", type="primary", disabled=not selected):
         with st.spinner("Caricamento dati dal DB..."):
@@ -234,6 +246,7 @@ def render_pac_backtest_ui():
                     commission=float(commission),
                     core_ticker=core_ticker, core_fallback=core_fallback,
                     preloaded_data=md,
+                    tax_rate=float(tax_rate),
                     progress_callback=lambda f: bar.progress(
                         f, text=f"Simulazione strategie... {int(f * 100)}%"))
             finally:
@@ -242,6 +255,7 @@ def render_pac_backtest_ui():
                 'sig': sig, 'results': results,
                 'amount': float(monthly_amount),
                 'commission': float(commission),
+                'tax_rate': float(tax_rate),
             }
 
     run = st.session_state.get('pac_cmp_run')
